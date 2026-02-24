@@ -8,6 +8,7 @@ members = [
     "ket-score",
     "ket-cdom",
     "ket-cli",
+    "ket-py",
 ]
 resolver = "2"
 
