@@ -88,12 +88,12 @@ enum Commands {
         path: String,
     },
 
-    /// Query CDOM symbols
+    /// Query CDOM symbols (searches SQL index across all scanned files)
     Cdom {
-        /// Symbol query
+        /// Symbol query (substring match)
         query: String,
-        /// File to search in
-        path: String,
+        /// File to search in (optional — omit to search all indexed files)
+        path: Option<String>,
     },
 
     /// Show mutation log
@@ -106,10 +106,10 @@ enum Commands {
     /// Run MCP server on stdio
     Mcp,
 
-    /// Show agent scores
+    /// Show agent scores or profile
     Scores {
-        /// Node CID to show scores for
-        node_cid: String,
+        #[command(subcommand)]
+        action: ScoreAction,
     },
 
     /// Rebuild SQL index from CAS (source of truth)
@@ -118,6 +118,39 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Show .ket status overview
+    Status,
+
+    /// Dolt version history
+    History {
+        /// Number of commits to show
+        #[arg(short, long, default_value = "10")]
+        n: usize,
+    },
+
+    /// Dolt diff (working set vs HEAD, or between commits)
+    Diff {
+        /// From commit
+        from: Option<String>,
+        /// To commit
+        to: Option<String>,
+    },
+
+    /// Soft link management
+    Link {
+        #[command(subcommand)]
+        action: LinkAction,
+    },
+
+    /// Context file tracking for drift detection
+    Track {
+        #[command(subcommand)]
+        action: TrackAction,
+    },
+
+    /// Check all tracked files for drift
+    Drift,
 }
 
 #[derive(Subcommand)]
@@ -194,6 +227,93 @@ enum AgentAction {
     Ls,
 }
 
+#[derive(Subcommand)]
+enum ScoreAction {
+    /// Score a node
+    Add {
+        /// Node CID
+        node_cid: String,
+        /// Agent that produced it
+        #[arg(long)]
+        agent: String,
+        /// Who is scoring
+        #[arg(long, default_value = "human")]
+        scorer: String,
+        /// Dimension (correctness, efficiency, style, completeness)
+        #[arg(long)]
+        dim: String,
+        /// Score value 0.0-1.0
+        #[arg(long)]
+        value: f64,
+        /// Evidence
+        #[arg(long, default_value = "")]
+        evidence: String,
+    },
+    /// Show scores for a node
+    Show {
+        /// Node CID
+        node_cid: String,
+    },
+    /// Show an agent's scoring profile
+    Profile {
+        /// Agent name
+        agent: String,
+    },
+    /// Find the best agent for a dimension
+    Route {
+        /// Dimension
+        dim: String,
+    },
+    /// Auto-score by running build/test/lint
+    Auto {
+        /// Node CID to score
+        node_cid: String,
+        /// Agent that produced it
+        #[arg(long)]
+        agent: String,
+        /// Working directory for build/test
+        #[arg(long, default_value = ".")]
+        dir: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinkAction {
+    /// Create a soft link between two nodes
+    Create {
+        /// Source node CID
+        from: String,
+        /// Target node CID
+        to: String,
+        /// Relation type (e.g., "supersedes", "related_to", "contradicts")
+        relation: String,
+    },
+    /// List soft links for a node
+    Ls {
+        /// Node CID
+        cid: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrackAction {
+    /// Track a file for drift detection
+    Add {
+        /// File path to track
+        path: String,
+        /// Agent tracking this file
+        #[arg(long, default_value = "human")]
+        agent: String,
+    },
+    /// List tracked files
+    Ls,
+    /// Remove a file from tracking
+    Rm {
+        /// File path to untrack
+        path: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
@@ -220,11 +340,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             prompt,
         } => cmd_run(&base, &task_id, &agent, prompt.as_deref(), cli.json),
         Commands::Scan { path } => cmd_scan(&base, &path, cli.json),
-        Commands::Cdom { query, path } => cmd_cdom(&query, &path, cli.json),
+        Commands::Cdom { query, path } => cmd_cdom(&base, &query, path.as_deref(), cli.json),
         Commands::Log { n } => cmd_log(&base, n, cli.json),
         Commands::Mcp => cmd_mcp(&base),
-        Commands::Scores { node_cid } => cmd_scores(&base, &node_cid, cli.json),
+        Commands::Scores { action } => cmd_scores(&base, action, cli.json),
         Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
+        Commands::Status => cmd_status(&base, cli.json),
+        Commands::History { n } => cmd_history(&base, n, cli.json),
+        Commands::Diff { from, to } => cmd_diff(&base, from.as_deref(), to.as_deref(), cli.json),
+        Commands::Link { action } => cmd_link(&base, action, cli.json),
+        Commands::Track { action } => cmd_track(&base, action, cli.json),
+        Commands::Drift => cmd_drift(&base, cli.json),
     }
 }
 
@@ -709,44 +835,90 @@ fn cmd_run(
 
 fn cmd_scan(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
+    let db = open_db(base).ok(); // SQL index is optional
     let file_path = std::path::Path::new(path);
 
+    let mut snapshots = Vec::new();
     if file_path.is_dir() {
-        // Scan directory recursively
-        let mut snapshots = Vec::new();
         scan_dir(file_path, &cas, &mut snapshots)?;
+    } else {
+        match ket_cdom::scan_file(file_path, &cas) {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(e) => return Err(format!("{}: {e}", file_path.display()).into()),
+        }
+    }
 
-        if json {
-            println!("{}", serde_json::to_string_pretty(&snapshots)?);
-        } else {
-            for snap in &snapshots {
-                println!(
-                    "{} ({}) — {} symbols",
-                    snap.file_path,
-                    snap.language,
-                    snap.symbols.len()
-                );
-                for sym in &snap.symbols {
-                    println!("  {}:{}-{} {} {}", sym.kind, sym.start_line, sym.end_line, sym.name, sym.parent.as_deref().unwrap_or(""));
-                }
+    // Write to SQL symbol index if available
+    let mut indexed = 0usize;
+    if let Some(ref db) = db {
+        for snap in &snapshots {
+            let sym_tuples: Vec<(String, String, usize, usize, Option<String>)> = snap
+                .symbols
+                .iter()
+                .map(|s| {
+                    (
+                        s.name.clone(),
+                        s.kind.to_string(),
+                        s.start_line,
+                        s.end_line,
+                        s.parent.clone(),
+                    )
+                })
+                .collect();
+            if db
+                .sync_cdom_symbols(&snap.file_path, snap.content_cid.as_str(), &sym_tuples)
+                .is_ok()
+            {
+                indexed += 1;
             }
         }
-    } else {
-        let snapshot = ket_cdom::scan_file(file_path, &cas)?;
+        // Also track each file for drift detection
+        for snap in &snapshots {
+            let _ = db.track_context_file(&snap.file_path, snap.content_cid.as_str(), "cdom");
+        }
+    }
 
-        if json {
-            println!("{}", serde_json::to_string_pretty(&snapshot)?);
-        } else {
+    let total_symbols: usize = snapshots.iter().map(|s| s.symbols.len()).sum();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": snapshots.len(),
+                "symbols": total_symbols,
+                "indexed": indexed,
+                "snapshots": snapshots,
+            }))?
+        );
+    } else {
+        for snap in &snapshots {
             println!(
                 "{} ({}) — {} symbols",
-                snapshot.file_path,
-                snapshot.language,
-                snapshot.symbols.len()
+                snap.file_path, snap.language, snap.symbols.len()
             );
-            for sym in &snapshot.symbols {
-                println!("  {}:{}-{} {}", sym.kind, sym.start_line, sym.end_line, sym.name);
+            for sym in &snap.symbols {
+                let parent = sym.parent.as_deref().unwrap_or("");
+                let parent_str = if parent.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", parent)
+                };
+                println!(
+                    "  {}:{}-{} {}{}",
+                    sym.kind, sym.start_line, sym.end_line, sym.name, parent_str
+                );
             }
         }
+        println!(
+            "\n{} files, {} symbols{}",
+            snapshots.len(),
+            total_symbols,
+            if indexed > 0 {
+                format!(", {} indexed in SQL", indexed)
+            } else {
+                String::new()
+            }
+        );
     }
 
     Ok(())
@@ -761,9 +933,12 @@ fn scan_dir(
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            // Skip hidden dirs and common ignores
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+            {
                 continue;
             }
             scan_dir(&path, cas, snapshots)?;
@@ -777,37 +952,64 @@ fn scan_dir(
     Ok(())
 }
 
-fn cmd_cdom(query: &str, path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let symbols = ket_cdom::parse_file(std::path::Path::new(path))?;
-    let matches = ket_cdom::query_symbols(&symbols, query);
+fn cmd_cdom(
+    base: &PathBuf,
+    query: &str,
+    path: Option<&str>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // If a specific file given, parse it directly
+    if let Some(p) = path {
+        let symbols = ket_cdom::parse_file(std::path::Path::new(p))?;
+        let matches = ket_cdom::query_symbols(&symbols, query);
+
+        if json {
+            let results: Vec<serde_json::Value> = matches
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "file": p,
+                        "name": s.name,
+                        "kind": s.kind.to_string(),
+                        "start_line": s.start_line,
+                        "end_line": s.end_line,
+                        "parent": s.parent,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        } else if matches.is_empty() {
+            println!("No symbols matching '{query}' in {p}");
+        } else {
+            for s in matches {
+                println!(
+                    "  {p}:{}:{} {} {}",
+                    s.start_line,
+                    s.kind,
+                    s.name,
+                    s.parent.as_deref().unwrap_or("")
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // No file specified — search the SQL index
+    let db = open_db(base)?;
+    let result = db.search_symbols(query)?;
 
     if json {
-        let results: Vec<serde_json::Value> = matches
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "kind": s.kind.to_string(),
-                    "start_line": s.start_line,
-                    "end_line": s.end_line,
-                    "parent": s.parent,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&results)?);
-    } else if matches.is_empty() {
-        println!("No symbols matching '{query}'");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": query,
+                "results": result.trim(),
+            }))?
+        );
+    } else if result.lines().count() <= 1 {
+        println!("No indexed symbols matching '{query}'. Run `ket scan <dir>` first.");
     } else {
-        for s in matches {
-            println!(
-                "  {}:{}-{} {} {}",
-                s.kind,
-                s.start_line,
-                s.end_line,
-                s.name,
-                s.parent.as_deref().unwrap_or("")
-            );
-        }
+        print!("{result}");
     }
 
     Ok(())
@@ -839,23 +1041,119 @@ fn cmd_mcp(base: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_scores(
     base: &PathBuf,
-    node_cid: &str,
+    action: ScoreAction,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = open_db(base)?;
     let engine = ket_score::ScoringEngine::new(&db);
-    let result = engine.scores_for(&ket_cas::Cid::from(node_cid))?;
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "node_cid": node_cid,
-                "scores": result.trim(),
-            }))?
-        );
-    } else {
-        print!("{result}");
+    match action {
+        ScoreAction::Add {
+            node_cid,
+            agent,
+            scorer,
+            dim,
+            value,
+            evidence,
+        } => {
+            let dimension = ket_score::Dimension::parse(&dim)?;
+            let score = ket_score::Score::new(
+                ket_cas::Cid::from(node_cid.as_str()),
+                &agent,
+                &scorer,
+                dimension,
+                value,
+                &evidence,
+            )?;
+            engine.record(&score)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "recorded": true,
+                        "node_cid": node_cid,
+                        "dimension": dim,
+                        "value": value,
+                    }))?
+                );
+            } else {
+                println!("Recorded {dim}={value} for {}", &node_cid[..12]);
+            }
+        }
+        ScoreAction::Show { node_cid } => {
+            let result = engine.scores_for(&ket_cas::Cid::from(node_cid.as_str()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "node_cid": node_cid,
+                        "scores": result.trim(),
+                    }))?
+                );
+            } else {
+                print!("{result}");
+            }
+        }
+        ScoreAction::Profile { agent } => {
+            let result = engine.agent_profile(&agent)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "agent": agent,
+                        "profile": result.trim(),
+                    }))?
+                );
+            } else {
+                println!("Agent: {agent}");
+                print!("{result}");
+            }
+        }
+        ScoreAction::Route { dim } => {
+            let result = engine.route(&dim)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "dimension": dim,
+                        "best": result.trim(),
+                    }))?
+                );
+            } else {
+                println!("Best agent for {dim}:");
+                print!("{result}");
+            }
+        }
+        ScoreAction::Auto {
+            node_cid,
+            agent,
+            dir,
+        } => {
+            let results = engine.auto_score_code(
+                &ket_cas::Cid::from(node_cid.as_str()),
+                &agent,
+                std::path::Path::new(&dir),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                for r in &results {
+                    let icon = if r.value >= 0.8 {
+                        "PASS"
+                    } else if r.value >= 0.3 {
+                        "WARN"
+                    } else {
+                        "FAIL"
+                    };
+                    println!(
+                        "  [{icon}] {}: {:.1} — {}",
+                        r.dimension.as_str(),
+                        r.value,
+                        r.evidence
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -971,6 +1269,285 @@ fn cmd_repair(
             "repair",
             &format!("synced={synced} skipped={skipped} errors={errors}"),
         )?;
+    }
+
+    Ok(())
+}
+
+fn cmd_status(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas_exists = base.join("cas").exists();
+    let db_exists = base.join("ket.db").join(".dolt").exists();
+
+    let cas_blobs = if cas_exists {
+        let cas = open_cas(base)?;
+        cas.list()?.len()
+    } else {
+        0
+    };
+
+    if db_exists {
+        let db = open_db(base)?;
+        let stats = db.stats()?;
+        let head = db.dolt_head().unwrap_or_else(|_| "unknown".into());
+
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "path": base.display().to_string(),
+                    "cas_blobs": cas_blobs,
+                    "dolt_head": head,
+                    "db": stats,
+                }))?
+            );
+        } else {
+            println!("ket status: {}", base.display());
+            println!("  CAS blobs:     {cas_blobs}");
+            println!("  Dolt HEAD:     {head}");
+            println!("  DAG nodes:     {}", stats.nodes);
+            println!("  DAG edges:     {}", stats.edges);
+            println!("  Tasks:         {}", stats.tasks);
+            println!("  Agents:        {}", stats.agents);
+            println!("  Scores:        {}", stats.scores);
+            println!("  Soft links:    {}", stats.soft_links);
+            println!("  Context files: {}", stats.context_files);
+            println!("  CDOM symbols:  {}", stats.symbols);
+        }
+    } else if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": base.display().to_string(),
+                "cas_blobs": cas_blobs,
+                "dolt": false,
+            }))?
+        );
+    } else {
+        println!("ket status: {}", base.display());
+        println!("  CAS blobs: {cas_blobs}");
+        println!("  Dolt:      not initialized");
+    }
+
+    Ok(())
+}
+
+fn cmd_history(base: &PathBuf, n: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+    let history = db.dolt_log(n)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "history": history.trim(),
+            }))?
+        );
+    } else {
+        print!("{history}");
+    }
+
+    Ok(())
+}
+
+fn cmd_diff(
+    base: &PathBuf,
+    from: Option<&str>,
+    to: Option<&str>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+    let diff = db.dolt_diff(from, to)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "from": from,
+                "to": to,
+                "diff": diff.trim(),
+            }))?
+        );
+    } else if diff.trim().is_empty() {
+        println!("No changes.");
+    } else {
+        print!("{diff}");
+    }
+
+    Ok(())
+}
+
+fn cmd_link(
+    base: &PathBuf,
+    action: LinkAction,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+
+    match action {
+        LinkAction::Create { from, to, relation } => {
+            db.insert_soft_link(&from, &to, &relation)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "from": from,
+                        "to": to,
+                        "relation": relation,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Linked {} --[{}]--> {}",
+                    &from[..12.min(from.len())],
+                    relation,
+                    &to[..12.min(to.len())]
+                );
+            }
+        }
+        LinkAction::Ls { cid } => {
+            let result = db.soft_links_for(&cid)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "cid": cid,
+                        "links": result.trim(),
+                    }))?
+                );
+            } else if result.lines().count() <= 1 {
+                println!("No soft links for {}", &cid[..12.min(cid.len())]);
+            } else {
+                print!("{result}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_track(
+    base: &PathBuf,
+    action: TrackAction,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+
+    match action {
+        TrackAction::Add { path, agent } => {
+            let file_path = std::path::Path::new(&path);
+            let cid = ket_cas::hash_file(file_path)?;
+            db.track_context_file(&path, cid.as_str(), &agent)?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "path": path,
+                        "cid": cid.as_str(),
+                        "agent": agent,
+                    }))?
+                );
+            } else {
+                println!("Tracking {} (CID: {})", path, &cid.as_str()[..12]);
+            }
+        }
+        TrackAction::Ls => {
+            let result = db.list_context_files()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "files": result.trim(),
+                    }))?
+                );
+            } else if result.lines().count() <= 1 {
+                println!("No tracked files. Use `ket track add <file>` to start tracking.");
+            } else {
+                print!("{result}");
+            }
+        }
+        TrackAction::Rm { path } => {
+            db.untrack_context_file(&path)?;
+            if !json {
+                println!("Untracked {path}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+    let tracked = db.list_context_files()?;
+
+    let mut drifted = Vec::new();
+    let mut ok = Vec::new();
+    let mut missing = Vec::new();
+
+    // Parse CSV: path,cid,tracked_at,agent
+    for line in tracked.lines().skip(1) {
+        let parts: Vec<&str> = line.splitn(4, ',').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let path = parts[0];
+        let expected_cid = parts[1];
+
+        let file_path = std::path::Path::new(path);
+        if !file_path.exists() {
+            missing.push(path.to_string());
+            continue;
+        }
+
+        match ket_cas::hash_file(file_path) {
+            Ok(current_cid) => {
+                if current_cid.as_str() != expected_cid {
+                    drifted.push((path.to_string(), expected_cid.to_string(), current_cid.0));
+                } else {
+                    ok.push(path.to_string());
+                }
+            }
+            Err(_) => {
+                missing.push(path.to_string());
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": ok.len(),
+                "drifted": drifted.iter().map(|(p, old, new)| {
+                    serde_json::json!({"path": p, "expected": old, "actual": new})
+                }).collect::<Vec<_>>(),
+                "missing": missing,
+            }))?
+        );
+    } else {
+        if !drifted.is_empty() {
+            println!("DRIFTED ({}):", drifted.len());
+            for (path, expected, actual) in &drifted {
+                println!(
+                    "  {} expected:{} actual:{}",
+                    path,
+                    &expected[..12],
+                    &actual[..12]
+                );
+            }
+        }
+        if !missing.is_empty() {
+            println!("MISSING ({}):", missing.len());
+            for path in &missing {
+                println!("  {path}");
+            }
+        }
+        if drifted.is_empty() && missing.is_empty() {
+            println!("No drift detected. {} files OK.", ok.len());
+        } else {
+            println!("\n{} OK, {} drifted, {} missing", ok.len(), drifted.len(), missing.len());
+        }
     }
 
     Ok(())

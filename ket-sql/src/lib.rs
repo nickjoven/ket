@@ -200,6 +200,26 @@ impl DoltDb {
                 model VARCHAR(100),
                 updated_at VARCHAR(40) NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS context_files (
+                path VARCHAR(512) PRIMARY KEY,
+                cid VARCHAR(64) NOT NULL,
+                tracked_at VARCHAR(40) NOT NULL,
+                agent VARCHAR(100) NOT NULL DEFAULT 'human'
+            )",
+            "CREATE TABLE IF NOT EXISTS cdom_symbols (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                file_path VARCHAR(512) NOT NULL,
+                file_cid VARCHAR(64) NOT NULL,
+                name VARCHAR(200) NOT NULL,
+                kind VARCHAR(20) NOT NULL,
+                start_line INT NOT NULL,
+                end_line INT NOT NULL,
+                parent_symbol VARCHAR(200),
+                scanned_at VARCHAR(40) NOT NULL,
+                INDEX idx_name (name),
+                INDEX idx_kind (kind),
+                INDEX idx_file_cid (file_cid)
+            )",
             "CREATE TABLE IF NOT EXISTS scores (
                 id VARCHAR(36) PRIMARY KEY,
                 node_cid VARCHAR(64) NOT NULL,
@@ -399,12 +419,350 @@ impl DoltDb {
         self.query("SELECT name, cli_command, mcp_capable, model, updated_at FROM agents ORDER BY name")
     }
 
+    // --- Context tracking ---
+
+    /// Track a file's CID for drift detection.
+    pub fn track_context_file(&self, path: &str, cid: &str, agent: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let sql = format!(
+            "REPLACE INTO context_files (path, cid, tracked_at, agent) \
+             VALUES ('{}', '{cid}', '{now}', '{agent}')",
+            escape_sql(path)
+        );
+        self.exec(&sql)
+    }
+
+    /// Get tracked CID for a file.
+    pub fn get_tracked_cid(&self, path: &str) -> Result<Option<String>, SqlError> {
+        let result = self.query(&format!(
+            "SELECT cid FROM context_files WHERE path = '{}'",
+            escape_sql(path)
+        ))?;
+        let cid = result.lines().nth(1).map(|s| s.trim().to_string());
+        Ok(cid.filter(|s| !s.is_empty()))
+    }
+
+    /// List all tracked context files.
+    pub fn list_context_files(&self) -> Result<String, SqlError> {
+        self.query("SELECT path, cid, tracked_at, agent FROM context_files ORDER BY path")
+    }
+
+    /// Remove a tracked file.
+    pub fn untrack_context_file(&self, path: &str) -> Result<(), SqlError> {
+        self.exec(&format!(
+            "DELETE FROM context_files WHERE path = '{}'",
+            escape_sql(path)
+        ))
+    }
+
+    // --- CDOM symbol index ---
+
+    /// Upsert symbols for a file. Deletes old entries first, then bulk inserts.
+    pub fn sync_cdom_symbols(
+        &self,
+        file_path: &str,
+        file_cid: &str,
+        symbols: &[(String, String, usize, usize, Option<String>)], // (name, kind, start, end, parent)
+    ) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmts = Vec::with_capacity(1 + symbols.len());
+
+        // Delete old entries for this file
+        stmts.push(format!(
+            "DELETE FROM cdom_symbols WHERE file_path = '{}'",
+            escape_sql(file_path)
+        ));
+
+        for (name, kind, start, end, parent) in symbols {
+            let parent_val = parent.as_deref().unwrap_or("");
+            stmts.push(format!(
+                "INSERT INTO cdom_symbols (file_path, file_cid, name, kind, start_line, end_line, parent_symbol, scanned_at) \
+                 VALUES ('{}', '{file_cid}', '{}', '{kind}', {start}, {end}, '{}', '{now}')",
+                escape_sql(file_path),
+                escape_sql(name),
+                escape_sql(parent_val)
+            ));
+        }
+
+        self.exec_batch(&stmts)
+    }
+
+    /// Search symbols by name across all files.
+    pub fn search_symbols(&self, query: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT file_path, name, kind, start_line, end_line, parent_symbol \
+             FROM cdom_symbols WHERE name LIKE '%{}%' ORDER BY file_path, start_line",
+            escape_sql(query)
+        ))
+    }
+
+    /// Search symbols by kind.
+    pub fn symbols_by_kind(&self, kind: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT file_path, name, start_line, end_line \
+             FROM cdom_symbols WHERE kind = '{kind}' ORDER BY file_path, start_line"
+        ))
+    }
+
+    /// Get all symbols in a file.
+    pub fn symbols_in_file(&self, file_path: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT name, kind, start_line, end_line, parent_symbol \
+             FROM cdom_symbols WHERE file_path = '{}' ORDER BY start_line",
+            escape_sql(file_path)
+        ))
+    }
+
+    /// Count symbols by kind across the codebase.
+    pub fn symbol_stats(&self) -> Result<String, SqlError> {
+        self.query(
+            "SELECT kind, COUNT(*) AS n FROM cdom_symbols GROUP BY kind ORDER BY n DESC"
+        )
+    }
+
     /// Query scores for a node.
     pub fn scores_for_node(&self, node_cid: &str) -> Result<String, SqlError> {
         self.query(&format!(
             "SELECT dimension, value, scorer, evidence FROM scores WHERE node_cid = '{node_cid}'"
         ))
     }
+
+    /// Average scores per agent per dimension.
+    pub fn agent_score_profile(&self, agent: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT dimension, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
+             FROM scores WHERE agent = '{agent}' GROUP BY dimension ORDER BY dimension"
+        ))
+    }
+
+    /// Get the best agent for a given dimension based on average score.
+    pub fn best_agent_for(&self, dimension: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT agent, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
+             FROM scores WHERE dimension = '{dimension}' \
+             GROUP BY agent ORDER BY avg_score DESC LIMIT 1"
+        ))
+    }
+
+    // --- Dolt versioning ---
+
+    /// Commit current working set with a message. Returns the commit hash.
+    pub fn dolt_commit(&self, message: &str) -> Result<String, SqlError> {
+        let _ = Command::new("dolt")
+            .args(["add", "."])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        let output = Command::new("dolt")
+            .args(["commit", "-m", message, "--allow-empty"])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("nothing to commit") {
+                // Return current HEAD
+                return self.dolt_head();
+            }
+            return Err(SqlError::DoltError(stderr.into_owned()));
+        }
+
+        self.dolt_head()
+    }
+
+    /// Get current HEAD commit hash.
+    pub fn dolt_head(&self) -> Result<String, SqlError> {
+        let output = Command::new("dolt")
+            .args(["log", "-n", "1", "--oneline"])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.split_whitespace().next().unwrap_or("unknown").to_string())
+    }
+
+    /// Get commit history.
+    pub fn dolt_log(&self, n: usize) -> Result<String, SqlError> {
+        let output = Command::new("dolt")
+            .args(["log", "-n", &n.to_string()])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SqlError::DoltError(stderr.into_owned()));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Diff between two commits (or working set vs HEAD).
+    pub fn dolt_diff(&self, from: Option<&str>, to: Option<&str>) -> Result<String, SqlError> {
+        let mut args = vec!["diff".to_string()];
+        if let Some(f) = from {
+            args.push(f.to_string());
+        }
+        if let Some(t) = to {
+            args.push(t.to_string());
+        }
+
+        let output = Command::new("dolt")
+            .args(&args)
+            .current_dir(&self.db_path)
+            .output()?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Create a Dolt branch.
+    pub fn dolt_branch(&self, name: &str) -> Result<(), SqlError> {
+        let output = Command::new("dolt")
+            .args(["branch", name])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SqlError::DoltError(stderr.into_owned()));
+        }
+
+        Ok(())
+    }
+
+    /// List Dolt branches.
+    pub fn dolt_branches(&self) -> Result<String, SqlError> {
+        let output = Command::new("dolt")
+            .args(["branch", "--list"])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Query a table at a specific commit.
+    pub fn query_at_commit(&self, sql: &str, commit: &str) -> Result<String, SqlError> {
+        // Dolt supports AS OF syntax
+        // But it's easier to use dolt sql with the commit ref
+        // Dolt supports querying at a specific commit via AS OF
+        let as_of_sql = format!("{sql} AS OF '{commit}'");
+        self.query(&as_of_sql)
+    }
+
+    // --- Soft link queries ---
+
+    /// Query soft links from a node.
+    pub fn soft_links_from(&self, cid: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT to_cid, relation, created_at FROM soft_links WHERE from_cid = '{cid}' ORDER BY created_at"
+        ))
+    }
+
+    /// Query soft links to a node.
+    pub fn soft_links_to(&self, cid: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT from_cid, relation, created_at FROM soft_links WHERE to_cid = '{cid}' ORDER BY created_at"
+        ))
+    }
+
+    /// Query all soft links for a node (both directions).
+    pub fn soft_links_for(&self, cid: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT from_cid, to_cid, relation, created_at FROM soft_links \
+             WHERE from_cid = '{cid}' OR to_cid = '{cid}' ORDER BY created_at"
+        ))
+    }
+
+    // --- Graph queries ---
+
+    /// Find all children of a node (one level).
+    pub fn children_of(&self, cid: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT e.child_cid, n.kind, n.agent, n.created_at \
+             FROM dag_edges e JOIN dag_nodes n ON e.child_cid = n.cid \
+             WHERE e.parent_cid = '{cid}' ORDER BY e.ordinal"
+        ))
+    }
+
+    /// Find all parents of a node (one level).
+    pub fn parents_of(&self, cid: &str) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT e.parent_cid, n.kind, n.agent, n.created_at \
+             FROM dag_edges e JOIN dag_nodes n ON e.parent_cid = n.cid \
+             WHERE e.child_cid = '{cid}' ORDER BY e.ordinal"
+        ))
+    }
+
+    /// Find root nodes (nodes with no parents).
+    pub fn root_nodes(&self) -> Result<String, SqlError> {
+        self.query(
+            "SELECT n.cid, n.kind, n.agent, n.created_at \
+             FROM dag_nodes n LEFT JOIN dag_edges e ON n.cid = e.child_cid \
+             WHERE e.parent_cid IS NULL ORDER BY n.created_at"
+        )
+    }
+
+    /// Find leaf nodes (nodes with no children).
+    pub fn leaf_nodes(&self) -> Result<String, SqlError> {
+        self.query(
+            "SELECT n.cid, n.kind, n.agent, n.created_at \
+             FROM dag_nodes n LEFT JOIN dag_edges e ON n.cid = e.parent_cid \
+             WHERE e.child_cid IS NULL ORDER BY n.created_at"
+        )
+    }
+
+    /// Count nodes by kind.
+    pub fn node_counts_by_kind(&self) -> Result<String, SqlError> {
+        self.query("SELECT kind, COUNT(*) AS n FROM dag_nodes GROUP BY kind ORDER BY n DESC")
+    }
+
+    /// Count nodes by agent.
+    pub fn node_counts_by_agent(&self) -> Result<String, SqlError> {
+        self.query("SELECT agent, COUNT(*) AS n FROM dag_nodes GROUP BY agent ORDER BY n DESC")
+    }
+
+    /// Summary stats for the database.
+    pub fn stats(&self) -> Result<DbStats, SqlError> {
+        let node_count = self.query("SELECT COUNT(*) AS n FROM dag_nodes")?;
+        let edge_count = self.query("SELECT COUNT(*) AS n FROM dag_edges")?;
+        let task_count = self.query("SELECT COUNT(*) AS n FROM tasks")?;
+        let agent_count = self.query("SELECT COUNT(*) AS n FROM agents")?;
+        let score_count = self.query("SELECT COUNT(*) AS n FROM scores")?;
+        let link_count = self.query("SELECT COUNT(*) AS n FROM soft_links")?;
+        let context_count = self.query("SELECT COUNT(*) AS n FROM context_files")?;
+        let symbol_count = self.query("SELECT COUNT(*) AS n FROM cdom_symbols")?;
+
+        Ok(DbStats {
+            nodes: parse_count(&node_count),
+            edges: parse_count(&edge_count),
+            tasks: parse_count(&task_count),
+            agents: parse_count(&agent_count),
+            scores: parse_count(&score_count),
+            soft_links: parse_count(&link_count),
+            context_files: parse_count(&context_count),
+            symbols: parse_count(&symbol_count),
+        })
+    }
+}
+
+/// Summary stats from the Dolt database.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DbStats {
+    pub nodes: u64,
+    pub edges: u64,
+    pub tasks: u64,
+    pub agents: u64,
+    pub scores: u64,
+    pub soft_links: u64,
+    pub context_files: u64,
+    pub symbols: u64,
+}
+
+fn parse_count(csv: &str) -> u64 {
+    // CSV format: "n\n42\n"
+    csv.lines()
+        .nth(1)
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn escape_sql(s: &str) -> String {
