@@ -179,6 +179,109 @@ impl<'a> Dag<'a> {
         let current_cid = ket_cas::hash_file(path)?;
         Ok(current_cid != *expected_cid)
     }
+
+    /// Find all CIDs referenced by DAG nodes (node CIDs + output CIDs).
+    pub fn referenced_cids(&self) -> Result<std::collections::HashSet<Cid>, DagError> {
+        let mut referenced = std::collections::HashSet::new();
+        let all_cids = self.cas.list()?;
+
+        for cid in &all_cids {
+            if let Ok(node) = self.get_node(cid) {
+                // The node itself is referenced
+                referenced.insert(cid.clone());
+                // Its output content is referenced
+                referenced.insert(node.output_cid.clone());
+                // Its parent node CIDs are referenced
+                for parent in &node.parents {
+                    referenced.insert(parent.clone());
+                }
+            }
+        }
+
+        Ok(referenced)
+    }
+
+    /// Export a DAG subgraph as a self-contained bundle.
+    /// Walks the node + all ancestors, collecting nodes and their output blobs.
+    pub fn export(&self, root_cid: &Cid) -> Result<DagBundle, DagError> {
+        let lineage = self.lineage(root_cid)?;
+        let mut entries = Vec::new();
+
+        for (cid, node) in &lineage {
+            // Get the node's serialized bytes
+            let node_bytes = self.cas.get(cid)?;
+            // Get the output content
+            let output_bytes = self.cas.get(&node.output_cid)?;
+
+            entries.push(BundleEntry {
+                node_cid: cid.clone(),
+                node_bytes,
+                output_cid: node.output_cid.clone(),
+                output_bytes,
+            });
+        }
+
+        Ok(DagBundle {
+            root_cid: root_cid.clone(),
+            entries,
+        })
+    }
+
+    /// Import a DAG bundle into this store.
+    /// Returns the number of new blobs imported.
+    pub fn import(&self, bundle: &DagBundle) -> Result<usize, DagError> {
+        let mut imported = 0;
+
+        for entry in &bundle.entries {
+            // Import the output content
+            if !self.cas.exists(&entry.output_cid) {
+                let cid = self.cas.put(&entry.output_bytes)?;
+                assert_eq!(cid, entry.output_cid, "Output CID mismatch on import");
+                imported += 1;
+            }
+
+            // Import the node
+            if !self.cas.exists(&entry.node_cid) {
+                let cid = self.cas.put(&entry.node_bytes)?;
+                assert_eq!(cid, entry.node_cid, "Node CID mismatch on import");
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+}
+
+/// A self-contained bundle of DAG nodes and their content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DagBundle {
+    pub root_cid: Cid,
+    pub entries: Vec<BundleEntry>,
+}
+
+/// A single entry in a DAG bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleEntry {
+    pub node_cid: Cid,
+    #[serde(with = "base64_bytes")]
+    pub node_bytes: Vec<u8>,
+    pub output_cid: Cid,
+    #[serde(with = "base64_bytes")]
+    pub output_bytes: Vec<u8>,
+}
+
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]

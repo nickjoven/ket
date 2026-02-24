@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std"] }
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"
+base64 = "0.22"
 
 # Internal crates
 ket-cas = { path = "ket-cas" }

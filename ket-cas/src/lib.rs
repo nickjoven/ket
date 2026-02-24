@@ -149,6 +149,44 @@ impl Store {
         Ok(cids)
     }
 
+    /// Get the byte size of a blob.
+    pub fn blob_size(&self, cid: &Cid) -> Result<u64, CasError> {
+        let path = self.blob_path(cid);
+        if !path.exists() {
+            return Err(CasError::NotFound(cid.0.clone()));
+        }
+        Ok(fs::metadata(&path)?.len())
+    }
+
+    /// Delete a blob by CID. Returns true if it existed.
+    pub fn delete(&self, cid: &Cid) -> Result<bool, CasError> {
+        let path = self.blob_path(cid);
+        if path.exists() {
+            fs::remove_file(&path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Total size of the CAS store in bytes.
+    pub fn total_size(&self) -> Result<u64, CasError> {
+        let mut total = 0u64;
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.len() == 64 && !name.starts_with('.') {
+                total += entry.metadata()?.len();
+            }
+        }
+        Ok(total)
+    }
+
+    /// Get the root path of the store.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn blob_path(&self, cid: &Cid) -> PathBuf {
         self.root.join(&cid.0)
     }

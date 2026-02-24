@@ -151,6 +151,46 @@ enum Commands {
 
     /// Check all tracked files for drift
     Drift,
+
+    /// Garbage collect unreferenced CAS blobs
+    Gc {
+        /// Actually delete (default: dry run)
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// Export a DAG subgraph as a portable bundle
+    Export {
+        /// Root node CID to export
+        cid: String,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        out: Option<String>,
+    },
+
+    /// Import a DAG bundle
+    Import {
+        /// Bundle file path
+        path: String,
+    },
+
+    /// Create a merge node combining multiple parent lineages
+    Merge {
+        /// Content for the merge node
+        content: String,
+        /// Parent CIDs to merge (at least 2)
+        #[arg(long, required = true, num_args = 2..)]
+        parents: Vec<String>,
+        /// Node kind
+        #[arg(long, default_value = "reasoning")]
+        kind: String,
+        /// Agent name
+        #[arg(long, default_value = "human")]
+        agent: String,
+    },
+
+    /// Show CAS store statistics
+    CasStats,
 }
 
 #[derive(Subcommand)]
@@ -351,6 +391,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Link { action } => cmd_link(&base, action, cli.json),
         Commands::Track { action } => cmd_track(&base, action, cli.json),
         Commands::Drift => cmd_drift(&base, cli.json),
+        Commands::Gc { delete } => cmd_gc(&base, delete, cli.json),
+        Commands::Export { cid, out } => cmd_export(&base, &cid, out.as_deref(), cli.json),
+        Commands::Import { path } => cmd_import(&base, &path, cli.json),
+        Commands::Merge {
+            content,
+            parents,
+            kind,
+            agent,
+        } => cmd_merge(&base, &content, &parents, &kind, &agent, cli.json),
+        Commands::CasStats => cmd_cas_stats(&base, cli.json),
     }
 }
 
@@ -1548,6 +1598,306 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
         } else {
             println!("\n{} OK, {} drifted, {} missing", ok.len(), drifted.len(), missing.len());
         }
+    }
+
+    Ok(())
+}
+
+fn cmd_gc(base: &PathBuf, delete: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let all_cids = cas.list()?;
+    let referenced = dag.referenced_cids()?;
+
+    let mut unreferenced = Vec::new();
+    let mut unreferenced_bytes = 0u64;
+
+    for cid in &all_cids {
+        if !referenced.contains(cid) {
+            let size = cas.blob_size(cid).unwrap_or(0);
+            unreferenced.push((cid.clone(), size));
+            unreferenced_bytes += size;
+        }
+    }
+
+    if delete {
+        for (cid, _) in &unreferenced {
+            cas.delete(cid)?;
+        }
+    }
+
+    // Log
+    if delete && !unreferenced.is_empty() {
+        let log_path = base.join("log");
+        log::append(
+            &log_path,
+            "gc",
+            &format!("deleted {} blobs ({} bytes)", unreferenced.len(), unreferenced_bytes),
+        )?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total_blobs": all_cids.len(),
+                "referenced": referenced.len(),
+                "unreferenced": unreferenced.len(),
+                "unreferenced_bytes": unreferenced_bytes,
+                "deleted": delete,
+            }))?
+        );
+    } else {
+        let verb = if delete { "Deleted" } else { "Would delete" };
+        println!(
+            "{} {} unreferenced blobs ({} bytes)",
+            verb,
+            unreferenced.len(),
+            unreferenced_bytes
+        );
+        println!(
+            "{} referenced / {} total",
+            referenced.len(),
+            all_cids.len()
+        );
+        if !delete && !unreferenced.is_empty() {
+            println!("\nRun with --delete to actually remove them.");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_export(
+    base: &PathBuf,
+    cid: &str,
+    out: Option<&str>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let bundle = dag.export(&ket_cas::Cid::from(cid))?;
+    let serialized = serde_json::to_string_pretty(&bundle)?;
+
+    if let Some(path) = out {
+        fs::write(path, &serialized)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "exported": true,
+                    "root_cid": cid,
+                    "entries": bundle.entries.len(),
+                    "file": path,
+                }))?
+            );
+        } else {
+            println!(
+                "Exported {} nodes to {}",
+                bundle.entries.len(),
+                path
+            );
+        }
+    } else {
+        // Write bundle to stdout
+        println!("{serialized}");
+    }
+
+    // Log
+    let log_path = base.join("log");
+    log::append(&log_path, "export", &format!("{} ({} nodes)", &cid[..12.min(cid.len())], bundle.entries.len()))?;
+
+    Ok(())
+}
+
+fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let data = fs::read_to_string(path)?;
+    let bundle: ket_dag::DagBundle = serde_json::from_str(&data)?;
+    let imported = dag.import(&bundle)?;
+
+    // Sync imported nodes to SQL if available
+    let mut sql_synced = 0;
+    if let Ok(db) = open_db(base) {
+        for entry in &bundle.entries {
+            if let Ok(node) = dag.get_node(&entry.node_cid) {
+                let parent_refs: Vec<(&str, i32)> = node
+                    .parents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .collect();
+                if db
+                    .sync_dag_node(
+                        entry.node_cid.as_str(),
+                        &node.kind.to_string(),
+                        &node.agent,
+                        &node.timestamp,
+                        node.output_cid.as_str(),
+                        "",
+                        &parent_refs,
+                    )
+                    .is_ok()
+                {
+                    sql_synced += 1;
+                }
+            }
+        }
+    }
+
+    // Log
+    let log_path = base.join("log");
+    log::append(
+        &log_path,
+        "import",
+        &format!("{} blobs from {}", imported, path),
+    )?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "imported_blobs": imported,
+                "root_cid": bundle.root_cid.as_str(),
+                "entries": bundle.entries.len(),
+                "sql_synced": sql_synced,
+            }))?
+        );
+    } else {
+        println!(
+            "Imported {} new blobs ({} nodes, root: {})",
+            imported,
+            bundle.entries.len(),
+            &bundle.root_cid.as_str()[..12]
+        );
+        if sql_synced > 0 {
+            println!("  {} nodes synced to SQL", sql_synced);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_merge(
+    base: &PathBuf,
+    content: &str,
+    parents: &[String],
+    kind: &str,
+    agent: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let node_kind = match kind {
+        "memory" => ket_dag::NodeKind::Memory,
+        "code" => ket_dag::NodeKind::Code,
+        "reasoning" => ket_dag::NodeKind::Reasoning,
+        "task" => ket_dag::NodeKind::Task,
+        "cdom" => ket_dag::NodeKind::Cdom,
+        "score" => ket_dag::NodeKind::Score,
+        "context" => ket_dag::NodeKind::Context,
+        _ => return Err(format!("Unknown kind: {kind}").into()),
+    };
+
+    let parent_cids: Vec<ket_cas::Cid> = parents.iter().map(|p| ket_cas::Cid::from(p.as_str())).collect();
+    let (node_cid, content_cid) =
+        dag.store_with_node(content.as_bytes(), node_kind, parent_cids.clone(), agent)?;
+
+    // Dual-write to SQL
+    if let Ok(db) = open_db(base) {
+        let node = dag.get_node(&node_cid)?;
+        let parent_refs: Vec<(&str, i32)> = parent_cids
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as i32))
+            .collect();
+        let _ = db.sync_dag_node(
+            node_cid.as_str(),
+            kind,
+            agent,
+            &node.timestamp,
+            content_cid.as_str(),
+            "",
+            &parent_refs,
+        );
+    }
+
+    // Log
+    let log_path = base.join("log");
+    log::append(
+        &log_path,
+        "merge",
+        &format!("{} ({} parents)", node_cid, parents.len()),
+    )?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "node_cid": node_cid.as_str(),
+                "content_cid": content_cid.as_str(),
+                "parents": parents,
+                "kind": kind,
+                "agent": agent,
+            }))?
+        );
+    } else {
+        println!("Merge node: {node_cid}");
+        println!("  Content:  {content_cid}");
+        println!("  Parents:  {}", parents.len());
+        for (i, p) in parents.iter().enumerate() {
+            println!("    [{i}] {}", &p[..12.min(p.len())]);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_cas_stats(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let all_cids = cas.list()?;
+    let total_size = cas.total_size()?;
+    let referenced = dag.referenced_cids()?;
+
+    let mut node_count = 0u64;
+    let mut content_count = 0u64;
+    let mut orphan_count = 0u64;
+
+    for cid in &all_cids {
+        if dag.get_node(cid).is_ok() {
+            node_count += 1;
+        } else if referenced.contains(cid) {
+            content_count += 1;
+        } else {
+            orphan_count += 1;
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total_blobs": all_cids.len(),
+                "total_bytes": total_size,
+                "dag_nodes": node_count,
+                "content_blobs": content_count,
+                "orphan_blobs": orphan_count,
+            }))?
+        );
+    } else {
+        println!("CAS Store: {}", cas.root().display());
+        println!("  Total blobs:    {}", all_cids.len());
+        println!("  Total size:     {} bytes", total_size);
+        println!("  DAG nodes:      {node_count}");
+        println!("  Content blobs:  {content_count}");
+        println!("  Orphan blobs:   {orphan_count}");
     }
 
     Ok(())

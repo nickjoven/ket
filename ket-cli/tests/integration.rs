@@ -317,6 +317,103 @@ fn log_records_operations() {
     assert!(entries.len() >= 3); // init + put + dag:create
 }
 
+// --- GC tests ---
+
+#[test]
+fn gc_identifies_orphans() {
+    let (ket_dir, dir) = fresh_ket("gc");
+
+    // Put raw content (not a DAG node) — this becomes an orphan
+    let f = dir.path().join("orphan.txt");
+    std::fs::write(&f, b"orphan content").unwrap();
+    ket(&ket_dir, &["put", f.to_str().unwrap()]);
+
+    // Create a DAG node (references a content blob)
+    ket_json(&ket_dir, &["dag", "create", "kept", "--kind", "code", "--agent", "human"]);
+
+    // GC dry run should find the orphan
+    let result = ket_json(&ket_dir, &["gc"]);
+    assert!(result["unreferenced"].as_u64().unwrap() >= 1);
+    assert!(!result["deleted"].as_bool().unwrap());
+
+    // GC with --delete
+    let result = ket_json(&ket_dir, &["gc", "--delete"]);
+    assert!(result["deleted"].as_bool().unwrap());
+
+    // Second GC should find nothing
+    let result = ket_json(&ket_dir, &["gc"]);
+    assert_eq!(result["unreferenced"].as_u64().unwrap(), 0);
+}
+
+// --- Export/Import tests ---
+
+#[test]
+fn export_import_roundtrip() {
+    let (ket_dir_a, dir_a) = fresh_ket("export-a");
+    let (ket_dir_b, _dir_b) = fresh_ket("export-b");
+
+    // Create a chain in store A
+    let root = ket_json(&ket_dir_a, &["dag", "create", "root", "--kind", "memory", "--agent", "human"]);
+    let root_cid = root["node_cid"].as_str().unwrap().to_string();
+
+    let child = ket_json(&ket_dir_a, &["dag", "create", "child", "--kind", "reasoning", "--agent", "claude", "--parent", &root_cid]);
+    let child_cid = child["node_cid"].as_str().unwrap().to_string();
+
+    // Export from A
+    let bundle_path = dir_a.path().join("bundle.json");
+    let (ok, _, _) = ket(&ket_dir_a, &["export", &child_cid, "-o", bundle_path.to_str().unwrap()]);
+    assert!(ok);
+
+    // Import into B
+    let result = ket_json(&ket_dir_b, &["import", bundle_path.to_str().unwrap()]);
+    assert!(result["imported_blobs"].as_u64().unwrap() >= 2); // at least node + content
+
+    // Verify the node exists in B
+    let lineage = ket_json(&ket_dir_b, &["dag", "lineage", &child_cid]);
+    assert_eq!(lineage.as_array().unwrap().len(), 2);
+}
+
+// --- Merge tests ---
+
+#[test]
+fn merge_creates_multi_parent_node() {
+    let (ket_dir, _dir) = fresh_ket("merge");
+
+    // Create two independent branches
+    let a = ket_json(&ket_dir, &["dag", "create", "branch A", "--kind", "reasoning", "--agent", "claude"]);
+    let a_cid = a["node_cid"].as_str().unwrap().to_string();
+
+    let b = ket_json(&ket_dir, &["dag", "create", "branch B", "--kind", "reasoning", "--agent", "codex"]);
+    let b_cid = b["node_cid"].as_str().unwrap().to_string();
+
+    // Merge them
+    let merged = ket_json(&ket_dir, &["merge", "synthesis of A and B", "--parents", &a_cid, &b_cid, "--agent", "human"]);
+    let merge_cid = merged["node_cid"].as_str().unwrap().to_string();
+    assert_eq!(merged["parents"].as_array().unwrap().len(), 2);
+
+    // Lineage should include all 3 nodes
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &merge_cid]);
+    assert_eq!(lineage.as_array().unwrap().len(), 3);
+}
+
+// --- CAS stats tests ---
+
+#[test]
+fn cas_stats_shows_breakdown() {
+    let (ket_dir, dir) = fresh_ket("cas-stats");
+
+    // Put some content
+    let f = dir.path().join("f.txt");
+    std::fs::write(&f, b"stats test").unwrap();
+    ket(&ket_dir, &["put", f.to_str().unwrap()]);
+    ket_json(&ket_dir, &["dag", "create", "node", "--kind", "code", "--agent", "human"]);
+
+    let result = ket_json(&ket_dir, &["cas-stats"]);
+    assert!(result["total_blobs"].as_u64().unwrap() >= 3); // orphan + dag node + content
+    assert!(result["dag_nodes"].as_u64().unwrap() >= 1);
+    assert!(result["content_blobs"].as_u64().unwrap() >= 1);
+}
+
 // --- helpers ---
 
 fn has_dolt() -> bool {
