@@ -1,0 +1,16 @@
+[package]
+name = "ket-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ket-cas.workspace = true
+ket-dag.workspace = true
+ket-sql.workspace = true
+ket-score.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+thiserror.workspace = true

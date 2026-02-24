@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "ket-cas",
+    "ket-dag",
+    "ket-sql",
+    "ket-mcp",
+    "ket-agent",
+    "ket-score",
+    "ket-cdom",
+    "ket-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+blake3 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std"] }
+uuid = { version = "1", features = ["v7"] }
+thiserror = "2"
+
+# Internal crates
+ket-cas = { path = "ket-cas" }
+ket-dag = { path = "ket-dag" }
+ket-sql = { path = "ket-sql" }
+ket-mcp = { path = "ket-mcp" }
+ket-agent = { path = "ket-agent" }
+ket-score = { path = "ket-score" }
+ket-cdom = { path = "ket-cdom" }

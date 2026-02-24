@@ -1,0 +1,11 @@
+[package]
+name = "ket-dag"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ket-cas.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true

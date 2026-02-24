@@ -1,0 +1,23 @@
+[package]
+name = "ket-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ket"
+path = "src/main.rs"
+
+[dependencies]
+ket-cas.workspace = true
+ket-dag.workspace = true
+ket-sql.workspace = true
+ket-mcp.workspace = true
+ket-agent.workspace = true
+ket-score.workspace = true
+ket-cdom.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
