@@ -8,14 +8,37 @@ use std::path::PathBuf;
 #[command(
     name = "ket",
     about = "Content-addressable substrate for EverMemOS",
-    version
+    long_about = "\
+Content-addressable substrate for multi-agent memory systems.
+
+Ket provides BLAKE3-hashed content storage (CAS), a Merkle DAG for lineage
+tracking, Dolt SQL for queryability, tree-sitter code parsing (CDOM), an
+MCP server for agent integration, and multi-agent orchestration with scoring.
+
+Every piece of content gets a deterministic CID. Deduplication is free.
+Lineage is provable. Drift is detectable. Agents coordinate through
+content-addressed reasoning chains.
+
+QUICKSTART:
+  ket init                           Create a .ket directory
+  ket put myfile.py                  Store a file, get its CID
+  ket get <cid>                      Retrieve content by CID
+  ket dag create \"note\" --agent me   Create a DAG node
+  ket dag lineage <cid>              Trace a node's history
+  ket scan src/                      Index code symbols
+  ket status                         Show system overview
+
+ENVIRONMENT:
+  KET_HOME    Path to .ket directory (default: .ket in current dir)",
+    version,
+    after_help = "See 'ket <command> -h' for more information on a specific command."
 )]
 struct Cli {
-    /// Path to .ket directory
+    /// Path to .ket directory (default: .ket in current dir)
     #[arg(long, global = true, env = "KET_HOME")]
     home: Option<String>,
 
-    /// Emit JSON output
+    /// Emit JSON output (all commands support structured JSON)
     #[arg(long, global = true)]
     json: bool,
 
@@ -26,162 +49,410 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new .ket directory
+    #[command(long_about = "\
+Initialize a new .ket directory with CAS store and optional Dolt database.
+
+Creates:
+  .ket/cas/          Content-addressable blob store
+  .ket/config.yaml   Agent and system configuration
+  .ket/log           Append-only mutation log
+  .ket/manifest      DAG head references
+  .ket/ket.db/       Dolt SQL database (if dolt is installed)
+
+Example:
+  ket init
+  ket --home /tmp/myproject/.ket init")]
     Init,
 
-    /// Store content in CAS
+    /// Store a file (or stdin) in CAS, return its BLAKE3 CID
+    #[command(long_about = "\
+Store content in the content-addressable store and return its CID.
+
+The CID is a 64-character hex string (BLAKE3-256 hash). Identical content
+always produces the same CID — deduplication is automatic.
+
+Examples:
+  ket put myfile.py              Store a file
+  echo 'hello' | ket put -       Store from stdin
+  ket --json put myfile.py       Get CID as JSON")]
     Put {
-        /// File to store (or - for stdin)
+        /// File path to store, or '-' to read from stdin
         path: String,
     },
 
     /// Retrieve content by CID
+    #[command(long_about = "\
+Retrieve stored content by its CID.
+
+Outputs raw bytes to stdout (or JSON with --json flag including size).
+
+Examples:
+  ket get abc123...def          Print content to stdout
+  ket get abc123...def > out    Redirect to file
+  ket --json get abc123...def   Get content + metadata as JSON")]
     Get {
-        /// Content identifier
+        /// Content identifier (64-char hex BLAKE3 hash)
         cid: String,
     },
 
-    /// Verify CID integrity
+    /// Verify CID integrity (re-hash and compare)
+    #[command(long_about = "\
+Verify that stored content matches its CID by re-hashing.
+
+Detects bit-rot or corruption. Exits with code 1 if corrupted.
+
+Example:
+  ket verify abc123...def")]
     Verify {
         /// Content identifier to verify
         cid: String,
     },
 
-    /// DAG operations
+    /// DAG operations (create nodes, trace lineage, detect drift)
+    #[command(long_about = "\
+Merkle DAG operations for tracking provenance and lineage.
+
+Nodes represent artifacts (memories, code, reasoning, tasks) linked by
+parent edges. Each node points to content in CAS via output_cid.
+
+Node kinds: memory, code, reasoning, task, cdom, score, context
+
+Examples:
+  ket dag create 'initial design' --kind reasoning --agent claude
+  ket dag create 'revision' --kind code --agent codex --parent <cid>
+  ket dag lineage <cid>            Walk the parent chain
+  ket dag ls                       List all nodes
+  ket dag show <cid>               Show node details")]
     Dag {
         #[command(subcommand)]
         action: DagAction,
     },
 
-    /// SQL operations (Dolt)
+    /// Execute raw SQL against the Dolt database
+    #[command(long_about = "\
+Execute a SQL query against the Dolt database (CSV output).
+
+The database contains tables: dag_nodes, dag_edges, soft_links,
+tasks, agents, scores, context_files, cdom_symbols.
+
+Examples:
+  ket sql 'SELECT * FROM dag_nodes LIMIT 5'
+  ket sql 'SELECT kind, COUNT(*) FROM dag_nodes GROUP BY kind'")]
     Sql {
         /// SQL query to execute
         query: String,
     },
 
-    /// Task management
+    /// Task lifecycle management (create, list, assign)
+    #[command(long_about = "\
+Manage tasks for multi-agent orchestration.
+
+Tasks flow: pending -> assigned -> running -> done/failed.
+Requires Dolt database.
+
+Examples:
+  ket task create 'Refactor auth module' --by human
+  ket task ls
+  ket task assign <id> claude")]
     Task {
         #[command(subcommand)]
         action: TaskAction,
     },
 
-    /// Agent management
+    /// Agent registry (register, list agent configs)
+    #[command(long_about = "\
+Manage the agent registry. Built-in presets: claude, codex, copilot.
+
+Examples:
+  ket agent register claude
+  ket agent ls")]
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
 
-    /// Run a task with an agent
+    /// Run a task by spawning an agent subprocess
+    #[command(long_about = "\
+Execute a task by spawning the assigned agent as a subprocess.
+
+The agent's output is stored as a Reasoning DAG node.
+Requires the agent CLI to be installed (e.g., 'claude' for Claude).
+
+Examples:
+  ket run <task-id> --agent claude --prompt 'Review this code'
+  ket run <task-id> --agent codex")]
     Run {
         /// Task ID to run
         task_id: String,
-        /// Agent to use
+        /// Agent to use (claude, codex)
         #[arg(long, default_value = "claude")]
         agent: String,
-        /// Prompt for the agent
+        /// Prompt for the agent (default: 'Complete the assigned task')
         #[arg(long)]
         prompt: Option<String>,
     },
 
-    /// Scan source files for CDOM symbols
+    /// Parse source files with tree-sitter and index symbols
+    #[command(long_about = "\
+Scan source files using tree-sitter to extract symbols (functions, classes,
+structs, methods, etc.) and index them in SQL for fast querying.
+
+Supports Rust (.rs) and Python (.py) files. Directories are scanned
+recursively, skipping .git, target, node_modules, __pycache__.
+
+Scanned files are automatically tracked for drift detection.
+
+Examples:
+  ket scan src/main.rs          Scan a single file
+  ket scan src/                 Scan a directory recursively
+  ket --json scan .             JSON output with full symbol details")]
     Scan {
         /// File or directory to scan
         path: String,
     },
 
-    /// Query CDOM symbols (searches SQL index across all scanned files)
+    /// Query code symbols by name (searches SQL index or a specific file)
+    #[command(long_about = "\
+Search for code symbols by name across the indexed codebase.
+
+Without a file argument, searches the SQL symbol index (run 'ket scan' first).
+With a file argument, parses the file directly with tree-sitter.
+
+Examples:
+  ket cdom UserProfile                    Search all indexed files
+  ket cdom process_data src/main.py       Search specific file
+  ket --json cdom 'Handler'               JSON output")]
     Cdom {
-        /// Symbol query (substring match)
+        /// Symbol name to search for (substring match)
         query: String,
-        /// File to search in (optional — omit to search all indexed files)
+        /// Specific file to search (optional — omit to search SQL index)
         path: Option<String>,
     },
 
-    /// Show mutation log
+    /// Show the append-only mutation log
+    #[command(long_about = "\
+Display recent entries from the append-only mutation log.
+
+Every CAS put, DAG create, repair, and other mutations are logged
+with timestamps for auditability.
+
+Examples:
+  ket log                Show last 20 entries
+  ket log -n 50          Show last 50 entries
+  ket --json log         JSON output")]
     Log {
         /// Number of entries to show
         #[arg(short, long, default_value = "20")]
         n: usize,
     },
 
-    /// Run MCP server on stdio
+    /// Run the MCP (Model Context Protocol) server on stdio
+    #[command(long_about = "\
+Start the MCP server on stdin/stdout using JSON-RPC over line-delimited JSON.
+
+Exposes 11 tools: ket_put, ket_get, ket_verify, ket_dag_link,
+ket_dag_lineage, ket_check_drift, ket_query_cdom, ket_store_reasoning,
+ket_create_subtask, ket_get_reasoning, ket_score.
+
+Use with Claude or other MCP-capable agents:
+  claude --mcp-config ket.json -p 'store a memory'
+
+MCP config (ket.json):
+  {\"mcpServers\": {\"ket\": {\"command\": \"ket\", \"args\": [\"mcp\"]}}}")]
     Mcp,
 
-    /// Show agent scores or profile
+    /// Agent scoring — record scores, view profiles, route tasks
+    #[command(long_about = "\
+Score agent outputs across four dimensions and use scores for routing.
+
+Dimensions: correctness, efficiency, style, completeness.
+Sources: human review, auto (compile/test/lint), peer (cross-agent).
+
+Examples:
+  ket scores add <cid> --agent claude --dim correctness --value 0.9
+  ket scores show <cid>              Show all scores for a node
+  ket scores profile claude          Agent's average scores
+  ket scores route correctness       Best agent for a dimension
+  ket scores auto <cid> --agent claude --dir .   Run build/test/clippy")]
     Scores {
         #[command(subcommand)]
         action: ScoreAction,
     },
 
-    /// Rebuild SQL index from CAS (source of truth)
+    /// Rebuild SQL index from CAS (CAS is source of truth)
+    #[command(long_about = "\
+Reconcile the SQL database from the CAS store.
+
+CAS is the source of truth. If SQL is out of sync (crash, partial write),
+repair scans all CAS blobs, identifies valid DAG nodes, and syncs them
+to SQL using idempotent INSERT IGNORE.
+
+Examples:
+  ket repair              Sync missing nodes to SQL
+  ket repair --dry-run    Show what would be synced without writing")]
     Repair {
-        /// Dry run — show what would be synced without writing
+        /// Show what would be synced without actually writing
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// Show .ket status overview
+    /// Show .ket health dashboard (CAS blobs, SQL stats, Dolt HEAD)
+    #[command(long_about = "\
+Display a health overview of the .ket directory.
+
+Shows: CAS blob count, Dolt HEAD commit, DAG nodes/edges, tasks,
+agents, scores, soft links, tracked files, CDOM symbols.
+
+Example:
+  ket status")]
     Status,
 
-    /// Dolt version history
+    /// Show Dolt commit history
+    #[command(long_about = "\
+Display Dolt version control history.
+
+Dolt tracks every schema and data change with git-like commits.
+
+Examples:
+  ket history              Last 10 commits
+  ket history -n 50        Last 50 commits")]
     History {
         /// Number of commits to show
         #[arg(short, long, default_value = "10")]
         n: usize,
     },
 
-    /// Dolt diff (working set vs HEAD, or between commits)
+    /// Show Dolt diff (working changes or between commits)
+    #[command(long_about = "\
+Show differences in the Dolt database.
+
+Without arguments, shows uncommitted changes (working set vs HEAD).
+With commit hashes, shows diff between two points in history.
+
+Examples:
+  ket diff                 Working changes vs HEAD
+  ket diff <from> <to>     Diff between two commits")]
     Diff {
-        /// From commit
+        /// Starting commit hash
         from: Option<String>,
-        /// To commit
+        /// Ending commit hash
         to: Option<String>,
     },
 
-    /// Soft link management
+    /// Manage soft links between DAG nodes (for cycle-safe relations)
+    #[command(long_about = "\
+Soft links represent relationships that would create cycles in the DAG.
+
+Unlike parent edges (which must be acyclic), soft links can point anywhere.
+Useful for: supersedes, contradicts, related_to, refines, etc.
+
+Examples:
+  ket link create <from> <to> supersedes
+  ket link create <from> <to> contradicts
+  ket link ls <cid>")]
     Link {
         #[command(subcommand)]
         action: LinkAction,
     },
 
-    /// Context file tracking for drift detection
+    /// Track files for bulk drift detection
+    #[command(long_about = "\
+Register files for automatic drift detection.
+
+Tracked files have their BLAKE3 hash stored. When you run 'ket drift',
+all tracked files are re-hashed and compared — any changes are flagged.
+
+Files scanned with 'ket scan' are auto-tracked.
+
+Examples:
+  ket track add src/main.py --agent claude
+  ket track ls
+  ket track rm src/old.py")]
     Track {
         #[command(subcommand)]
         action: TrackAction,
     },
 
-    /// Check all tracked files for drift
+    /// Check all tracked files for drift (content changes since last hash)
+    #[command(long_about = "\
+Re-hash all tracked files and compare against stored CIDs.
+
+Reports: OK (unchanged), DRIFTED (content changed), MISSING (file deleted).
+Agents should run this before reasoning on context to detect stale state.
+
+Example:
+  ket drift")]
     Drift,
 
     /// Garbage collect unreferenced CAS blobs
+    #[command(long_about = "\
+Find and optionally delete CAS blobs not referenced by any DAG node.
+
+A blob is referenced if it's a DAG node, a node's output content, or
+a node's parent. Everything else is an orphan (e.g., raw puts without
+DAG nodes).
+
+Default is dry run — use --delete to actually remove.
+
+Examples:
+  ket gc                   Dry run — show what would be deleted
+  ket gc --delete          Actually delete orphan blobs")]
     Gc {
-        /// Actually delete (default: dry run)
+        /// Actually delete unreferenced blobs (default: dry run)
         #[arg(long)]
         delete: bool,
     },
 
-    /// Export a DAG subgraph as a portable bundle
+    /// Export a DAG subgraph as a portable JSON bundle
+    #[command(long_about = "\
+Bundle a DAG node and all its ancestors into a self-contained JSON file.
+
+The bundle includes serialized nodes and their content (base64-encoded),
+so it can be imported into another ket instance without any shared state.
+
+Examples:
+  ket export <cid> -o reasoning.json    Export to file
+  ket export <cid> > bundle.json        Export to stdout
+  ket export <cid> | ket import -       Pipe between instances")]
     Export {
-        /// Root node CID to export
+        /// Root node CID (this node + all ancestors are included)
         cid: String,
-        /// Output file (default: stdout)
+        /// Output file path (default: stdout)
         #[arg(short, long)]
         out: Option<String>,
     },
 
-    /// Import a DAG bundle
+    /// Import a DAG bundle from another ket instance
+    #[command(long_about = "\
+Ingest a DAG bundle, storing all nodes and content in the local CAS.
+
+Imported nodes are also synced to SQL if Dolt is available.
+Deduplication is automatic — existing blobs are skipped.
+
+Example:
+  ket import reasoning.json")]
     Import {
-        /// Bundle file path
+        /// Path to the bundle JSON file
         path: String,
     },
 
     /// Create a merge node combining multiple parent lineages
+    #[command(long_about = "\
+Create a DAG node with multiple parents, synthesizing divergent branches.
+
+Useful when two agents work independently and you want to create a
+convergent node that captures both reasoning chains.
+
+Examples:
+  ket merge 'synthesis' --parents <cid1> <cid2> --agent human
+  ket merge 'combined review' --parents <a> <b> <c> --kind reasoning")]
     Merge {
         /// Content for the merge node
         content: String,
-        /// Parent CIDs to merge (at least 2)
+        /// Parent CIDs to merge (at least 2 required)
         #[arg(long, required = true, num_args = 2..)]
         parents: Vec<String>,
-        /// Node kind
+        /// Node kind (memory, code, reasoning, task, cdom, score, context)
         #[arg(long, default_value = "reasoning")]
         kind: String,
         /// Agent name
@@ -189,26 +460,64 @@ enum Commands {
         agent: String,
     },
 
-    /// Show CAS store statistics
+    /// Show CAS store statistics (blob counts, sizes, breakdown)
+    #[command(long_about = "\
+Display detailed CAS store statistics.
+
+Shows total blobs, byte size, and a breakdown into DAG nodes,
+content blobs (referenced by nodes), and orphan blobs (unreferenced).
+
+Example:
+  ket cas-stats")]
     CasStats,
 
     /// Output DAG as Graphviz DOT for visualization
+    #[command(long_about = "\
+Generate Graphviz DOT output for visualizing the DAG structure.
+
+Nodes are color-coded by kind. Soft links appear as dashed edges.
+Pipe to 'dot' to render: ket dot | dot -Tpng -o dag.png
+
+Examples:
+  ket dot                          Full DAG
+  ket dot --root <cid>             Subgraph from a specific node
+  ket dot | dot -Tsvg -o dag.svg   Render as SVG")]
     Dot {
-        /// Only include this node and its lineage
+        /// Scope output to this node and its ancestors
         #[arg(long)]
         root: Option<String>,
     },
 
-    /// Search content across all CAS blobs
+    /// Full-text search across all CAS content
+    #[command(long_about = "\
+Search for text across all content stored in CAS.
+
+Case-insensitive substring search. Shows matching CIDs with context lines.
+Useful for finding which memories or artifacts mention specific topics.
+
+Examples:
+  ket search 'authentication'
+  ket search 'TODO' --limit 50
+  ket --json search 'error handling'")]
     Search {
-        /// Text to search for (case-insensitive)
+        /// Text to search for (case-insensitive substring match)
         query: String,
-        /// Max results
+        /// Maximum number of matching blobs to return
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
 
-    /// Create a named snapshot of current DAG state
+    /// Named snapshots for bookmarking known-good DAG states
+    #[command(long_about = "\
+Create, list, and verify named snapshots of the DAG.
+
+A snapshot records all current DAG node CIDs. Later, 'verify' re-checks
+that all nodes and their content still exist and are uncorrupted.
+
+Examples:
+  ket snapshot create v1           Bookmark current state
+  ket snapshot ls                  List all snapshots
+  ket snapshot verify v1           Check integrity against snapshot")]
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
@@ -217,53 +526,53 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SnapshotAction {
-    /// Create a new snapshot
+    /// Create a named snapshot of the current DAG state
     Create {
-        /// Snapshot name
+        /// Snapshot name (e.g., v1, pre-refactor, baseline)
         name: String,
     },
-    /// List all snapshots
+    /// List all saved snapshots
     Ls,
-    /// Verify current state against a snapshot
+    /// Verify all nodes in a snapshot still exist and are uncorrupted
     Verify {
-        /// Snapshot name
+        /// Snapshot name to verify against
         name: String,
     },
 }
 
 #[derive(Subcommand)]
 enum DagAction {
-    /// List DAG nodes
+    /// List all DAG nodes (summary view)
     Ls,
-    /// Show a specific node
+    /// Show full details of a specific node
     Show {
-        /// Node CID
+        /// Node CID (64-char hex)
         cid: String,
     },
-    /// Create a DAG node
+    /// Create a new DAG node with content
     Create {
-        /// Content for the node
+        /// Content string to store (becomes the node's output)
         content: String,
-        /// Node kind
+        /// Node kind: memory, code, reasoning, task, cdom, score, context
         #[arg(long, default_value = "code")]
         kind: String,
-        /// Agent name
+        /// Agent that produced this (human, claude, codex, copilot)
         #[arg(long, default_value = "human")]
         agent: String,
-        /// Parent CIDs
+        /// Parent node CIDs (can specify multiple for merge)
         #[arg(long)]
         parent: Vec<String>,
     },
-    /// Trace lineage of a node
+    /// Trace the full ancestry of a node
     Lineage {
-        /// Node CID
+        /// Node CID to trace from
         cid: String,
     },
-    /// Check drift of a file against a CID
+    /// Check if a file has changed since a CID was recorded
     Drift {
-        /// File path
+        /// File path to check
         path: String,
-        /// Expected CID
+        /// CID that was recorded when the file was last known-good
         cid: String,
     },
 }
@@ -307,49 +616,54 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum ScoreAction {
-    /// Score a node
+    /// Record a score for a DAG node
     Add {
-        /// Node CID
+        /// CID of the node being scored
         node_cid: String,
-        /// Agent that produced it
+        /// Agent that produced the node's content
         #[arg(long)]
         agent: String,
-        /// Who is scoring
+        /// Who is recording this score (human, auto:compile, peer:claude)
         #[arg(long, default_value = "human")]
         scorer: String,
-        /// Dimension (correctness, efficiency, style, completeness)
+        /// Scoring dimension: correctness, efficiency, style, completeness
         #[arg(long)]
         dim: String,
-        /// Score value 0.0-1.0
+        /// Score value between 0.0 (worst) and 1.0 (best)
         #[arg(long)]
         value: f64,
-        /// Evidence
+        /// Free-text evidence or justification
         #[arg(long, default_value = "")]
         evidence: String,
     },
-    /// Show scores for a node
+    /// Show all scores recorded for a node
     Show {
         /// Node CID
         node_cid: String,
     },
-    /// Show an agent's scoring profile
+    /// Show an agent's aggregated scoring profile (averages per dimension)
     Profile {
-        /// Agent name
+        /// Agent name (claude, codex, copilot, human)
         agent: String,
     },
-    /// Find the best agent for a dimension
+    /// Find the best agent for a given dimension based on historical scores
     Route {
-        /// Dimension
+        /// Dimension to optimize for: correctness, efficiency, style, completeness
         dim: String,
     },
-    /// Auto-score by running build/test/lint
+    /// Auto-score by running cargo build, test, and clippy
+    #[command(long_about = "\
+Automatically score a node by running build tools in the working directory.
+
+Runs: cargo build (correctness), cargo test (completeness), cargo clippy (style).
+Records scores and returns results.")]
     Auto {
         /// Node CID to score
         node_cid: String,
-        /// Agent that produced it
+        /// Agent that produced the code
         #[arg(long)]
         agent: String,
-        /// Working directory for build/test
+        /// Working directory containing the Cargo project
         #[arg(long, default_value = ".")]
         dir: String,
     },
@@ -363,12 +677,12 @@ enum LinkAction {
         from: String,
         /// Target node CID
         to: String,
-        /// Relation type (e.g., "supersedes", "related_to", "contradicts")
+        /// Relation type (e.g., supersedes, related_to, contradicts, refines)
         relation: String,
     },
-    /// List soft links for a node
+    /// List all soft links involving a node (both directions)
     Ls {
-        /// Node CID
+        /// Node CID to query
         cid: String,
     },
 }
