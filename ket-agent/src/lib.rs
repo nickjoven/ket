@@ -202,15 +202,16 @@ impl<'a> Orchestrator<'a> {
         self.db
             .update_task_status(task_id, TaskStatus::Done.as_str())?;
 
-        // Store the node in SQL too
+        // Sync to SQL in single transaction
         let node = dag.get_node(&node_cid)?;
-        self.db.insert_dag_node(
+        self.db.sync_dag_node(
             node_cid.as_str(),
             &node.kind.to_string(),
             &node.agent,
             &node.timestamp,
             node.output_cid.as_str(),
             "",
+            &[],
         )?;
 
         Ok(node_cid)
@@ -225,16 +226,22 @@ impl<'a> Orchestrator<'a> {
     ) -> Result<Cid, AgentError> {
         let dag = Dag::new(self.cas);
         let (node_cid, _) =
-            dag.store_with_node(content.as_bytes(), NodeKind::Reasoning, parents, agent)?;
+            dag.store_with_node(content.as_bytes(), NodeKind::Reasoning, parents.clone(), agent)?;
 
         let node = dag.get_node(&node_cid)?;
-        self.db.insert_dag_node(
+        let parent_refs: Vec<(&str, i32)> = parents
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as i32))
+            .collect();
+        self.db.sync_dag_node(
             node_cid.as_str(),
             &node.kind.to_string(),
             &node.agent,
             &node.timestamp,
             node.output_cid.as_str(),
             "",
+            &parent_refs,
         )?;
 
         Ok(node_cid)

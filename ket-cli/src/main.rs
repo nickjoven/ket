@@ -111,6 +111,13 @@ enum Commands {
         /// Node CID to show scores for
         node_cid: String,
     },
+
+    /// Rebuild SQL index from CAS (source of truth)
+    Repair {
+        /// Dry run — show what would be synced without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -217,6 +224,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Log { n } => cmd_log(&base, n, cli.json),
         Commands::Mcp => cmd_mcp(&base),
         Commands::Scores { node_cid } => cmd_scores(&base, &node_cid, cli.json),
+        Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
     }
 }
 
@@ -444,7 +452,26 @@ fn cmd_dag(
 
             let parents: Vec<ket_cas::Cid> = parent.into_iter().map(ket_cas::Cid::from).collect();
             let (node_cid, content_cid) =
-                dag.store_with_node(content.as_bytes(), node_kind, parents, &agent)?;
+                dag.store_with_node(content.as_bytes(), node_kind, parents.clone(), &agent)?;
+
+            // Dual-write to SQL if Dolt is available (single transaction)
+            if let Ok(db) = open_db(base) {
+                let node = dag.get_node(&node_cid)?;
+                let parent_refs: Vec<(&str, i32)> = parents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .collect();
+                let _ = db.sync_dag_node(
+                    node_cid.as_str(),
+                    &kind,
+                    &agent,
+                    &node.timestamp,
+                    content_cid.as_str(),
+                    "",
+                    &parent_refs,
+                );
+            }
 
             // Log
             let log_path = base.join("log");
@@ -829,6 +856,121 @@ fn cmd_scores(
         );
     } else {
         print!("{result}");
+    }
+
+    Ok(())
+}
+
+fn cmd_repair(
+    base: &PathBuf,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let db = open_db(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    // Scan all CAS blobs, find valid DAG nodes
+    let cids = cas.list()?;
+    let mut synced = 0u64;
+    let mut skipped = 0u64;
+    let mut errors = 0u64;
+
+    for cid in &cids {
+        // Try to parse as a DagNode
+        let node = match dag.get_node(cid) {
+            Ok(n) => n,
+            Err(_) => continue, // raw content blob, not a node
+        };
+
+        // Check if already in SQL
+        match db.dag_node_exists(cid.as_str()) {
+            Ok(true) => {
+                skipped += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        }
+
+        if dry_run {
+            if !json {
+                println!(
+                    "  would sync: {}  {}  {}",
+                    &cid.as_str()[..12],
+                    node.kind,
+                    node.agent
+                );
+            }
+            synced += 1;
+            continue;
+        }
+
+        // Sync node + edges in one transaction
+        let parent_refs: Vec<(&str, i32)> = node
+            .parents
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as i32))
+            .collect();
+
+        match db.sync_dag_node(
+            cid.as_str(),
+            &node.kind.to_string(),
+            &node.agent,
+            &node.timestamp,
+            node.output_cid.as_str(),
+            "",
+            &parent_refs,
+        ) {
+            Ok(()) => {
+                synced += 1;
+                if !json {
+                    println!(
+                        "  synced: {}  {}  {}",
+                        &cid.as_str()[..12],
+                        node.kind,
+                        node.agent
+                    );
+                }
+            }
+            Err(e) => {
+                errors += 1;
+                if !json {
+                    eprintln!("  error: {}: {e}", &cid.as_str()[..12]);
+                }
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": dry_run,
+                "synced": synced,
+                "skipped": skipped,
+                "errors": errors,
+            }))?
+        );
+    } else {
+        let verb = if dry_run { "would sync" } else { "synced" };
+        println!(
+            "\nRepair: {synced} {verb}, {skipped} already in sync, {errors} errors"
+        );
+    }
+
+    // Log the repair
+    if !dry_run {
+        let log_path = base.join("log");
+        log::append(
+            &log_path,
+            "repair",
+            &format!("synced={synced} skipped={skipped} errors={errors}"),
+        )?;
     }
 
     Ok(())

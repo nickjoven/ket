@@ -106,6 +106,32 @@ impl DoltDb {
         Ok(())
     }
 
+    /// Execute multiple SQL statements in a single dolt invocation.
+    /// Wraps them in a transaction for atomicity.
+    pub fn exec_batch(&self, statements: &[String]) -> Result<(), SqlError> {
+        if statements.is_empty() {
+            return Ok(());
+        }
+        let mut batch = String::from("BEGIN;\n");
+        for stmt in statements {
+            batch.push_str(stmt);
+            batch.push_str(";\n");
+        }
+        batch.push_str("COMMIT;");
+
+        let output = Command::new("dolt")
+            .args(["sql", "-q", &batch])
+            .current_dir(&self.db_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SqlError::DoltError(format!("batch: {stderr}")));
+        }
+
+        Ok(())
+    }
+
     /// Commit the current state in Dolt.
     pub fn commit(&self, message: &str) -> Result<(), SqlError> {
         // Stage all changes
@@ -136,7 +162,7 @@ impl DoltDb {
                 cid VARCHAR(64) PRIMARY KEY,
                 kind VARCHAR(20) NOT NULL,
                 agent VARCHAR(100) NOT NULL,
-                created_at VARCHAR(30) NOT NULL,
+                created_at VARCHAR(40) NOT NULL,
                 output_cid VARCHAR(64) NOT NULL,
                 meta TEXT
             )",
@@ -150,7 +176,7 @@ impl DoltDb {
                 from_cid VARCHAR(64) NOT NULL,
                 to_cid VARCHAR(64) NOT NULL,
                 relation VARCHAR(100) NOT NULL,
-                created_at VARCHAR(30) NOT NULL,
+                created_at VARCHAR(40) NOT NULL,
                 PRIMARY KEY (from_cid, to_cid, relation)
             )",
             "CREATE TABLE IF NOT EXISTS tasks (
@@ -159,8 +185,8 @@ impl DoltDb {
                 status VARCHAR(20) NOT NULL DEFAULT 'pending',
                 assigned_to VARCHAR(100),
                 created_by VARCHAR(100) NOT NULL,
-                created_at VARCHAR(30) NOT NULL,
-                updated_at VARCHAR(30) NOT NULL,
+                created_at VARCHAR(40) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL,
                 parent_task VARCHAR(36),
                 context_cid VARCHAR(64),
                 result_cid VARCHAR(64),
@@ -172,7 +198,7 @@ impl DoltDb {
                 mcp_capable BOOLEAN NOT NULL DEFAULT FALSE,
                 capabilities TEXT,
                 model VARCHAR(100),
-                updated_at VARCHAR(30) NOT NULL
+                updated_at VARCHAR(40) NOT NULL
             )",
             "CREATE TABLE IF NOT EXISTS scores (
                 id VARCHAR(36) PRIMARY KEY,
@@ -182,7 +208,7 @@ impl DoltDb {
                 dimension VARCHAR(50) NOT NULL,
                 value FLOAT NOT NULL,
                 evidence TEXT,
-                created_at VARCHAR(30) NOT NULL
+                created_at VARCHAR(40) NOT NULL
             )",
         ];
 
@@ -224,6 +250,45 @@ impl DoltDb {
              VALUES ('{parent_cid}', '{child_cid}', {ordinal})"
         );
         self.exec(&sql)
+    }
+
+    /// Sync a DAG node + its edges to SQL in a single transaction.
+    /// Uses INSERT IGNORE so re-syncing the same node is idempotent.
+    pub fn sync_dag_node(
+        &self,
+        cid: &str,
+        kind: &str,
+        agent: &str,
+        created_at: &str,
+        output_cid: &str,
+        meta: &str,
+        parent_cids: &[(&str, i32)],
+    ) -> Result<(), SqlError> {
+        let mut stmts = Vec::with_capacity(1 + parent_cids.len());
+
+        stmts.push(format!(
+            "INSERT IGNORE INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta) \
+             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}')",
+            escape_sql(meta)
+        ));
+
+        for (parent_cid, ordinal) in parent_cids {
+            stmts.push(format!(
+                "INSERT IGNORE INTO dag_edges (parent_cid, child_cid, ordinal) \
+                 VALUES ('{parent_cid}', '{cid}', {ordinal})"
+            ));
+        }
+
+        self.exec_batch(&stmts)
+    }
+
+    /// Check if a DAG node exists in SQL.
+    pub fn dag_node_exists(&self, cid: &str) -> Result<bool, SqlError> {
+        let result = self.query(&format!(
+            "SELECT COUNT(*) AS cnt FROM dag_nodes WHERE cid = '{cid}'"
+        ))?;
+        // CSV output: "cnt\n0\n" or "cnt\n1\n"
+        Ok(!result.contains("\n0"))
     }
 
     /// Insert a soft link.
