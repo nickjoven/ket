@@ -414,6 +414,63 @@ fn cas_stats_shows_breakdown() {
     assert!(result["content_blobs"].as_u64().unwrap() >= 1);
 }
 
+// --- DOT output test ---
+
+#[test]
+fn dot_outputs_graphviz() {
+    let (ket_dir, _dir) = fresh_ket("dot");
+
+    let root = ket_json(&ket_dir, &["dag", "create", "root node", "--kind", "memory", "--agent", "human"]);
+    let root_cid = root["node_cid"].as_str().unwrap().to_string();
+    ket_json(&ket_dir, &["dag", "create", "child node", "--kind", "code", "--agent", "claude", "--parent", &root_cid]);
+
+    let (ok, stdout, _) = ket(&ket_dir, &["dot"]);
+    assert!(ok);
+    assert!(stdout.contains("digraph ket"));
+    assert!(stdout.contains("rankdir=BT"));
+    assert!(stdout.contains("->"));
+}
+
+// --- Search test ---
+
+#[test]
+fn search_finds_content() {
+    let (ket_dir, dir) = fresh_ket("search");
+
+    let f = dir.path().join("searchable.txt");
+    std::fs::write(&f, b"the quick brown fox jumps over the lazy dog").unwrap();
+    ket(&ket_dir, &["put", f.to_str().unwrap()]);
+
+    let result = ket_json(&ket_dir, &["search", "quick brown"]);
+    let results = result.as_array().unwrap();
+    assert!(!results.is_empty());
+    assert!(results[0]["matches"][0]["text"].as_str().unwrap().contains("quick brown"));
+}
+
+// --- Snapshot test ---
+
+#[test]
+fn snapshot_create_and_verify() {
+    let (ket_dir, _dir) = fresh_ket("snapshot");
+
+    ket_json(&ket_dir, &["dag", "create", "node A", "--kind", "memory", "--agent", "human"]);
+    ket_json(&ket_dir, &["dag", "create", "node B", "--kind", "code", "--agent", "claude"]);
+
+    // Create snapshot
+    let result = ket_json(&ket_dir, &["snapshot", "create", "v1"]);
+    assert!(result["dag_nodes"].as_u64().unwrap() >= 2);
+
+    // List snapshots
+    let result = ket_json(&ket_dir, &["snapshot", "ls"]);
+    let snaps = result.as_array().unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0]["name"], "v1");
+
+    // Verify snapshot
+    let result = ket_json(&ket_dir, &["snapshot", "verify", "v1"]);
+    assert!(result["ok"].as_bool().unwrap());
+}
+
 // --- helpers ---
 
 fn has_dolt() -> bool {

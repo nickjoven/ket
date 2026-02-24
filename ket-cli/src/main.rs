@@ -191,6 +191,44 @@ enum Commands {
 
     /// Show CAS store statistics
     CasStats,
+
+    /// Output DAG as Graphviz DOT for visualization
+    Dot {
+        /// Only include this node and its lineage
+        #[arg(long)]
+        root: Option<String>,
+    },
+
+    /// Search content across all CAS blobs
+    Search {
+        /// Text to search for (case-insensitive)
+        query: String,
+        /// Max results
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Create a named snapshot of current DAG state
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Create a new snapshot
+    Create {
+        /// Snapshot name
+        name: String,
+    },
+    /// List all snapshots
+    Ls,
+    /// Verify current state against a snapshot
+    Verify {
+        /// Snapshot name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -401,6 +439,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             agent,
         } => cmd_merge(&base, &content, &parents, &kind, &agent, cli.json),
         Commands::CasStats => cmd_cas_stats(&base, cli.json),
+        Commands::Dot { root } => cmd_dot(&base, root.as_deref()),
+        Commands::Search { query, limit } => cmd_search(&base, &query, limit, cli.json),
+        Commands::Snapshot { action } => cmd_snapshot(&base, action, cli.json),
     }
 }
 
@@ -1852,6 +1893,319 @@ fn cmd_merge(
         println!("  Parents:  {}", parents.len());
         for (i, p) in parents.iter().enumerate() {
             println!("    [{i}] {}", &p[..12.min(p.len())]);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_dot(base: &PathBuf, root: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    let nodes: Vec<(ket_cas::Cid, ket_dag::DagNode)> = if let Some(root_cid) = root {
+        dag.lineage(&ket_cas::Cid::from(root_cid))?
+    } else {
+        // All DAG nodes
+        let cids = cas.list()?;
+        cids.iter()
+            .filter_map(|cid| dag.get_node(cid).ok().map(|n| (cid.clone(), n)))
+            .collect()
+    };
+
+    println!("digraph ket {{");
+    println!("  rankdir=BT;");
+    println!("  node [shape=box, style=filled, fontname=\"monospace\"];");
+    println!();
+
+    // Node kind -> color mapping
+    for (cid, node) in &nodes {
+        let short = &cid.as_str()[..12];
+        let color = match node.kind {
+            ket_dag::NodeKind::Memory => "#E8F5E9",
+            ket_dag::NodeKind::Code => "#E3F2FD",
+            ket_dag::NodeKind::Reasoning => "#FFF3E0",
+            ket_dag::NodeKind::Task => "#F3E5F5",
+            ket_dag::NodeKind::Cdom => "#E0F7FA",
+            ket_dag::NodeKind::Score => "#FBE9E7",
+            ket_dag::NodeKind::Context => "#F1F8E9",
+        };
+        println!(
+            "  \"{}\" [label=\"{}\\n{}\\n{}\", fillcolor=\"{}\"];",
+            short, short, node.kind, node.agent, color
+        );
+    }
+
+    println!();
+
+    // Edges
+    for (cid, node) in &nodes {
+        let child_short = &cid.as_str()[..12];
+        for parent in &node.parents {
+            let parent_short = &parent.as_str()[..12];
+            println!("  \"{}\" -> \"{}\";", child_short, parent_short);
+        }
+    }
+
+    // Soft links (dashed)
+    if let Ok(db) = open_db(base) {
+        for (cid, _) in &nodes {
+            if let Ok(links) = db.soft_links_from(cid.as_str()) {
+                for line in links.lines().skip(1) {
+                    let parts: Vec<&str> = line.splitn(3, ',').collect();
+                    if parts.len() >= 2 {
+                        let to_short = &parts[0][..12.min(parts[0].len())];
+                        let relation = if parts.len() >= 3 { parts[1] } else { "" };
+                        let from_short = &cid.as_str()[..12];
+                        println!(
+                            "  \"{}\" -> \"{}\" [style=dashed, label=\"{}\", color=\"gray\"];",
+                            from_short, to_short, relation
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    println!("}}");
+    Ok(())
+}
+
+fn cmd_search(
+    base: &PathBuf,
+    query: &str,
+    limit: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let cids = cas.list()?;
+    let query_lower = query.to_lowercase();
+
+    let mut results = Vec::new();
+
+    for cid in &cids {
+        if results.len() >= limit {
+            break;
+        }
+        if let Ok(data) = cas.get(cid) {
+            if let Ok(text) = std::str::from_utf8(&data) {
+                let text_lower = text.to_lowercase();
+                if text_lower.contains(&query_lower) {
+                    // Find matching lines with context
+                    let mut match_lines = Vec::new();
+                    for (i, line) in text.lines().enumerate() {
+                        if line.to_lowercase().contains(&query_lower) {
+                            match_lines.push((i + 1, line.to_string()));
+                        }
+                    }
+                    results.push((cid.clone(), data.len(), match_lines));
+                }
+            }
+        }
+    }
+
+    if json {
+        let items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(cid, size, lines)| {
+                serde_json::json!({
+                    "cid": cid.as_str(),
+                    "size": size,
+                    "matches": lines.iter().map(|(n, l)| {
+                        serde_json::json!({"line": n, "text": l})
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if results.is_empty() {
+        println!("No results for '{query}'");
+    } else {
+        for (cid, size, lines) in &results {
+            println!("{}  ({} bytes)", &cid.as_str()[..12], size);
+            for (n, line) in lines.iter().take(3) {
+                let display = if line.len() > 100 {
+                    format!("{}...", &line[..100])
+                } else {
+                    line.to_string()
+                };
+                println!("  L{n}: {display}");
+            }
+            if lines.len() > 3 {
+                println!("  ... {} more matches", lines.len() - 3);
+            }
+        }
+        println!("\n{} blobs matched", results.len());
+    }
+
+    Ok(())
+}
+
+fn cmd_snapshot(
+    base: &PathBuf,
+    action: SnapshotAction,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshots_dir = base.join("snapshots");
+
+    match action {
+        SnapshotAction::Create { name } => {
+            fs::create_dir_all(&snapshots_dir)?;
+
+            let cas = open_cas(base)?;
+            let dag = ket_dag::Dag::new(&cas);
+
+            // Collect all DAG node CIDs + their output CIDs
+            let cids = cas.list()?;
+            let mut snapshot_data = Vec::new();
+
+            for cid in &cids {
+                if let Ok(node) = dag.get_node(cid) {
+                    snapshot_data.push(serde_json::json!({
+                        "node_cid": cid.as_str(),
+                        "output_cid": node.output_cid.as_str(),
+                        "kind": node.kind.to_string(),
+                        "agent": node.agent,
+                        "timestamp": node.timestamp,
+                        "parents": node.parents.len(),
+                    }));
+                }
+            }
+
+            let snapshot = serde_json::json!({
+                "name": name,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "total_blobs": cids.len(),
+                "dag_nodes": snapshot_data.len(),
+                "nodes": snapshot_data,
+            });
+
+            let path = snapshots_dir.join(format!("{name}.json"));
+            fs::write(&path, serde_json::to_string_pretty(&snapshot)?)?;
+
+            // Log
+            let log_path = base.join("log");
+            log::append(&log_path, "snapshot:create", &name)?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": name,
+                        "dag_nodes": snapshot_data.len(),
+                        "total_blobs": cids.len(),
+                        "path": path.display().to_string(),
+                    }))?
+                );
+            } else {
+                println!(
+                    "Snapshot '{}': {} DAG nodes, {} total blobs",
+                    name,
+                    snapshot_data.len(),
+                    cids.len()
+                );
+            }
+        }
+        SnapshotAction::Ls => {
+            if !snapshots_dir.exists() {
+                if json {
+                    println!("[]");
+                } else {
+                    println!("No snapshots. Use `ket snapshot create <name>` to create one.");
+                }
+                return Ok(());
+            }
+
+            let mut snaps = Vec::new();
+            for entry in fs::read_dir(&snapshots_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "json") {
+                    let data = fs::read_to_string(&path)?;
+                    let snap: serde_json::Value = serde_json::from_str(&data)?;
+                    snaps.push(snap);
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snaps)?);
+            } else if snaps.is_empty() {
+                println!("No snapshots.");
+            } else {
+                for snap in &snaps {
+                    println!(
+                        "  {}  {} nodes  {}",
+                        snap["name"].as_str().unwrap_or("?"),
+                        snap["dag_nodes"],
+                        snap["created_at"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        SnapshotAction::Verify { name } => {
+            let path = snapshots_dir.join(format!("{name}.json"));
+            if !path.exists() {
+                return Err(format!("Snapshot '{name}' not found").into());
+            }
+
+            let data = fs::read_to_string(&path)?;
+            let snap: serde_json::Value = serde_json::from_str(&data)?;
+            let cas = open_cas(base)?;
+
+            let nodes = snap["nodes"].as_array().unwrap();
+            let mut present = 0u64;
+            let mut missing = Vec::new();
+            let mut corrupted = Vec::new();
+
+            for node in nodes {
+                let node_cid = ket_cas::Cid::from(node["node_cid"].as_str().unwrap());
+                let output_cid = ket_cas::Cid::from(node["output_cid"].as_str().unwrap());
+
+                if !cas.exists(&node_cid) {
+                    missing.push(node_cid.as_str().to_string());
+                } else if !cas.verify(&node_cid)? {
+                    corrupted.push(node_cid.as_str().to_string());
+                } else {
+                    present += 1;
+                }
+
+                if !cas.exists(&output_cid) {
+                    missing.push(output_cid.as_str().to_string());
+                } else if !cas.verify(&output_cid)? {
+                    corrupted.push(output_cid.as_str().to_string());
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": name,
+                        "snapshot_nodes": nodes.len(),
+                        "present": present,
+                        "missing": missing,
+                        "corrupted": corrupted,
+                        "ok": missing.is_empty() && corrupted.is_empty(),
+                    }))?
+                );
+            } else if missing.is_empty() && corrupted.is_empty() {
+                println!("Snapshot '{}' verified: all {} nodes present and intact", name, nodes.len());
+            } else {
+                if !missing.is_empty() {
+                    println!("MISSING ({}):", missing.len());
+                    for cid in &missing {
+                        println!("  {}", &cid[..12]);
+                    }
+                }
+                if !corrupted.is_empty() {
+                    println!("CORRUPTED ({}):", corrupted.len());
+                    for cid in &corrupted {
+                        println!("  {}", &cid[..12]);
+                    }
+                }
+                println!("\n{} nodes OK, {} missing, {} corrupted", present, missing.len(), corrupted.len());
+                std::process::exit(1);
+            }
         }
     }
 
