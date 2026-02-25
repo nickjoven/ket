@@ -2,7 +2,7 @@
 
 Content-addressable substrate for multi-agent memory systems.
 
-Ket is the storage and orchestration backbone for [EverMemOS](https://github.com/njoven/evermemos) — a multi-agent collaboration platform that tracks provenance, lineage, and mutual learning. Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and stored in an immutable content-addressed store with a queryable SQL mirror powered by [Dolt](https://github.com/dolthub/dolt).
+Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and stored in an immutable content-addressed store with a queryable SQL mirror powered by [Dolt](https://github.com/dolthub/dolt). Built for multi-agent workflows where provenance, lineage, and scoring matter.
 
 ## Architecture
 
