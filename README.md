@@ -4,6 +4,8 @@ Content-addressable substrate for multi-agent memory systems.
 
 Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and stored in an immutable content-addressed store with a queryable SQL mirror powered by [Dolt](https://github.com/dolthub/dolt). Built for multi-agent workflows where provenance, lineage, and scoring matter.
 
+Ket implements the substrate architecture described in [*A Content-Addressed Adaptive Knowledge Substrate for Distributed Epistemic Coordination*](../jfk-dsa/joven_knowledge_substrate.md) (Joven, 2026) — a systems-layer approach to LLM reasoning failures that externalizes memory persistence, provenance, and traversal control into a deterministic, content-addressed infrastructure. The paper's core primitives (Merkle DAG nodes, depth scoring, tiered operations, delta chains, and fixed-point convergence) map directly to ket's crate architecture; see the paper's §9.2 for the full mapping.
+
 ## Architecture
 
 ```
