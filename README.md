@@ -1,4 +1,4 @@
-# Ket
+# Ket $|\psi\rangle$
 
 Content-addressable substrate for multi-agent memory systems.
 
