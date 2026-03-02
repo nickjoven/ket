@@ -9,17 +9,17 @@ Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and sto
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     ket-cli                         │
-│              21 commands, --json output              │
+│              21 commands, --json output             │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
-│ 11 tools │  tasks   │ 4 dims   │   tree-sitter     │
+│ 11 tools │  tasks   │ 4 dims    │   tree-sitter     │
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
 ├──────────┴──────────┴───────────┴───────────────────┤
-│                     ket-dag                          │
-│        Merkle DAG · lineage · soft links             │
+│                     ket-dag                         │
+│        Merkle DAG · lineage · soft links            │
 ├─────────────────────────────────────────────────────┤
-│          ket-cas            │        ket-sql         │
-│   BLAKE3 flat-file blobs   │  Dolt versioned SQL    │
+│          ket-cas            │        ket-sql        │
+│   BLAKE3 flat-file blobs    │  Dolt versioned SQL   │
 └─────────────────────────────┴───────────────────────┘
 ```
 
