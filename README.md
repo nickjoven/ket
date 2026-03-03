@@ -11,12 +11,15 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     ket-cli                         │
-│              21 commands, --json output             │
+│              22 commands, --json output             │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
-│ 11 tools │  tasks   │ 4 dims    │   tree-sitter     │
+│ 12 tools │  tasks   │ 4 dims    │   tree-sitter     │
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
-├──────────┴──────────┴───────────┴───────────────────┤
+├──────────┼──────────┴───────────┴───────────────────┤
+│ ket-opt  │  WQS binary search · tier allocation     │
+│ calibrate│  Lagrangian relaxation · provenance       │
+├──────────┴──────────────────────────────────────────┤
 │                     ket-dag                         │
 │        Merkle DAG · lineage · soft links            │
 ├─────────────────────────────────────────────────────┤
@@ -33,12 +36,13 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 |-------|---------|
 | **ket-cas** | BLAKE3 content-addressed blob store (`.ket/cas/<hash>`) |
 | **ket-dag** | Merkle DAG for provenance — parent chains, soft links, export/import bundles |
-| **ket-sql** | Dolt SQL wrapper — 8 tables, versioned commits, lineage queries |
-| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 11 tools for Claude and other agents |
+| **ket-sql** | Dolt SQL wrapper — 9 tables, versioned commits, lineage queries |
+| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 12 tools for Claude and other agents |
 | **ket-agent** | Multi-agent orchestration — task lifecycle, subprocess spawning, context injection |
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
+| **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
 | **ket-cdom** | Code Document Object Model — tree-sitter parsing for Rust and Python symbol extraction |
-| **ket-cli** | CLI binary with 21 commands |
+| **ket-cli** | CLI binary with 22 commands |
 | **ket-py** | PyO3 Python bindings for CAS and DAG operations |
 
 ## Prerequisites
@@ -78,6 +82,9 @@ ket mcp
 
 # Auto-score an output (compile + test + clippy)
 ket scores auto <cid> --agent claude --dir .
+
+# Calibrate traversal tiers for a subtree
+ket calibrate run <root_cid> --max-cost 50
 ```
 
 ## CLI Commands
@@ -117,6 +124,11 @@ ket scores auto <cid> --agent claude --dir .
 - `ket scores route <dim>` — Best agent for a dimension
 - `ket scores auto <cid>` — Auto-score (build/test/clippy)
 
+### Calibration
+- `ket calibrate run <root_cid>` — WQS optimize tier allocation (`--max-cost`, `--max-depth`, `--max-tier3`)
+- `ket calibrate inspect <cid>` — Read back a stored calibration
+- `ket calibrate history <root_cid>` — All calibrations for a subtree
+
 ### Operations
 - `ket sql <query>` — Raw SQL against Dolt
 - `ket log [-n <count>]` — Mutation log
@@ -131,9 +143,9 @@ ket scores auto <cid> --agent claude --dir .
 
 ## MCP Integration
 
-Ket exposes 11 tools over MCP (Model Context Protocol) for agent integration:
+Ket exposes 12 tools over MCP (Model Context Protocol) for agent integration:
 
-`ket_put`, `ket_get`, `ket_verify`, `ket_dag_link`, `ket_dag_lineage`, `ket_check_drift`, `ket_query_cdom`, `ket_store_reasoning`, `ket_create_subtask`, `ket_get_reasoning`, `ket_score`
+`ket_put`, `ket_get`, `ket_verify`, `ket_dag_link`, `ket_dag_lineage`, `ket_check_drift`, `ket_query_cdom`, `ket_store_reasoning`, `ket_create_subtask`, `ket_get_reasoning`, `ket_calibrate`, `ket_score`
 
 Add to your Claude MCP config:
 
