@@ -18,7 +18,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
 ├──────────┼──────────┴───────────┴───────────────────┤
 │ ket-opt  │  WQS binary search · tier allocation     │
-│ calibrate│  Lagrangian relaxation · provenance       │
+│ calibrate│  Lagrangian relaxation · provenance      │
 ├──────────┴──────────────────────────────────────────┤
 │                     ket-dag                         │
 │        Merkle DAG · lineage · soft links            │
