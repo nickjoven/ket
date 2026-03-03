@@ -419,6 +419,7 @@ dependencies = [
  "ket-cdom",
  "ket-dag",
  "ket-mcp",
+ "ket-opt",
  "ket-score",
  "ket-sql",
  "serde",
@@ -448,12 +449,28 @@ dependencies = [
  "ket-cas",
  "ket-cdom",
  "ket-dag",
+ "ket-opt",
  "ket-score",
  "ket-sql",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "ket-opt"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ket-cas",
+ "ket-dag",
+ "ket-score",
+ "ket-sql",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

@@ -26,6 +26,8 @@ pub enum McpError {
     Score(#[from] ket_score::ScoreError),
     #[error("CDOM error: {0}")]
     Cdom(#[from] ket_cdom::CdomError),
+    #[error("Opt error: {0}")]
+    Opt(#[from] ket_opt::OptError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -188,6 +190,20 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "cid": { "type": "string", "description": "Reasoning node CID" }
                 },
                 "required": ["cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_calibrate".into(),
+            description: "Run WQS calibration to optimize traversal tier allocation".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root_cid": { "type": "string", "description": "Root CID of the subtree to calibrate" },
+                    "max_cost": { "type": "number", "description": "Maximum total compute cost (default: 50)" },
+                    "max_depth": { "type": "integer", "description": "Maximum depth to explore (default: 20)" },
+                    "max_tier3": { "type": "integer", "description": "Maximum Tier 3 calls (default: 5)" }
+                },
+                "required": ["root_cid"]
             }),
         },
         ToolDescriptor {
@@ -393,6 +409,29 @@ pub fn handle_tool_call(
                     Ok(serde_json::json!({ "content": content }))
                 }
             }
+        }
+        "ket_calibrate" => {
+            let root_cid = params["root_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
+            let max_cost = params.get("max_cost").and_then(|v| v.as_f64()).unwrap_or(50.0);
+            let max_depth = params.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+            let max_tier3 = params.get("max_tier3").and_then(|v| v.as_u64()).unwrap_or(5) as u32;
+
+            let dag = ket_dag::Dag::new(cas);
+            let constraints = ket_opt::Constraints {
+                max_cost,
+                max_depth,
+                max_tier3_calls: max_tier3,
+            };
+            let cid = ket_cas::Cid::from(root_cid);
+            let (node_cid, result) =
+                ket_opt::calibrate(cas, &dag, db, &cid, &constraints, "mcp")?;
+
+            Ok(serde_json::json!({
+                "node_cid": node_cid.as_str(),
+                "result": result,
+            }))
         }
         "ket_score" => {
             let node_cid = params["node_cid"]

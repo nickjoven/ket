@@ -9,6 +9,7 @@ members = [
     "ket-cdom",
     "ket-cli",
     "ket-py",
+    "ket-opt",
 ]
 resolver = "2"
 
@@ -36,3 +37,4 @@ ket-mcp = { path = "ket-mcp" }
 ket-agent = { path = "ket-agent" }
 ket-score = { path = "ket-score" }
 ket-cdom = { path = "ket-cdom" }
+ket-opt = { path = "ket-opt" }

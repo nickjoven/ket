@@ -230,6 +230,18 @@ impl DoltDb {
                 evidence TEXT,
                 created_at VARCHAR(40) NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS calibrations (
+                cid VARCHAR(64) PRIMARY KEY,
+                root_cid VARCHAR(64) NOT NULL,
+                lambda_cost FLOAT,
+                lambda_depth FLOAT,
+                lambda_tier3 FLOAT,
+                total_gain FLOAT,
+                total_cost FLOAT,
+                iterations INT,
+                agent VARCHAR(100),
+                ts VARCHAR(40)
+            )",
         ];
 
         for stmt in &ddl {
@@ -274,6 +286,7 @@ impl DoltDb {
 
     /// Sync a DAG node + its edges to SQL in a single transaction.
     /// Uses INSERT IGNORE so re-syncing the same node is idempotent.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync_dag_node(
         &self,
         cid: &str,
@@ -385,6 +398,7 @@ impl DoltDb {
     }
 
     /// Insert a score.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_score(
         &self,
         id: &str,
@@ -730,6 +744,7 @@ impl DoltDb {
         let link_count = self.query("SELECT COUNT(*) AS n FROM soft_links")?;
         let context_count = self.query("SELECT COUNT(*) AS n FROM context_files")?;
         let symbol_count = self.query("SELECT COUNT(*) AS n FROM cdom_symbols")?;
+        let calibration_count = self.query("SELECT COUNT(*) AS n FROM calibrations")?;
 
         Ok(DbStats {
             nodes: parse_count(&node_count),
@@ -740,6 +755,7 @@ impl DoltDb {
             soft_links: parse_count(&link_count),
             context_files: parse_count(&context_count),
             symbols: parse_count(&symbol_count),
+            calibrations: parse_count(&calibration_count),
         })
     }
 }
@@ -755,6 +771,7 @@ pub struct DbStats {
     pub soft_links: u64,
     pub context_files: u64,
     pub symbols: u64,
+    pub calibrations: u64,
 }
 
 fn parse_count(csv: &str) -> u64 {

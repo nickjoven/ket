@@ -1,3 +1,5 @@
+#![allow(clippy::ptr_arg)]
+
 mod log;
 
 use clap::{Parser, Subcommand};
@@ -277,6 +279,22 @@ Examples:
     Scores {
         #[command(subcommand)]
         action: ScoreAction,
+    },
+
+    /// WQS calibration — optimize traversal tier allocation
+    #[command(long_about = "\
+Run Lagrangian relaxation (WQS/Aliens trick) to optimally allocate compute
+tiers across DAG nodes given budget constraints.
+
+Calibration results are stored as DAG nodes with provenance.
+
+Examples:
+  ket calibrate run <root_cid> --max-cost 50
+  ket calibrate inspect <result_cid>
+  ket calibrate history <root_cid>")]
+    Calibrate {
+        #[command(subcommand)]
+        action: CalibrateAction,
     },
 
     /// Rebuild SQL index from CAS (CAS is source of truth)
@@ -670,6 +688,37 @@ Records scores and returns results.")]
 }
 
 #[derive(Subcommand)]
+enum CalibrateAction {
+    /// Run WQS calibration on a DAG subtree
+    Run {
+        /// Root CID of the subtree to calibrate
+        root: String,
+        /// Maximum total compute cost
+        #[arg(long, default_value = "50.0")]
+        max_cost: f64,
+        /// Maximum depth to explore
+        #[arg(long, default_value = "20")]
+        max_depth: u32,
+        /// Maximum number of Tier 3 (Deep) calls
+        #[arg(long, default_value = "5")]
+        max_tier3: u32,
+        /// Agent name
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
+    /// Inspect a stored calibration result
+    Inspect {
+        /// CID of the calibration DAG node
+        cid: String,
+    },
+    /// Show calibration history for a subtree root
+    History {
+        /// Root CID
+        root: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum LinkAction {
     /// Create a soft link between two nodes
     Create {
@@ -736,6 +785,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Log { n } => cmd_log(&base, n, cli.json),
         Commands::Mcp => cmd_mcp(&base),
         Commands::Scores { action } => cmd_scores(&base, action, cli.json),
+        Commands::Calibrate { action } => cmd_calibrate(&base, action, cli.json),
         Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
         Commands::Status => cmd_status(&base, cli.json),
         Commands::History { n } => cmd_history(&base, n, cli.json),
@@ -1564,6 +1614,93 @@ fn cmd_scores(
     Ok(())
 }
 
+fn cmd_calibrate(
+    base: &PathBuf,
+    action: CalibrateAction,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = open_cas(base)?;
+    let db = open_db(base)?;
+    let dag = ket_dag::Dag::new(&cas);
+
+    match action {
+        CalibrateAction::Run {
+            root,
+            max_cost,
+            max_depth,
+            max_tier3,
+            agent,
+        } => {
+            let constraints = ket_opt::Constraints {
+                max_cost,
+                max_depth,
+                max_tier3_calls: max_tier3,
+            };
+            let root_cid = ket_cas::Cid::from(root.as_str());
+            let (node_cid, result) =
+                ket_opt::calibrate(&cas, &dag, &db, &root_cid, &constraints, &agent)?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "node_cid": node_cid.as_str(),
+                        "result": result,
+                    }))?
+                );
+            } else {
+                println!("Calibration stored: {}", node_cid.as_str());
+                println!("  Root:       {}", &result.root_cid[..12.min(result.root_cid.len())]);
+                println!("  Gain:       {:.3}", result.total_gain);
+                println!("  Cost:       {:.3}", result.total_cost);
+                println!("  Iterations: {}", result.iterations);
+                println!("  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
+                    result.lambdas.lambda_cost,
+                    result.lambdas.lambda_depth,
+                    result.lambdas.lambda_tier3,
+                );
+                println!("  Nodes:      {}", result.allocated_tiers.len());
+            }
+        }
+        CalibrateAction::Inspect { cid } => {
+            let result = ket_opt::inspect_calibration(&db, &cid)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Calibration: {}", &cid[..12.min(cid.len())]);
+                println!("  Root:       {}", &result.root_cid[..12.min(result.root_cid.len())]);
+                println!("  Gain:       {:.3}", result.total_gain);
+                println!("  Cost:       {:.3}", result.total_cost);
+                println!("  Iterations: {}", result.iterations);
+                println!("  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
+                    result.lambdas.lambda_cost,
+                    result.lambdas.lambda_depth,
+                    result.lambdas.lambda_tier3,
+                );
+            }
+        }
+        CalibrateAction::History { root } => {
+            let results = ket_opt::calibration_history(&db, &root)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                println!("Calibration history for {}:", &root[..12.min(root.len())]);
+                for (i, r) in results.iter().enumerate() {
+                    println!(
+                        "  [{}] gain={:.3} cost={:.3} iters={} lambda_cost={:.4}",
+                        i, r.total_gain, r.total_cost, r.iterations, r.lambdas.lambda_cost,
+                    );
+                }
+                if results.is_empty() {
+                    println!("  (none)");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_repair(
     base: &PathBuf,
     dry_run: bool,
@@ -1717,6 +1854,7 @@ fn cmd_status(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Erro
             println!("  Soft links:    {}", stats.soft_links);
             println!("  Context files: {}", stats.context_files);
             println!("  CDOM symbols:  {}", stats.symbols);
+            println!("  Calibrations:  {}", stats.calibrations);
         }
     } else if json {
         println!(

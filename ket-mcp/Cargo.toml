@@ -10,6 +10,7 @@ ket-sql.workspace = true
 ket-cdom.workspace = true
 ket-agent.workspace = true
 ket-score.workspace = true
+ket-opt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
