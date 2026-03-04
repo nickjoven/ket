@@ -146,18 +146,35 @@ impl<'a> Dag<'a> {
 
     /// Trace the lineage of a node — walk up the parent chain.
     pub fn lineage(&self, cid: &Cid) -> Result<Vec<(Cid, DagNode)>, DagError> {
+        self.lineage_bounded(cid, None)
+    }
+
+    /// Trace lineage with an optional depth bound.
+    ///
+    /// `max_depth = Some(0)` returns only the start node.
+    /// `max_depth = None` walks the full ancestor chain (equivalent to `lineage()`).
+    pub fn lineage_bounded(
+        &self,
+        cid: &Cid,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<(Cid, DagNode)>, DagError> {
         let mut result = Vec::new();
-        let mut queue = vec![cid.clone()];
+        // Queue entries: (cid, depth_from_start)
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((cid.clone(), 0u32));
         let mut visited = std::collections::HashSet::new();
 
-        while let Some(current) = queue.pop() {
+        while let Some((current, depth)) = queue.pop_front() {
             if !visited.insert(current.clone()) {
                 continue;
             }
             match self.get_node(&current) {
                 Ok(node) => {
-                    for parent in &node.parents {
-                        queue.push(parent.clone());
+                    let within_bound = max_depth.map_or(true, |d| depth < d);
+                    if within_bound {
+                        for parent in &node.parents {
+                            queue.push_back((parent.clone(), depth + 1));
+                        }
                     }
                     result.push((current, node));
                 }
@@ -348,6 +365,48 @@ mod tests {
 
         let lineage = dag.lineage(&grandchild_cid).unwrap();
         assert_eq!(lineage.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lineage_bounded_respects_depth() {
+        let (cas, dir) = temp_store("lineage-bounded");
+        let dag = Dag::new(&cas);
+
+        // Create a chain: root -> child -> grandchild -> great_grandchild
+        let (root_cid, _) =
+            dag.store_with_node(b"root", NodeKind::Memory, vec![], "human").unwrap();
+        let (child_cid, _) =
+            dag.store_with_node(b"child", NodeKind::Memory, vec![root_cid.clone()], "human")
+                .unwrap();
+        let (gc_cid, _) =
+            dag.store_with_node(b"grandchild", NodeKind::Memory, vec![child_cid.clone()], "human")
+                .unwrap();
+        let (ggc_cid, _) = dag
+            .store_with_node(
+                b"great_grandchild",
+                NodeKind::Memory,
+                vec![gc_cid.clone()],
+                "human",
+            )
+            .unwrap();
+
+        // depth=0: only the start node
+        let l0 = dag.lineage_bounded(&ggc_cid, Some(0)).unwrap();
+        assert_eq!(l0.len(), 1);
+
+        // depth=1: start + its parents
+        let l1 = dag.lineage_bounded(&ggc_cid, Some(1)).unwrap();
+        assert_eq!(l1.len(), 2);
+
+        // depth=2: start + parents + grandparents
+        let l2 = dag.lineage_bounded(&ggc_cid, Some(2)).unwrap();
+        assert_eq!(l2.len(), 3);
+
+        // unbounded: full chain
+        let all = dag.lineage(&ggc_cid).unwrap();
+        assert_eq!(all.len(), 4);
 
         let _ = fs::remove_dir_all(&dir);
     }

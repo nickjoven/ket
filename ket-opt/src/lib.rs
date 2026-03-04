@@ -496,6 +496,130 @@ fn insert_calibration(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tier-aware traversal — the bridge from calibration to runtime
+// ---------------------------------------------------------------------------
+
+/// A single node visited during tier-aware traversal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraversalHit {
+    /// CID of the visited node.
+    pub cid: Cid,
+    /// Tier allocated by calibration.
+    pub tier: Tier,
+    /// Realized information gain at this tier.
+    pub realized_gain: f64,
+    /// Compute cost incurred.
+    pub cost: f64,
+    /// Depth from traversal root.
+    pub depth: u32,
+}
+
+/// Result of a tier-aware traversal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraversalResult {
+    /// Nodes visited, in BFS order.
+    pub hits: Vec<TraversalHit>,
+    /// Total information gain realized.
+    pub total_gain: f64,
+    /// Total compute cost incurred.
+    pub total_cost: f64,
+    /// Nodes pruned (Skip-tier or beyond depth bound).
+    pub pruned_count: usize,
+}
+
+/// Walk the spanning tree from `root_cid`, respecting calibration allocations.
+///
+/// Nodes assigned `Tier::Skip` are pruned along with their entire subtree —
+/// the parent-activation constraint from the paper (§2.3) means you cannot
+/// reach a child without activating its parent. This is the runtime half of
+/// the WQS optimization: calibration decides *what* to visit, this function
+/// *executes* the visit.
+pub fn traverse(
+    dag: &Dag<'_>,
+    db: &DoltDb,
+    root_cid: &Cid,
+    calibration: &CalibrationResult,
+) -> Result<TraversalResult, OptError> {
+    let engine = ScoringEngine::new(db);
+    let mut hits = Vec::new();
+    let mut total_gain = 0.0;
+    let mut total_cost = 0.0;
+    let mut pruned_count = 0usize;
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(Cid, u32)> = VecDeque::new();
+    queue.push_back((root_cid.clone(), 0));
+
+    while let Some((cid, depth)) = queue.pop_front() {
+        if !visited.insert(cid.0.clone()) {
+            continue;
+        }
+
+        // Look up tier allocation; default to Skip for uncalibrated nodes
+        let tier = calibration
+            .allocated_tiers
+            .get(&cid.0)
+            .and_then(|s| match s.as_str() {
+                "skip" => Some(Tier::Skip),
+                "shallow" => Some(Tier::Shallow),
+                "moderate" => Some(Tier::Moderate),
+                "deep" => Some(Tier::Deep),
+                _ => None,
+            })
+            .unwrap_or(Tier::Skip);
+
+        if tier == Tier::Skip {
+            // Parent-activation constraint: skip this node and prune subtree
+            pruned_count += 1;
+            continue;
+        }
+
+        // Verify node exists in CAS
+        let _node = match dag.get_node(&cid) {
+            Ok(n) => n,
+            Err(ket_dag::DagError::Cas(ket_cas::CasError::NotFound(_)))
+            | Err(ket_dag::DagError::Serde(_)) => {
+                pruned_count += 1;
+                continue;
+            }
+            Err(e) => return Err(OptError::Dag(e)),
+        };
+
+        let info_potential = compute_info_potential(&engine, &cid);
+        let realized = info_potential * tier.gain_multiplier();
+        let cost = tier.cost();
+
+        hits.push(TraversalHit {
+            cid: cid.clone(),
+            tier,
+            realized_gain: realized,
+            cost,
+            depth,
+        });
+        total_gain += realized;
+        total_cost += cost;
+
+        // Enqueue children (active node → children are reachable)
+        let children_csv = db.children_of(cid.as_str());
+        if let Ok(csv) = children_csv {
+            for line in csv.lines().skip(1) {
+                let child_cid = line.split(',').next().unwrap_or("").trim();
+                if !child_cid.is_empty() && !visited.contains(child_cid) {
+                    queue.push_back((Cid::from(child_cid), depth + 1));
+                }
+            }
+        }
+    }
+
+    Ok(TraversalResult {
+        hits,
+        total_gain,
+        total_cost,
+        pruned_count,
+    })
+}
+
 /// Read back a calibration result from SQL by its CID.
 pub fn inspect_calibration(db: &DoltDb, cid: &str) -> Result<CalibrationResult, OptError> {
     let csv = db.query(&format!(
@@ -753,6 +877,53 @@ mod tests {
         assert_eq!(tier3_count, 3);
         assert!((cost - 12.0).abs() < 1e-10); // 3 * 4.0
         assert!((gain - 3.0).abs() < 1e-10); // 3 * 1.0 * 1.0
+    }
+
+    #[test]
+    fn test_calibration_tiers_round_trip() {
+        // Verify that the tier strings produced by wqs_optimize are
+        // the same strings that traverse() parses back into Tier enums.
+        let nodes = linear_chain(5);
+        let constraints = Constraints {
+            max_cost: 10.0,
+            max_depth: 5,
+            max_tier3_calls: 2,
+        };
+        let result = wqs_optimize(&nodes, &constraints);
+
+        let valid_tiers = ["skip", "shallow", "moderate", "deep"];
+        for tier_str in result.allocated_tiers.values() {
+            assert!(
+                valid_tiers.contains(&tier_str.as_str()),
+                "unexpected tier string: {tier_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_skip_prunes_entire_subtree_semantics() {
+        // If a parent is Skip, the WQS solver should not assign active
+        // tiers to children (they're unreachable). Verify the solver
+        // respects this via high depth penalty.
+        let nodes = linear_chain(5);
+        let lambdas = Lambdas {
+            lambda_cost: 0.0,
+            lambda_depth: 5.0, // extreme depth penalty
+            lambda_tier3: 0.0,
+        };
+        let (_, _, _, assignments) = solve_penalized(&nodes, &lambdas);
+
+        // Nodes at depth 0 may be active, but deep nodes should be skipped
+        // because the depth penalty overwhelms their info_potential.
+        let deep_active = assignments
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| *i >= 3 && **t != Tier::Skip)
+            .count();
+        assert_eq!(
+            deep_active, 0,
+            "deep nodes should be pruned with extreme depth penalty"
+        );
     }
 
     #[test]
