@@ -87,6 +87,35 @@ ket scores auto <cid> --agent claude --dir .
 ket calibrate run <root_cid> --max-cost 50
 ```
 
+## Docker Quickstart
+
+Run ket without installing Rust or Dolt locally.
+
+```sh
+# Build the image
+docker compose build
+
+# Initialize a ket store
+docker compose run --rm ket init
+
+# Store a file (mount your project into /data)
+docker compose run --rm -v "$PWD":/data/project ket put /data/project/myfile.rs
+
+# DAG operations
+docker compose run --rm ket dag create "initial reasoning" --kind reasoning --agent claude
+docker compose run --rm ket dag ls
+docker compose run --rm ket status
+```
+
+The `/data` volume persists your ket store across runs.
+
+**Optional Dolt sidecar** — for scoring, tasks, and SQL queries:
+
+```sh
+docker compose --profile full up -d dolt
+docker compose run --rm ket repair
+```
+
 ## CLI Commands
 
 ### Content Store

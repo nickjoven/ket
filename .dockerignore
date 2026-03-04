@@ -1,0 +1,5 @@
+target/
+.ket/
+.git/
+*.swp
+*.swo

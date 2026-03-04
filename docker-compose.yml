@@ -1,0 +1,22 @@
+services:
+  ket:
+    build: .
+    volumes:
+      - ket-data:/data
+    environment:
+      - KET_HOME=/data/.ket
+
+  dolt:
+    image: dolthub/dolt-sql-server:latest
+    profiles: ["full"]
+    volumes:
+      - ket-data:/data
+    environment:
+      - DOLT_ROOT_PATH=/data/dolt
+    command: >
+      -l trace
+      --host 0.0.0.0
+      --port 3306
+
+volumes:
+  ket-data:
