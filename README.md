@@ -45,12 +45,13 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 | **ket-cli** | CLI binary with 22 commands |
 | **ket-py** | PyO3 Python bindings for CAS and DAG operations |
 
-## Prerequisites
+## Getting Started
 
-- **Rust** (stable, 2021 edition)
-- **Dolt** — install from [dolthub/dolt](https://github.com/dolthub/dolt)
+Three tiers — start minimal, add capabilities when you need them.
 
-## Quickstart
+### Tier 1: Just ket (no dependencies beyond Rust)
+
+Everything you need for content-addressed agent memory: store, DAG, lineage, drift detection, MCP server. **13 of 16 MCP tools work at this tier.**
 
 ```sh
 # Build
@@ -69,27 +70,39 @@ ket dag create "initial reasoning" --kind reasoning --agent claude
 ket track add src/main.rs --agent claude
 ket drift
 
-# Register an agent and create a task
-ket agent register claude
-ket task create "Implement auth module" --by claude
+# Start the MCP server (for Claude integration)
+ket mcp
 
 # Scan code symbols
 ket scan src/lib.rs
 ket cdom "parse"
+```
 
-# Start the MCP server (for Claude integration)
-ket mcp
+**Prerequisites:** Rust (stable, 2021 edition). That's it.
 
-# Auto-score an output (compile + test + clippy)
+### Tier 2: Add Docker (scoring, tasks, SQL queries)
+
+Docker runs Dolt in a container — you never install it directly. This unlocks scoring, task delegation, SQL queries, and calibration. **All 16 MCP tools.**
+
+```sh
+# Start the Dolt sidecar
+docker compose --profile full up -d dolt
+
+# Sync CAS → SQL
+ket repair
+
+# Now scoring and tasks work
+ket agent register claude
+ket task create "Implement auth module" --by claude
 ket scores auto <cid> --agent claude --dir .
-
-# Calibrate traversal tiers for a subtree
 ket calibrate run <root_cid> --max-cost 50
 ```
 
-## Docker Quickstart
+**Prerequisites:** Rust + Docker.
 
-Run ket without installing Rust or Dolt locally.
+### Tier 3: Full Docker (no Rust needed)
+
+Run everything in containers. Good for trying ket without installing Rust.
 
 ```sh
 # Build the image
@@ -107,14 +120,7 @@ docker compose run --rm ket dag ls
 docker compose run --rm ket status
 ```
 
-The `/data` volume persists your ket store across runs.
-
-**Optional Dolt sidecar** — for scoring, tasks, and SQL queries:
-
-```sh
-docker compose --profile full up -d dolt
-docker compose run --rm ket repair
-```
+The `/data` volume persists your ket store across runs. Add the Dolt sidecar with `docker compose --profile full up -d dolt`.
 
 ## CLI Commands
 
