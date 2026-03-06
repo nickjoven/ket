@@ -164,7 +164,8 @@ impl DoltDb {
                 agent VARCHAR(100) NOT NULL,
                 created_at VARCHAR(40) NOT NULL,
                 output_cid VARCHAR(64) NOT NULL,
-                meta TEXT
+                meta TEXT,
+                schema_cid VARCHAR(64)
             )",
             "CREATE TABLE IF NOT EXISTS dag_edges (
                 parent_cid VARCHAR(64) NOT NULL,
@@ -261,10 +262,12 @@ impl DoltDb {
         created_at: &str,
         output_cid: &str,
         meta: &str,
+        schema_cid: Option<&str>,
     ) -> Result<(), SqlError> {
+        let schema_val = schema_cid.unwrap_or("");
         let sql = format!(
-            "INSERT INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta) \
-             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}')",
+            "INSERT INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta, schema_cid) \
+             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
             escape_sql(meta)
         );
         self.exec(&sql)
@@ -296,12 +299,14 @@ impl DoltDb {
         output_cid: &str,
         meta: &str,
         parent_cids: &[(&str, i32)],
+        schema_cid: Option<&str>,
     ) -> Result<(), SqlError> {
         let mut stmts = Vec::with_capacity(1 + parent_cids.len());
 
+        let schema_val = schema_cid.unwrap_or("");
         stmts.push(format!(
-            "INSERT IGNORE INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta) \
-             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}')",
+            "INSERT IGNORE INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta, schema_cid) \
+             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
             escape_sql(meta)
         ));
 
@@ -425,7 +430,7 @@ impl DoltDb {
 
     /// Query all dag nodes.
     pub fn list_dag_nodes(&self) -> Result<String, SqlError> {
-        self.query("SELECT cid, kind, agent, created_at, output_cid FROM dag_nodes ORDER BY created_at")
+        self.query("SELECT cid, kind, agent, created_at, output_cid, schema_cid FROM dag_nodes ORDER BY created_at")
     }
 
     /// Query all agents.

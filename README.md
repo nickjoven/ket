@@ -14,7 +14,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 │              22 commands, --json output             │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
-│ 12 tools │  tasks   │ 4 dims    │   tree-sitter     │
+│ 16 tools │  tasks   │ 4 dims    │   tree-sitter     │
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
 ├──────────┼──────────┴───────────┴───────────────────┤
 │ ket-opt  │  WQS binary search · tier allocation     │
@@ -37,7 +37,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 | **ket-cas** | BLAKE3 content-addressed blob store (`.ket/cas/<hash>`) |
 | **ket-dag** | Merkle DAG for provenance — parent chains, soft links, export/import bundles |
 | **ket-sql** | Dolt SQL wrapper — 9 tables, versioned commits, lineage queries |
-| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 12 tools for Claude and other agents |
+| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 16 tools for Claude and other agents. Dolt is optional — CAS-only tools work without it. |
 | **ket-agent** | Multi-agent orchestration — task lifecycle, subprocess spawning, context injection |
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
 | **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
@@ -172,9 +172,28 @@ docker compose run --rm ket repair
 
 ## MCP Integration
 
-Ket exposes 12 tools over MCP (Model Context Protocol) for agent integration:
+Ket exposes 16 tools over MCP (Model Context Protocol) for agent integration.
 
-`ket_put`, `ket_get`, `ket_verify`, `ket_dag_link`, `ket_dag_lineage`, `ket_check_drift`, `ket_query_cdom`, `ket_store_reasoning`, `ket_create_subtask`, `ket_get_reasoning`, `ket_calibrate`, `ket_score`
+**Dolt is optional.** The MCP server starts with CAS alone — 13 of 16 tools work without Dolt. Only scoring, tasks, and calibration require it.
+
+| Tool | What it does | Needs Dolt? |
+|------|-------------|-------------|
+| `ket_put` | Store content, get CID | No |
+| `ket_get` | Retrieve content by CID | No |
+| `ket_verify` | Check CID integrity | No |
+| `ket_dag_link` | Create DAG node with provenance | No |
+| `ket_dag_lineage` | Trace ancestry chain | No |
+| `ket_dag_ls` | List/filter DAG nodes | No |
+| `ket_check_drift` | Detect file changes | No |
+| `ket_search` | Full-text content search | No |
+| `ket_status` | Substrate health dashboard | No (enhanced with Dolt) |
+| `ket_store_reasoning` | Persist reasoning as DAG node | No |
+| `ket_get_reasoning` | Retrieve reasoning with context | No |
+| `ket_query_cdom` | Search code symbols | No |
+| `ket_schema_stats` | Check schema dedup effectiveness | No |
+| `ket_score` | Record quality scores | **Yes** |
+| `ket_create_subtask` | Delegate work to agents | **Yes** |
+| `ket_calibrate` | Optimize traversal tiers | **Yes** |
 
 Add to your Claude MCP config:
 
@@ -197,6 +216,46 @@ Add to your Claude MCP config:
 - **Scoring gates routing** — Historical evaluation across 4 dimensions lets the system learn which agent is best at what.
 - **Drift detection** — Tracked files are re-hashed on demand to prevent stale reasoning context.
 - **Portable bundles** — DAG subgraphs can be exported and imported across instances.
+- **Schema-linked, not schema-enforced** — See below.
+
+## Schemas and Deduplication
+
+Ket's CAS deduplicates by content hash: identical bytes produce identical CIDs. This is exact dedup, not semantic dedup. Two blobs that *mean* the same thing but differ by a trailing newline or key ordering get different CIDs.
+
+Schemas address this without pulling ket above the intelligence line.
+
+### How it works
+
+A schema is any blob you store in CAS — JSON Schema, a struct definition, a prompt template, a plain-English description. Ket does not interpret it. When creating a DAG node, you attach the schema's CID:
+
+```sh
+# Store your schema
+SCHEMA_CID=$(ket put my_schema.json)
+
+# Create a node whose output conforms to it
+ket dag create "structured observation" \
+  --kind memory --agent claude --schema $SCHEMA_CID
+```
+
+The `schema_cid` field on the node records what shape the output *claims* to have. That's the contract. Enforcement is your problem.
+
+### Why this helps dedup
+
+Content-hash dedup works when semantically equivalent data produces byte-identical output. Schemas make this achievable by constraining the surface area: sorted keys, canonical formatting, required fields only, no optional noise. If agents conform to the schema, equivalent observations hash the same.
+
+### What ket provides
+
+- **`schema_cid` on every node** — optional, stored in the DAG, queryable.
+- **Schema stats** — given a schema CID, count total nodes vs. unique output CIDs. If they're equal, the schema isn't producing dedup. If they diverge, it is. This is a pure hash-count query — no semantic understanding needed.
+- **Propagation via provenance** — when a schema evolves, the DAG makes the blast radius visible. Query for all nodes with the old schema CID, trace their lineage, migrate explicitly.
+
+### What ket does NOT provide
+
+- Schema validation at ingest. Ket won't reject non-conforming data.
+- Schema format opinions. JSON Schema, protobuf, TOML — ket doesn't care.
+- Semantic dedup. If two blobs mean the same thing but have different bytes, they get different CIDs. The schema's job is to prevent that from happening.
+
+The substrate stays below the intelligence line. Schemas are a user-side discipline that makes the content-addressing layer work harder for you.
 
 ## License
 

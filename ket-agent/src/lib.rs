@@ -212,6 +212,7 @@ impl<'a> Orchestrator<'a> {
             node.output_cid.as_str(),
             "",
             &[],
+            node.schema_cid.as_ref().map(|c| c.as_str()),
         )?;
 
         Ok(node_cid)
@@ -242,6 +243,7 @@ impl<'a> Orchestrator<'a> {
             node.output_cid.as_str(),
             "",
             &parent_refs,
+            node.schema_cid.as_ref().map(|c| c.as_str()),
         )?;
 
         Ok(node_cid)

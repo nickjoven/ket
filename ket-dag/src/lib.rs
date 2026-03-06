@@ -58,6 +58,11 @@ pub struct DagNode {
     pub timestamp: String,
     /// Flat key-value metadata.
     pub meta: Vec<(String, String)>,
+    /// Optional CID of the schema that `output_cid` conforms to.
+    /// The schema blob is user-defined and stored in CAS — ket does not
+    /// interpret or validate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_cid: Option<Cid>,
 }
 
 impl DagNode {
@@ -70,12 +75,19 @@ impl DagNode {
             agent: agent.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             meta: Vec::new(),
+            schema_cid: None,
         }
     }
 
     /// Add a metadata key-value pair.
     pub fn with_meta(mut self, key: &str, value: &str) -> Self {
         self.meta.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Set the schema CID that this node's output conforms to.
+    pub fn with_schema(mut self, schema_cid: Cid) -> Self {
+        self.schema_cid = Some(schema_cid);
         self
     }
 
@@ -216,6 +228,29 @@ impl<'a> Dag<'a> {
         }
 
         Ok(referenced)
+    }
+
+    /// Compute dedup statistics for a given schema CID.
+    ///
+    /// Returns (total_nodes, unique_outputs) — if these diverge significantly,
+    /// the schema is producing effective deduplication. If they're equal,
+    /// every node has unique output and the schema isn't constraining content
+    /// enough for CAS dedup to help.
+    pub fn schema_stats(&self, schema_cid: &Cid) -> Result<(usize, usize), DagError> {
+        let all_cids = self.cas.list()?;
+        let mut total = 0usize;
+        let mut outputs = std::collections::HashSet::new();
+
+        for cid in &all_cids {
+            if let Ok(node) = self.get_node(cid) {
+                if node.schema_cid.as_ref() == Some(schema_cid) {
+                    total += 1;
+                    outputs.insert(node.output_cid.clone());
+                }
+            }
+        }
+
+        Ok((total, outputs.len()))
     }
 
     /// Export a DAG subgraph as a self-contained bundle.

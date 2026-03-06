@@ -476,6 +476,9 @@ Examples:
         /// Agent name
         #[arg(long, default_value = "human")]
         agent: String,
+        /// Schema CID that the output conforms to
+        #[arg(long)]
+        schema: Option<String>,
     },
 
     /// Show CAS store statistics (blob counts, sizes, breakdown)
@@ -580,6 +583,9 @@ enum DagAction {
         /// Parent node CIDs (can specify multiple for merge)
         #[arg(long)]
         parent: Vec<String>,
+        /// Schema CID that the output conforms to
+        #[arg(long)]
+        schema: Option<String>,
     },
     /// Trace the full ancestry of a node
     Lineage {
@@ -801,7 +807,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             parents,
             kind,
             agent,
-        } => cmd_merge(&base, &content, &parents, &kind, &agent, cli.json),
+            schema,
+        } => cmd_merge(&base, &content, &parents, &kind, &agent, schema.as_deref(), cli.json),
         Commands::CasStats => cmd_cas_stats(&base, cli.json),
         Commands::Dot { root } => cmd_dot(&base, root.as_deref()),
         Commands::Search { query, limit } => cmd_search(&base, &query, limit, cli.json),
@@ -966,14 +973,18 @@ fn cmd_dag(
                 let items: Vec<serde_json::Value> = nodes
                     .iter()
                     .map(|(cid, node)| {
-                        serde_json::json!({
+                        let mut obj = serde_json::json!({
                             "cid": cid.as_str(),
                             "kind": node.kind.to_string(),
                             "agent": node.agent,
                             "timestamp": node.timestamp,
                             "output_cid": node.output_cid.as_str(),
                             "parents": node.parents.len(),
-                        })
+                        });
+                        if let Some(ref s) = node.schema_cid {
+                            obj["schema_cid"] = serde_json::json!(s.as_str());
+                        }
+                        obj
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
@@ -981,13 +992,19 @@ fn cmd_dag(
                 println!("No DAG nodes.");
             } else {
                 for (cid, node) in &nodes {
+                    let schema_suffix = if let Some(ref s) = node.schema_cid {
+                        format!("  schema:{}", &s.as_str()[..12])
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{}  {}  {}  {}  parents:{}",
+                        "{}  {}  {}  {}  parents:{}{}",
                         &cid.as_str()[..12],
                         node.kind,
                         node.agent,
                         &node.timestamp[..19],
-                        node.parents.len()
+                        node.parents.len(),
+                        schema_suffix
                     );
                 }
             }
@@ -1006,6 +1023,9 @@ fn cmd_dag(
                 for (i, p) in node.parents.iter().enumerate() {
                     println!("  [{i}] {p}");
                 }
+                if let Some(ref s) = node.schema_cid {
+                    println!("Schema:     {s}");
+                }
                 if !node.meta.is_empty() {
                     println!("Meta:");
                     for (k, v) in &node.meta {
@@ -1019,6 +1039,7 @@ fn cmd_dag(
             kind,
             agent,
             parent,
+            schema,
         } => {
             let node_kind = match kind.as_str() {
                 "memory" => ket_dag::NodeKind::Memory,
@@ -1032,8 +1053,12 @@ fn cmd_dag(
             };
 
             let parents: Vec<ket_cas::Cid> = parent.into_iter().map(ket_cas::Cid::from).collect();
-            let (node_cid, content_cid) =
-                dag.store_with_node(content.as_bytes(), node_kind, parents.clone(), &agent)?;
+            let content_cid = cas.put(content.as_bytes())?;
+            let mut node = ket_dag::DagNode::new(node_kind, parents.clone(), content_cid.clone(), &agent);
+            if let Some(ref s) = schema {
+                node = node.with_schema(ket_cas::Cid::from(s.as_str()));
+            }
+            let node_cid = dag.put_node(&node)?;
 
             // Dual-write to SQL if Dolt is available (single transaction)
             if let Ok(db) = open_db(base) {
@@ -1051,6 +1076,7 @@ fn cmd_dag(
                     content_cid.as_str(),
                     "",
                     &parent_refs,
+                    schema.as_deref(),
                 );
             }
 
@@ -1059,16 +1085,20 @@ fn cmd_dag(
             log::append(&log_path, "dag:create", &format!("{node_cid}"))?;
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "node_cid": node_cid.as_str(),
-                        "content_cid": content_cid.as_str(),
-                    }))?
-                );
+                let mut obj = serde_json::json!({
+                    "node_cid": node_cid.as_str(),
+                    "content_cid": content_cid.as_str(),
+                });
+                if let Some(ref s) = schema {
+                    obj["schema_cid"] = serde_json::json!(s);
+                }
+                println!("{}", serde_json::to_string_pretty(&obj)?);
             } else {
                 println!("Node CID:    {node_cid}");
                 println!("Content CID: {content_cid}");
+                if let Some(ref s) = schema {
+                    println!("Schema CID:  {s}");
+                }
             }
         }
         DagAction::Lineage { cid } => {
@@ -1489,8 +1519,8 @@ fn cmd_log(base: &PathBuf, n: usize, json: bool) -> Result<(), Box<dyn std::erro
 
 fn cmd_mcp(base: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
-    let db = open_db(base)?;
-    ket_mcp::run_stdio_server(&cas, &db)?;
+    let db = open_db(base).ok();
+    ket_mcp::run_stdio_server(&cas, db.as_ref())?;
     Ok(())
 }
 
@@ -1765,6 +1795,7 @@ fn cmd_repair(
             node.output_cid.as_str(),
             "",
             &parent_refs,
+            node.schema_cid.as_ref().map(|c| c.as_str()),
         ) {
             Ok(()) => {
                 synced += 1;
@@ -2233,6 +2264,7 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
                         node.output_cid.as_str(),
                         "",
                         &parent_refs,
+                        node.schema_cid.as_ref().map(|c| c.as_str()),
                     )
                     .is_ok()
                 {
@@ -2281,6 +2313,7 @@ fn cmd_merge(
     parents: &[String],
     kind: &str,
     agent: &str,
+    schema: Option<&str>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
@@ -2298,8 +2331,12 @@ fn cmd_merge(
     };
 
     let parent_cids: Vec<ket_cas::Cid> = parents.iter().map(|p| ket_cas::Cid::from(p.as_str())).collect();
-    let (node_cid, content_cid) =
-        dag.store_with_node(content.as_bytes(), node_kind, parent_cids.clone(), agent)?;
+    let content_cid = cas.put(content.as_bytes())?;
+    let mut node = ket_dag::DagNode::new(node_kind, parent_cids.clone(), content_cid.clone(), agent);
+    if let Some(s) = schema {
+        node = node.with_schema(ket_cas::Cid::from(s));
+    }
+    let node_cid = dag.put_node(&node)?;
 
     // Dual-write to SQL
     if let Ok(db) = open_db(base) {
@@ -2317,6 +2354,7 @@ fn cmd_merge(
             content_cid.as_str(),
             "",
             &parent_refs,
+            schema,
         );
     }
 
@@ -2329,19 +2367,23 @@ fn cmd_merge(
     )?;
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "node_cid": node_cid.as_str(),
-                "content_cid": content_cid.as_str(),
-                "parents": parents,
-                "kind": kind,
-                "agent": agent,
-            }))?
-        );
+        let mut obj = serde_json::json!({
+            "node_cid": node_cid.as_str(),
+            "content_cid": content_cid.as_str(),
+            "parents": parents,
+            "kind": kind,
+            "agent": agent,
+        });
+        if let Some(s) = schema {
+            obj["schema_cid"] = serde_json::json!(s);
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
     } else {
         println!("Merge node: {node_cid}");
         println!("  Content:  {content_cid}");
+        if let Some(s) = schema {
+            println!("  Schema:   {s}");
+        }
         println!("  Parents:  {}", parents.len());
         for (i, p) in parents.iter().enumerate() {
             println!("    [{i}] {}", &p[..12.min(p.len())]);

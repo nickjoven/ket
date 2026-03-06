@@ -4,7 +4,7 @@
 //! Tools: ket_put, ket_get, ket_verify, ket_dag_link, ket_dag_lineage,
 //!        ket_check_drift, ket_query_cdom, ket_store_reasoning,
 //!        ket_create_subtask, ket_get_reasoning, ket_score,
-//!        ket_schema_stats.
+//!        ket_schema_stats, ket_dag_ls, ket_status, ket_search.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -234,6 +234,37 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "schema_cid": { "type": "string", "description": "Schema CID to check stats for" }
                 },
                 "required": ["schema_cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_dag_ls".into(),
+            description: "List DAG nodes to discover what's in the substrate. Use this to find nodes by kind (memory, code, reasoning, task) or to see recent activity. Returns summary metadata — use ket_get to retrieve full content.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "description": "Filter by node kind: memory, code, reasoning, task, cdom, score, context" },
+                    "limit": { "type": "integer", "description": "Maximum number of results (default 50)" }
+                }
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_status".into(),
+            description: "Check substrate health and get counts of stored objects. Use this at the start of a session to understand what's available, or after mutations to verify state.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_search".into(),
+            description: "Search stored content by text. Scans all CAS blobs for matching text. Use this when you need to find content but don't have its CID — for example, finding prior reasoning about a specific topic.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Text to search for (case-insensitive)" },
+                    "limit": { "type": "integer", "description": "Maximum number of results (default 20)" }
+                },
+                "required": ["query"]
             }),
         },
     ]
@@ -558,6 +589,101 @@ pub fn handle_tool_call(
                 "unique_outputs": unique,
                 "dedup_ratio": dedup_ratio,
             }))
+        }
+        "ket_dag_ls" => {
+            let kind_filter = params.get("kind").and_then(|v| v.as_str());
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+
+            let dag = ket_dag::Dag::new(cas);
+            let cids = cas.list()?;
+            let mut nodes = Vec::new();
+
+            for cid in &cids {
+                if nodes.len() >= limit {
+                    break;
+                }
+                if let Ok(node) = dag.get_node(cid) {
+                    if let Some(filter) = kind_filter {
+                        if node.kind.to_string() != filter {
+                            continue;
+                        }
+                    }
+                    let mut obj = serde_json::json!({
+                        "cid": cid.as_str(),
+                        "kind": node.kind.to_string(),
+                        "agent": node.agent,
+                        "timestamp": node.timestamp,
+                        "output_cid": node.output_cid.as_str(),
+                    });
+                    if let Some(ref s) = node.schema_cid {
+                        obj["schema_cid"] = serde_json::json!(s.as_str());
+                    }
+                    nodes.push(obj);
+                }
+            }
+
+            Ok(serde_json::json!({ "nodes": nodes }))
+        }
+        "ket_status" => {
+            let cas_blobs = cas.list()?.len();
+
+            // Count valid DAG nodes
+            let dag = ket_dag::Dag::new(cas);
+            let cids = cas.list()?;
+            let dag_nodes = cids.iter().filter(|c| dag.get_node(c).is_ok()).count();
+
+            let has_dolt = db.is_some();
+            let dolt_stats = if let Some(db) = db {
+                db.stats().ok().map(|s| serde_json::json!(s))
+            } else {
+                None
+            };
+
+            Ok(serde_json::json!({
+                "cas_blobs": cas_blobs,
+                "dag_nodes": dag_nodes,
+                "has_dolt": has_dolt,
+                "dolt_stats": dolt_stats,
+            }))
+        }
+        "ket_search" => {
+            let query = params["query"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("query required".into()))?;
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+
+            let cids = cas.list()?;
+            let query_lower = query.to_lowercase();
+            let mut results = Vec::new();
+
+            for cid in &cids {
+                if results.len() >= limit {
+                    break;
+                }
+                if let Ok(data) = cas.get(cid) {
+                    if let Ok(text) = std::str::from_utf8(&data) {
+                        if text.to_lowercase().contains(&query_lower) {
+                            let snippet = if text.len() > 200 {
+                                format!("{}...", &text[..200])
+                            } else {
+                                text.to_string()
+                            };
+                            results.push(serde_json::json!({
+                                "cid": cid.as_str(),
+                                "snippet": snippet,
+                            }));
+                        }
+                    }
+                }
+            }
+
+            Ok(serde_json::json!({ "results": results }))
         }
         _ => Err(McpError::UnknownTool(tool_name.to_string())),
     }

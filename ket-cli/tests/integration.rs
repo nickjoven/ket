@@ -138,11 +138,6 @@ fn dag_drift_detection() {
 fn mcp_initialize() {
     let (ket_dir, _dir) = fresh_ket("mcp-init");
 
-    // Only run if dolt is available (MCP needs SQL)
-    if !has_dolt() {
-        return;
-    }
-
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
     let output = Command::new(ket_bin())
         .args(["--home", ket_dir.to_str().unwrap(), "mcp"])
@@ -172,10 +167,6 @@ fn mcp_initialize() {
 fn mcp_tools_list() {
     let (ket_dir, _dir) = fresh_ket("mcp-tools");
 
-    if !has_dolt() {
-        return;
-    }
-
     let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
     let output = Command::new(ket_bin())
         .args(["--home", ket_dir.to_str().unwrap(), "mcp"])
@@ -196,7 +187,7 @@ fn mcp_tools_list() {
         if let Some(line) = stdout.lines().next() {
             let response: serde_json::Value = serde_json::from_str(line).unwrap();
             let tools = response["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 12);
+            assert_eq!(tools.len(), 16);
 
             let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
             assert!(names.contains(&"ket_put"));
@@ -211,10 +202,6 @@ fn mcp_tools_list() {
 #[test]
 fn mcp_put_get_roundtrip() {
     let (ket_dir, _dir) = fresh_ket("mcp-put-get");
-
-    if !has_dolt() {
-        return;
-    }
 
     // Put
     let put_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ket_put","arguments":{"content":"mcp test content"}}}"#;

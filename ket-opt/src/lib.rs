@@ -461,6 +461,7 @@ pub fn calibrate(
         node.output_cid.as_str(),
         &format!("calibration for {}", &root_cid.0[..12.min(root_cid.0.len())]),
         &[(root_cid.as_str(), 0)],
+        node.schema_cid.as_ref().map(|c| c.as_str()),
     )?;
 
     // Insert calibration row
