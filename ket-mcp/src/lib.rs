@@ -3,7 +3,8 @@
 //! Exposes Ket operations as MCP tools over stdio JSON-RPC.
 //! Tools: ket_put, ket_get, ket_verify, ket_dag_link, ket_dag_lineage,
 //!        ket_check_drift, ket_query_cdom, ket_store_reasoning,
-//!        ket_create_subtask, ket_get_reasoning, ket_score.
+//!        ket_create_subtask, ket_get_reasoning, ket_score,
+//!        ket_schema_stats.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -75,7 +76,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
     vec![
         ToolDescriptor {
             name: "ket_put".into(),
-            description: "Store content in CAS, return CID".into(),
+            description: "Store content in the content-addressed store. Returns a CID (content identifier) — the BLAKE3 hash of the content. Identical content always produces the same CID, enabling automatic deduplication. Use this to store raw artifacts, then ket_dag_link to create a provenance node pointing to the content.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -86,7 +87,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_get".into(),
-            description: "Retrieve content by CID".into(),
+            description: "Retrieve stored content by its CID. Returns the raw content bytes. Use after ket_dag_lineage or ket_dag_ls to inspect what a node's output_cid points to.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -97,7 +98,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_verify".into(),
-            description: "Verify CID integrity".into(),
+            description: "Verify that a CID's content hasn't been corrupted. Re-hashes the stored content and compares to the CID. Returns true if integrity holds.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -108,21 +109,22 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_dag_link".into(),
-            description: "Create DAG edge (parent -> child node)".into(),
+            description: "Create a new DAG node with content and provenance. This is the primary way to record work — every node captures what was produced (content), what it derived from (parents), who produced it (agent), and what kind of artifact it is (kind). Always link parents to maintain provenance chains.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": { "type": "string", "description": "Content for the new node" },
                     "kind": { "type": "string", "description": "Node kind: memory, code, reasoning, task, cdom, score, context" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
-                    "agent": { "type": "string", "description": "Agent name" }
+                    "agent": { "type": "string", "description": "Agent name" },
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
                 },
                 "required": ["content", "kind", "agent"]
             }),
         },
         ToolDescriptor {
             name: "ket_dag_lineage".into(),
-            description: "Trace lineage of a node up the DAG".into(),
+            description: "Trace a node's full ancestry by walking parent links up the DAG. Use this to understand how a piece of knowledge was derived — what reasoning, code, or memory it builds on.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -133,7 +135,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_check_drift".into(),
-            description: "Compare file's current hash to stored CID".into(),
+            description: "Compare a file's current BLAKE3 hash to a previously stored CID. Returns true if the file has changed since the CID was recorded. Use this to detect when source material has changed and reasoning may be stale.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -145,7 +147,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_query_cdom".into(),
-            description: "Search code symbols".into(),
+            description: "Search code symbols (functions, structs, classes) extracted via tree-sitter parsing. Requires a file path to scan. Returns symbol names, kinds, and line ranges.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -157,20 +159,21 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_store_reasoning".into(),
-            description: "Persist agent reasoning as DAG node".into(),
+            description: "Persist a reasoning step as a DAG node with kind=reasoning. Shorthand for ket_dag_link with kind pre-set. Use this to record conclusions, plans, or analysis so future sessions can retrieve context via ket_get_reasoning.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": { "type": "string", "description": "Reasoning content" },
                     "agent": { "type": "string", "description": "Agent name" },
-                    "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" }
+                    "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
                 },
                 "required": ["content", "agent"]
             }),
         },
         ToolDescriptor {
             name: "ket_create_subtask".into(),
-            description: "Delegate work to another agent".into(),
+            description: "Create a task record for delegating work to another agent. Requires Dolt for persistence. Tasks have lifecycle states (pending, assigned, completed) and can be nested via parent_task.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -183,7 +186,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_get_reasoning".into(),
-            description: "Retrieve prior reasoning for context".into(),
+            description: "Retrieve a reasoning node's content by CID. Automatically unwraps the DAG node to return the reasoning text, agent, timestamp, and schema. Use this to inject prior reasoning into prompts.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -194,7 +197,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_calibrate".into(),
-            description: "Run WQS calibration to optimize traversal tier allocation".into(),
+            description: "Run weighted-quality-score optimization on a DAG subtree to allocate compute tiers (free/moderate/expensive) across nodes. Requires Dolt. Advanced — use after building a substantial DAG.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -208,7 +211,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_score".into(),
-            description: "Score an agent output".into(),
+            description: "Record a quality score for a node across four dimensions: correctness, efficiency, style, completeness. Values are 0.0-1.0. Scores accumulate per-agent and per-node, enabling routing decisions (which agent is best at what). Requires Dolt.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -222,6 +225,17 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": ["node_cid", "agent", "scorer", "dimension", "value"]
             }),
         },
+        ToolDescriptor {
+            name: "ket_schema_stats".into(),
+            description: "Check whether a schema is producing effective content deduplication. Returns total nodes tagged with the schema vs. unique output CIDs. If total >> unique, the schema is working — identical observations hash identically.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "schema_cid": { "type": "string", "description": "Schema CID to check stats for" }
+                },
+                "required": ["schema_cid"]
+            }),
+        },
     ]
 }
 
@@ -230,7 +244,7 @@ pub fn handle_tool_call(
     tool_name: &str,
     params: &Value,
     cas: &ket_cas::Store,
-    db: &ket_sql::DoltDb,
+    db: Option<&ket_sql::DoltDb>,
 ) -> Result<Value, McpError> {
     match tool_name {
         "ket_put" => {
@@ -276,21 +290,40 @@ pub fn handle_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
+            let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
 
             let kind = parse_node_kind(kind_str)?;
             let dag = ket_dag::Dag::new(cas);
-            let (node_cid, content_cid) =
-                dag.store_with_node(content.as_bytes(), kind, parents, agent)?;
-
-            let node = dag.get_node(&node_cid)?;
-            db.insert_dag_node(
-                node_cid.as_str(),
-                kind_str,
+            let content_cid = cas.put(content.as_bytes())?;
+            let mut node = ket_dag::DagNode::new(
+                kind,
+                parents.clone(),
+                content_cid.clone(),
                 agent,
-                &node.timestamp,
-                content_cid.as_str(),
-                "",
-            )?;
+            );
+            if let Some(s) = schema_cid_param {
+                node = node.with_schema(ket_cas::Cid::from(s));
+            }
+            let node_cid = dag.put_node(&node)?;
+
+            // Sync to SQL if Dolt is available
+            if let Some(db) = db {
+                let parent_refs: Vec<(&str, i32)> = parents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .collect();
+                let _ = db.sync_dag_node(
+                    node_cid.as_str(),
+                    kind_str,
+                    agent,
+                    &node.timestamp,
+                    content_cid.as_str(),
+                    "",
+                    &parent_refs,
+                    node.schema_cid.as_ref().map(|c| c.as_str()),
+                );
+            }
 
             Ok(serde_json::json!({
                 "node_cid": node_cid.as_str(),
@@ -368,12 +401,46 @@ pub fn handle_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
+            let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
 
-            let orch = ket_agent::Orchestrator::new(cas, db);
-            let node_cid = orch.store_reasoning(content, agent, parents)?;
+            let dag = ket_dag::Dag::new(cas);
+            let content_cid = cas.put(content.as_bytes())?;
+            let mut node = ket_dag::DagNode::new(
+                ket_dag::NodeKind::Reasoning,
+                parents.clone(),
+                content_cid.clone(),
+                agent,
+            );
+            if let Some(s) = schema_cid_param {
+                node = node.with_schema(ket_cas::Cid::from(s));
+            }
+            let node_cid = dag.put_node(&node)?;
+
+            // Sync to SQL if Dolt is available
+            if let Some(db) = db {
+                let parent_refs: Vec<(&str, i32)> = parents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .collect();
+                let _ = db.sync_dag_node(
+                    node_cid.as_str(),
+                    "reasoning",
+                    agent,
+                    &node.timestamp,
+                    content_cid.as_str(),
+                    "",
+                    &parent_refs,
+                    node.schema_cid.as_ref().map(|c| c.as_str()),
+                );
+            }
+
             Ok(serde_json::json!({ "node_cid": node_cid.as_str() }))
         }
         "ket_create_subtask" => {
+            let db = db.ok_or_else(|| McpError::InvalidParams(
+                "ket_create_subtask requires Dolt (see ket README)".into(),
+            ))?;
             let title = params["title"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("title required".into()))?;
@@ -402,6 +469,7 @@ pub fn handle_tool_call(
                         "kind": node.kind.to_string(),
                         "timestamp": node.timestamp,
                         "content": content,
+                        "schema_cid": node.schema_cid.as_ref().map(|c| c.as_str()).unwrap_or(""),
                     }))
                 }
                 Err(_) => {
@@ -411,6 +479,9 @@ pub fn handle_tool_call(
             }
         }
         "ket_calibrate" => {
+            let db = db.ok_or_else(|| McpError::InvalidParams(
+                "ket_calibrate requires Dolt (see ket README)".into(),
+            ))?;
             let root_cid = params["root_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
@@ -434,6 +505,9 @@ pub fn handle_tool_call(
             }))
         }
         "ket_score" => {
+            let db = db.ok_or_else(|| McpError::InvalidParams(
+                "ket_score requires Dolt (see ket README)".into(),
+            ))?;
             let node_cid = params["node_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("node_cid required".into()))?;
@@ -468,6 +542,23 @@ pub fn handle_tool_call(
             engine.record(&score)?;
             Ok(serde_json::json!({ "recorded": true }))
         }
+        "ket_schema_stats" => {
+            let schema_cid = params["schema_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("schema_cid required".into()))?;
+            let dag = ket_dag::Dag::new(cas);
+            let (total, unique) = dag.schema_stats(&ket_cas::Cid::from(schema_cid))?;
+            let dedup_ratio = if unique > 0 {
+                format!("{:.2}", total as f64 / unique as f64)
+            } else {
+                "N/A".to_string()
+            };
+            Ok(serde_json::json!({
+                "total_nodes": total,
+                "unique_outputs": unique,
+                "dedup_ratio": dedup_ratio,
+            }))
+        }
         _ => Err(McpError::UnknownTool(tool_name.to_string())),
     }
 }
@@ -476,7 +567,7 @@ pub fn handle_tool_call(
 pub fn handle_jsonrpc(
     request: &JsonRpcRequest,
     cas: &ket_cas::Store,
-    db: &ket_sql::DoltDb,
+    db: Option<&ket_sql::DoltDb>,
 ) -> JsonRpcResponse {
     match request.method.as_str() {
         "initialize" => JsonRpcResponse {
@@ -559,7 +650,7 @@ fn parse_node_kind(s: &str) -> Result<ket_dag::NodeKind, McpError> {
 }
 
 /// Run the MCP server loop on stdio (synchronous, line-delimited JSON-RPC).
-pub fn run_stdio_server(cas: &ket_cas::Store, db: &ket_sql::DoltDb) -> Result<(), McpError> {
+pub fn run_stdio_server(cas: &ket_cas::Store, db: Option<&ket_sql::DoltDb>) -> Result<(), McpError> {
     use std::io::{BufRead, BufReader, Write};
 
     let stdin = std::io::stdin();
