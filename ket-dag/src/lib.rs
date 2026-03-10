@@ -87,18 +87,20 @@ impl Complex {
 
 /// Ephemeral quantum walk amplitude for a single node.
 ///
-/// The `re` and `im` fields carry the complex amplitude but are annotated
-/// with `#[serde(skip)]` — they are never serialized and never stored in CAS.
-/// `session_id` identifies which walk session produced this amplitude.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// This is a **runtime-only** type — it is never serialized and never stored
+/// in CAS.  `#[derive(Serialize, Deserialize)]` is intentionally absent:
+/// serializing partial state (session_id without amplitude) would silently
+/// produce a value that deserializes with zero amplitude, which is always wrong.
+///
+/// `session_id` identifies the walk session that produced this amplitude,
+/// allowing callers to correlate amplitudes across nodes from the same run.
+#[derive(Debug, Clone)]
 pub struct QuantumAmplitude {
     /// Session identifier for this amplitude (e.g. a UUID or run label).
     pub session_id: String,
-    /// Real component of complex amplitude. **Never persisted.**
-    #[serde(skip)]
+    /// Real component of the complex amplitude.
     pub re: f64,
-    /// Imaginary component of complex amplitude. **Never persisted.**
-    #[serde(skip)]
+    /// Imaginary component of the complex amplitude.
     pub im: f64,
 }
 
@@ -126,9 +128,14 @@ impl QuantumAmplitude {
 /// **never persisted** — they exist only within a session to detect topological
 /// orientation and geometric inconsistency (hypothesis H-IC).
 ///
-/// Evolution uses a first-order unitary approximation:
+/// Evolution discretizes the Schrödinger equation via forward Euler:
 /// `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`
-/// where H is the decay-weighted adjacency Hamiltonian.
+/// where H is the decay-weighted adjacency Hamiltonian.  Note that
+/// `(I − iH·dt)` is **not unitary** — its operator norm exceeds 1 for H ≠ 0.
+/// The state vector is renormalized after each step to keep ‖ψ‖ = 1, which
+/// compensates for norm growth but introduces a systematic phase distortion
+/// proportional to dt².  Keep dt small (≤ 0.1) and prefer more steps over
+/// larger steps to limit this error.
 pub struct QuantumWalkEngine {
     /// Number of nodes in the walk.
     pub num_nodes: usize,
@@ -165,6 +172,12 @@ impl QuantumWalkEngine {
     /// Build the decay-weighted Hamiltonian matrix from an adjacency list.
     ///
     /// `adjacency[i]` is a list of `(neighbor_index, edge_weight)` pairs.
+    /// **The adjacency list must already encode both directions** of every
+    /// undirected edge (i.e. if (j, w) appears in `adjacency[i]`, then
+    /// (i, w) must appear in `adjacency[j]`).  `build_hamiltonian` does NOT
+    /// symmetrize — adding h[j][i] here would double-count edges already
+    /// encoded in both directions by the caller.
+    ///
     /// Each edge weight is scaled by the decay factors of both endpoints, so
     /// edges between fast-decaying nodes contribute less to the Hamiltonian.
     pub fn build_hamiltonian(
@@ -188,9 +201,9 @@ impl QuantumWalkEngine {
         for (i, neighbors) in adjacency.iter().enumerate() {
             for &(j, weight) in neighbors {
                 if i < n && j < n {
-                    let w = weight * decay_factors[i] * decay_factors[j];
-                    h[i][j] += w;
-                    h[j][i] += w;
+                    // Each directed entry contributes exactly once.
+                    // Symmetry comes from the caller encoding both directions.
+                    h[i][j] += weight * decay_factors[i] * decay_factors[j];
                 }
             }
         }
@@ -198,10 +211,11 @@ impl QuantumWalkEngine {
         h
     }
 
-    /// Evolve amplitudes by one time step: `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`.
+    /// Evolve amplitudes by one forward-Euler step: `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`.
     ///
-    /// The state vector is re-normalized after each step to compensate for the
-    /// first-order approximation losing exact unitarity.
+    /// The state vector is renormalized after each step to maintain ‖ψ‖ = 1.
+    /// This corrects norm growth but introduces O(dt²) phase error per step.
+    /// Use small dt (≤ 0.1) to keep the approximation accurate.
     pub fn step(&mut self, hamiltonian: &[Vec<f64>], dt: f64) {
         let n = self.num_nodes;
         let mut new_amps = vec![Complex::new(0.0, 0.0); n];
@@ -245,12 +259,36 @@ impl QuantumWalkEngine {
         self.amplitudes.get(idx).copied()
     }
 
-    /// Compute quantum coherence score in `[0.0, 1.0]`.
+    /// Compute a walk coherence score in `[0.0, 1.0]`.
     ///
-    /// Measured as `1 − normalized_entropy(|ψ|²)`.  High coherence means
-    /// amplitude is concentrated (constructive interference, paths agree).
-    /// Low coherence flags destructive interference — a potential structural
-    /// inconsistency signal per hypothesis H-IC.
+    /// This measures **amplitude localization** via inverse Shannon entropy of
+    /// the probability distribution `p_i = |ψ_i|² / Σ|ψ_j|²`:
+    ///
+    /// ```text
+    /// coherence = 1 − H(p) / ln(n)
+    /// ```
+    ///
+    /// where `H(p) = −Σ p_i ln p_i` is the Shannon entropy of the walk.
+    ///
+    /// **Interpretation note**: this is a localization measure, not a direct
+    /// measurement of destructive interference in the quantum-mechanical sense.
+    /// True destructive interference (amplitude cancellation at a node due to
+    /// phase opposition of incoming paths) is not directly observable from the
+    /// probability distribution alone — it requires tracking the signed
+    /// amplitudes relative to the graph structure.
+    ///
+    /// What this metric *can* indicate:
+    /// - High score (close to 1): walk is localized — amplitude concentrated on
+    ///   few nodes, as happens early in a walk from a source or in disconnected
+    ///   subgraphs.
+    /// - Low score (close to 0): walk is delocalized — amplitude spread nearly
+    ///   uniformly, as expected for well-connected, topologically consistent
+    ///   subgraphs.
+    ///
+    /// The H-IC hypothesis relates structural inconsistency to interference
+    /// patterns; use `amplitude()` on individual nodes to inspect whether
+    /// specific nodes have anomalously suppressed amplitude relative to their
+    /// high-amplitude neighbors.
     pub fn coherence(&self) -> f64 {
         let total: f64 = self.amplitudes.iter().map(|a| a.norm_sq()).sum();
         if total < 1e-12 {

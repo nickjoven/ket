@@ -270,7 +270,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "walk_quantum".into(),
-            description: "Run a continuous-time quantum walk from a root node across the DAG lineage. Returns a coherence score and per-node amplitude norms. Low coherence flags potential structural inconsistency (contradictory high-activation paths). Amplitudes are ephemeral — not stored in CAS. Use walk_classical for comparison or coherence_check for a quick score.".into(),
+            description: "Run a continuous-time quantum walk from a root node across the DAG lineage. Returns a localization-based coherence score and per-node amplitude norms. The coherence score measures how concentrated vs. uniform the walk's amplitude distribution is — localized (high score) on few nodes vs. spread across many (low score). Amplitudes are ephemeral and not stored in CAS. Use walk_classical for comparison or coherence_check for a quick score.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -297,7 +297,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "coherence_check".into(),
-            description: "Compute the quantum coherence score for the subgraph rooted at a node. Coherence measures whether the quantum walk concentrates amplitude (constructive interference = topologically consistent) or disperses it (destructive interference = structural inconsistency). Returns a score in [0, 1].".into(),
+            description: "Compute the walk coherence score for the subgraph rooted at a node. The score is 1 minus the normalized Shannon entropy of the walk's amplitude distribution: 1.0 = maximally localized (amplitude on few nodes), 0.0 = maximally delocalized (uniform spread). This is a localization heuristic — not a direct measurement of quantum interference. To inspect potential amplitude cancellation at specific nodes, use walk_quantum and examine per-node amplitude_norm values relative to their neighbors. Returns a score in [0, 1].".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -883,11 +883,11 @@ pub fn handle_tool_call(
             let coherence = engine.coherence();
 
             let flag = if coherence < 0.3 {
-                "low — potential structural inconsistency"
+                "low — walk is delocalized (amplitude spread broadly across nodes)"
             } else if coherence < 0.6 {
-                "moderate"
+                "moderate — partial localization"
             } else {
-                "high — topologically consistent"
+                "high — walk is localized (amplitude concentrated on few nodes)"
             };
 
             Ok(serde_json::json!({
