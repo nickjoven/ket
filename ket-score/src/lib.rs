@@ -21,13 +21,26 @@ pub enum ScoreError {
 }
 
 /// Scoring dimensions.
+///
+/// The original four dimensions (Correctness, Efficiency, Style, Completeness)
+/// are extended with two decay–quantum walk dimensions:
+/// - `QuantumCoherence`: measures destructive interference in quantum walks;
+///   low values flag potential structural inconsistency (hypothesis H-IC).
+/// - `DecayAdjustedActivation`: activation after exponential decay; tracks
+///   how "live" a node's contribution is given its age and half-life.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Dimension {
     Correctness,
     Efficiency,
     Style,
     Completeness,
+    /// Quantum walk coherence score — 0.0 = fully incoherent (inconsistent),
+    /// 1.0 = fully coherent (topologically consistent).
+    QuantumCoherence,
+    /// Decay-adjusted activation — activation value after exponential decay
+    /// is applied at query time.
+    DecayAdjustedActivation,
 }
 
 impl Dimension {
@@ -37,6 +50,8 @@ impl Dimension {
             Dimension::Efficiency => "efficiency",
             Dimension::Style => "style",
             Dimension::Completeness => "completeness",
+            Dimension::QuantumCoherence => "quantum_coherence",
+            Dimension::DecayAdjustedActivation => "decay_adjusted_activation",
         }
     }
 
@@ -46,6 +61,8 @@ impl Dimension {
             "efficiency" => Ok(Dimension::Efficiency),
             "style" => Ok(Dimension::Style),
             "completeness" => Ok(Dimension::Completeness),
+            "quantum_coherence" => Ok(Dimension::QuantumCoherence),
+            "decay_adjusted_activation" => Ok(Dimension::DecayAdjustedActivation),
             _ => Err(ScoreError::InvalidDimension(s.to_string())),
         }
     }
@@ -56,6 +73,8 @@ impl Dimension {
             Dimension::Efficiency,
             Dimension::Style,
             Dimension::Completeness,
+            Dimension::QuantumCoherence,
+            Dimension::DecayAdjustedActivation,
         ]
     }
 }
@@ -102,6 +121,10 @@ pub struct AgentProfile {
     pub efficiency: Option<f64>,
     pub style: Option<f64>,
     pub completeness: Option<f64>,
+    /// Average quantum coherence score across scored nodes.
+    pub quantum_coherence: Option<f64>,
+    /// Average decay-adjusted activation across scored nodes.
+    pub decay_adjusted_activation: Option<f64>,
     pub total_scores: u64,
 }
 

@@ -4,7 +4,8 @@
 //! Tools: ket_put, ket_get, ket_verify, ket_dag_link, ket_dag_lineage,
 //!        ket_check_drift, ket_query_cdom, ket_store_reasoning,
 //!        ket_create_subtask, ket_get_reasoning, ket_score,
-//!        ket_schema_stats, ket_dag_ls, ket_status, ket_search.
+//!        ket_schema_stats, ket_dag_ls, ket_status, ket_search,
+//!        walk_quantum, walk_classical, coherence_check, decay_status.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -265,6 +266,58 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "limit": { "type": "integer", "description": "Maximum number of results (default 20)" }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolDescriptor {
+            name: "walk_quantum".into(),
+            description: "Run a continuous-time quantum walk from a root node across the DAG lineage. Returns a coherence score and per-node amplitude norms. Low coherence flags potential structural inconsistency (contradictory high-activation paths). Amplitudes are ephemeral — not stored in CAS. Use walk_classical for comparison or coherence_check for a quick score.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root_cid": { "type": "string", "description": "Root node CID to walk from" },
+                    "steps": { "type": "integer", "description": "Number of evolution time steps (default 10)" },
+                    "dt": { "type": "number", "description": "Time step size (default 0.1)" },
+                    "elapsed_secs": { "type": "number", "description": "Seconds elapsed since nodes were written, for decay weighting (default 0)" }
+                },
+                "required": ["root_cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "walk_classical".into(),
+            description: "Run a classical BFS walk from a root node across the DAG lineage. Returns each node with its decay-adjusted activation. Use alongside walk_quantum to compare classical vs quantum traversal — quantum walks preserve topological orientation under decay where classical approaches lose it.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root_cid": { "type": "string", "description": "Root node CID to walk from" },
+                    "elapsed_secs": { "type": "number", "description": "Seconds elapsed since nodes were written, for decay computation (default 0)" },
+                    "limit": { "type": "integer", "description": "Maximum nodes to visit (default 50)" }
+                },
+                "required": ["root_cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "coherence_check".into(),
+            description: "Compute the quantum coherence score for the subgraph rooted at a node. Coherence measures whether the quantum walk concentrates amplitude (constructive interference = topologically consistent) or disperses it (destructive interference = structural inconsistency). Returns a score in [0, 1].".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root_cid": { "type": "string", "description": "Root node CID" },
+                    "steps": { "type": "integer", "description": "Walk evolution steps (default 20)" },
+                    "elapsed_secs": { "type": "number", "description": "Seconds elapsed for decay weighting (default 0)" }
+                },
+                "required": ["root_cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "decay_status".into(),
+            description: "Get the current decay-adjusted activation for a node. Reports the stored activation, decay configuration (half-life, floor), and the computed activation at the given elapsed time. Decay is applied on query — the stored value is never mutated.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cid": { "type": "string", "description": "Node CID to inspect" },
+                    "elapsed_secs": { "type": "number", "description": "Seconds elapsed since the node was written (default 0)" }
+                },
+                "required": ["cid"]
             }),
         },
     ]
@@ -684,6 +737,186 @@ pub fn handle_tool_call(
             }
 
             Ok(serde_json::json!({ "results": results }))
+        }
+        "walk_quantum" => {
+            let root_cid_str = params["root_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
+            let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let dt = params.get("dt").and_then(|v| v.as_f64()).unwrap_or(0.1);
+            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let dag = ket_dag::Dag::new(cas);
+            let root = ket_cas::Cid::from(root_cid_str);
+            let lineage = dag.lineage(&root)?;
+            let n = lineage.len();
+
+            if n == 0 {
+                return Ok(serde_json::json!({ "coherence": 0.0, "steps": steps, "nodes": [] }));
+            }
+
+            // Build CID → index map
+            let idx_map: std::collections::HashMap<String, usize> = lineage
+                .iter()
+                .enumerate()
+                .map(|(i, (cid, _))| (cid.as_str().to_string(), i))
+                .collect();
+
+            // Build adjacency list from parent-child edges
+            let mut adjacency: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
+            for (i, (_, node)) in lineage.iter().enumerate() {
+                for parent_cid in &node.parents {
+                    if let Some(&j) = idx_map.get(parent_cid.as_str()) {
+                        adjacency[i].push((j, 1.0));
+                        adjacency[j].push((i, 1.0));
+                    }
+                }
+            }
+            // Deduplicate adjacency lists
+            for adj in &mut adjacency {
+                adj.sort_by_key(|(j, _)| *j);
+                adj.dedup_by_key(|(j, _)| *j);
+            }
+
+            let decay_configs: Vec<Option<ket_dag::DecayConfig>> =
+                lineage.iter().map(|(_, node)| node.decay_config.clone()).collect();
+
+            let mut engine = ket_dag::QuantumWalkEngine::new(n, decay_configs);
+            let hamiltonian = engine.build_hamiltonian(&adjacency, elapsed_secs);
+            engine.evolve(&hamiltonian, dt, steps);
+            let coherence = engine.coherence();
+
+            let node_results: Vec<Value> = lineage
+                .iter()
+                .enumerate()
+                .map(|(i, (cid, node))| {
+                    let amp_norm = engine.amplitude(i).map(|a| a.norm()).unwrap_or(0.0);
+                    let decayed = node.decayed_activation(elapsed_secs);
+                    serde_json::json!({
+                        "cid": cid.as_str(),
+                        "kind": node.kind.to_string(),
+                        "amplitude_norm": amp_norm,
+                        "decay_adjusted_activation": decayed,
+                    })
+                })
+                .collect();
+
+            Ok(serde_json::json!({
+                "coherence": coherence,
+                "steps": steps,
+                "nodes": node_results,
+            }))
+        }
+        "walk_classical" => {
+            let root_cid_str = params["root_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
+            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+            let dag = ket_dag::Dag::new(cas);
+            let lineage = dag.lineage(&ket_cas::Cid::from(root_cid_str))?;
+
+            let nodes: Vec<Value> = lineage
+                .iter()
+                .take(limit)
+                .map(|(cid, node)| {
+                    let decayed = node.decayed_activation(elapsed_secs);
+                    serde_json::json!({
+                        "cid": cid.as_str(),
+                        "kind": node.kind.to_string(),
+                        "agent": node.agent,
+                        "timestamp": node.timestamp,
+                        "activation": node.activation.unwrap_or(1.0),
+                        "decay_adjusted_activation": decayed,
+                        "half_life_secs": node.decay_config.as_ref().map(|c| c.half_life_secs),
+                    })
+                })
+                .collect();
+
+            Ok(serde_json::json!({
+                "elapsed_secs": elapsed_secs,
+                "nodes": nodes,
+            }))
+        }
+        "coherence_check" => {
+            let root_cid_str = params["root_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
+            let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let dag = ket_dag::Dag::new(cas);
+            let lineage = dag.lineage(&ket_cas::Cid::from(root_cid_str))?;
+            let n = lineage.len();
+
+            if n == 0 {
+                return Ok(serde_json::json!({ "coherence": 0.0, "node_count": 0 }));
+            }
+
+            let idx_map: std::collections::HashMap<String, usize> = lineage
+                .iter()
+                .enumerate()
+                .map(|(i, (cid, _))| (cid.as_str().to_string(), i))
+                .collect();
+
+            let mut adjacency: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
+            for (i, (_, node)) in lineage.iter().enumerate() {
+                for parent_cid in &node.parents {
+                    if let Some(&j) = idx_map.get(parent_cid.as_str()) {
+                        adjacency[i].push((j, 1.0));
+                        adjacency[j].push((i, 1.0));
+                    }
+                }
+            }
+            for adj in &mut adjacency {
+                adj.sort_by_key(|(j, _)| *j);
+                adj.dedup_by_key(|(j, _)| *j);
+            }
+
+            let decay_configs: Vec<Option<ket_dag::DecayConfig>> =
+                lineage.iter().map(|(_, node)| node.decay_config.clone()).collect();
+
+            let mut engine = ket_dag::QuantumWalkEngine::new(n, decay_configs);
+            let hamiltonian = engine.build_hamiltonian(&adjacency, elapsed_secs);
+            engine.evolve(&hamiltonian, 0.1, steps);
+            let coherence = engine.coherence();
+
+            let flag = if coherence < 0.3 {
+                "low — potential structural inconsistency"
+            } else if coherence < 0.6 {
+                "moderate"
+            } else {
+                "high — topologically consistent"
+            };
+
+            Ok(serde_json::json!({
+                "coherence": coherence,
+                "node_count": n,
+                "steps": steps,
+                "interpretation": flag,
+            }))
+        }
+        "decay_status" => {
+            let cid_str = params["cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
+            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let dag = ket_dag::Dag::new(cas);
+            let node = dag.get_node(&ket_cas::Cid::from(cid_str))?;
+            let stored_activation = node.activation.unwrap_or(1.0);
+            let decayed = node.decayed_activation(elapsed_secs);
+
+            Ok(serde_json::json!({
+                "cid": cid_str,
+                "stored_activation": stored_activation,
+                "decay_adjusted_activation": decayed,
+                "elapsed_secs": elapsed_secs,
+                "half_life_secs": node.decay_config.as_ref().map(|c| c.half_life_secs),
+                "activation_floor": node.decay_config.as_ref().map(|c| c.activation_floor),
+                "has_decay": node.decay_config.is_some(),
+            }))
         }
         _ => Err(McpError::UnknownTool(tool_name.to_string())),
     }

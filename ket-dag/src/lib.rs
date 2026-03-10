@@ -2,6 +2,10 @@
 //!
 //! Each DagNode is serialized to JSON, stored in CAS, and addressable by CID.
 //! Parents form the DAG edges. Cycles use soft links (stored separately).
+//!
+//! Extended with decay and quantum walk primitives per the decay–quantum walk
+//! coupling spec. Decay applies on query (not write) to preserve CID invariants.
+//! Quantum amplitudes are ephemeral runtime state and are never persisted.
 
 use ket_cas::{Cid, Store as CasStore};
 use serde::{Deserialize, Serialize};
@@ -15,6 +19,267 @@ pub enum DagError {
     #[error("Node not found: {0}")]
     NotFound(String),
 }
+
+// ---------------------------------------------------------------------------
+// Decay infrastructure
+// ---------------------------------------------------------------------------
+
+/// Per-node decay configuration.
+///
+/// Stored in `DagNode.decay_config` when a node should have time-varying
+/// activation. Absent means no decay (activation is constant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecayConfig {
+    /// Exponential decay half-life in seconds. Use `f64::INFINITY` for no decay.
+    pub half_life_secs: f64,
+    /// Minimum activation floor — decay never reduces activation below this.
+    pub activation_floor: f64,
+}
+
+impl Default for DecayConfig {
+    fn default() -> Self {
+        DecayConfig {
+            half_life_secs: f64::INFINITY,
+            activation_floor: 0.0,
+        }
+    }
+}
+
+/// Compute the decayed activation given elapsed seconds since the node was written.
+///
+/// Formula: `activation × e^(−elapsed × ln(2) / half_life)`, clamped to floor.
+///
+/// **Decay applies on query, not on write.** The stored `activation` value is
+/// never mutated — this function computes an ephemeral value for the caller.
+pub fn compute_decayed_activation(activation: f64, elapsed_secs: f64, config: &DecayConfig) -> f64 {
+    if config.half_life_secs.is_infinite() || config.half_life_secs <= 0.0 {
+        return activation.max(config.activation_floor);
+    }
+    let decay_factor =
+        (-elapsed_secs * std::f64::consts::LN_2 / config.half_life_secs).exp();
+    (activation * decay_factor).max(config.activation_floor)
+}
+
+// ---------------------------------------------------------------------------
+// Quantum walk engine
+// ---------------------------------------------------------------------------
+
+/// Minimal complex number for quantum walk amplitude tracking.
+#[derive(Debug, Clone, Copy)]
+pub struct Complex {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl Complex {
+    pub fn new(re: f64, im: f64) -> Self {
+        Complex { re, im }
+    }
+
+    pub fn norm_sq(&self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
+
+    pub fn norm(&self) -> f64 {
+        self.norm_sq().sqrt()
+    }
+}
+
+/// Ephemeral quantum walk amplitude for a single node.
+///
+/// The `re` and `im` fields carry the complex amplitude but are annotated
+/// with `#[serde(skip)]` — they are never serialized and never stored in CAS.
+/// `session_id` identifies which walk session produced this amplitude.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumAmplitude {
+    /// Session identifier for this amplitude (e.g. a UUID or run label).
+    pub session_id: String,
+    /// Real component of complex amplitude. **Never persisted.**
+    #[serde(skip)]
+    pub re: f64,
+    /// Imaginary component of complex amplitude. **Never persisted.**
+    #[serde(skip)]
+    pub im: f64,
+}
+
+impl QuantumAmplitude {
+    pub fn new(session_id: &str, re: f64, im: f64) -> Self {
+        QuantumAmplitude {
+            session_id: session_id.to_string(),
+            re,
+            im,
+        }
+    }
+
+    pub fn norm_sq(&self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
+
+    pub fn norm(&self) -> f64 {
+        self.norm_sq().sqrt()
+    }
+}
+
+/// Continuous-time quantum walk engine.
+///
+/// Maintains ephemeral amplitude vectors over a DAG topology.  Amplitudes are
+/// **never persisted** — they exist only within a session to detect topological
+/// orientation and geometric inconsistency (hypothesis H-IC).
+///
+/// Evolution uses a first-order unitary approximation:
+/// `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`
+/// where H is the decay-weighted adjacency Hamiltonian.
+pub struct QuantumWalkEngine {
+    /// Number of nodes in the walk.
+    pub num_nodes: usize,
+    /// Current amplitude state vector (one entry per node).
+    amplitudes: Vec<Complex>,
+    /// Optional decay configuration per node — influences Hamiltonian weights.
+    decay_configs: Vec<Option<DecayConfig>>,
+}
+
+impl QuantumWalkEngine {
+    /// Create a new engine initialized with a uniform superposition over all nodes.
+    pub fn new(num_nodes: usize, decay_configs: Vec<Option<DecayConfig>>) -> Self {
+        let init_amp = if num_nodes > 0 {
+            1.0 / (num_nodes as f64).sqrt()
+        } else {
+            0.0
+        };
+        QuantumWalkEngine {
+            num_nodes,
+            amplitudes: vec![Complex::new(init_amp, 0.0); num_nodes],
+            decay_configs,
+        }
+    }
+
+    /// Concentrate amplitude at a single source node (classical start).
+    pub fn with_source(mut self, source_idx: usize) -> Self {
+        self.amplitudes = vec![Complex::new(0.0, 0.0); self.num_nodes];
+        if source_idx < self.num_nodes {
+            self.amplitudes[source_idx] = Complex::new(1.0, 0.0);
+        }
+        self
+    }
+
+    /// Build the decay-weighted Hamiltonian matrix from an adjacency list.
+    ///
+    /// `adjacency[i]` is a list of `(neighbor_index, edge_weight)` pairs.
+    /// Each edge weight is scaled by the decay factors of both endpoints, so
+    /// edges between fast-decaying nodes contribute less to the Hamiltonian.
+    pub fn build_hamiltonian(
+        &self,
+        adjacency: &[Vec<(usize, f64)>],
+        elapsed_secs: f64,
+    ) -> Vec<Vec<f64>> {
+        let n = self.num_nodes;
+        let mut h = vec![vec![0.0; n]; n];
+
+        // Per-node decay factor derived from half-life at query time.
+        let decay_factors: Vec<f64> = (0..n)
+            .map(|i| match self.decay_configs.get(i) {
+                Some(Some(cfg)) if cfg.half_life_secs.is_finite() && cfg.half_life_secs > 0.0 => {
+                    (-elapsed_secs * std::f64::consts::LN_2 / cfg.half_life_secs).exp()
+                }
+                _ => 1.0,
+            })
+            .collect();
+
+        for (i, neighbors) in adjacency.iter().enumerate() {
+            for &(j, weight) in neighbors {
+                if i < n && j < n {
+                    let w = weight * decay_factors[i] * decay_factors[j];
+                    h[i][j] += w;
+                    h[j][i] += w;
+                }
+            }
+        }
+
+        h
+    }
+
+    /// Evolve amplitudes by one time step: `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`.
+    ///
+    /// The state vector is re-normalized after each step to compensate for the
+    /// first-order approximation losing exact unitarity.
+    pub fn step(&mut self, hamiltonian: &[Vec<f64>], dt: f64) {
+        let n = self.num_nodes;
+        let mut new_amps = vec![Complex::new(0.0, 0.0); n];
+
+        for i in 0..n {
+            // Identity term
+            new_amps[i].re += self.amplitudes[i].re;
+            new_amps[i].im += self.amplitudes[i].im;
+
+            // −i·H·dt term: (−i)·h·(a+bi) = h·b − h·a·i
+            for j in 0..n {
+                let h_dt = hamiltonian[i][j] * dt;
+                let amp_j = self.amplitudes[j];
+                new_amps[i].re += h_dt * amp_j.im;
+                new_amps[i].im -= h_dt * amp_j.re;
+            }
+        }
+
+        // Re-normalize to maintain unit norm
+        let norm_sq: f64 = new_amps.iter().map(|a| a.norm_sq()).sum();
+        if norm_sq > 1e-12 {
+            let norm = norm_sq.sqrt();
+            for a in &mut new_amps {
+                a.re /= norm;
+                a.im /= norm;
+            }
+        }
+
+        self.amplitudes = new_amps;
+    }
+
+    /// Evolve for `steps` time steps.
+    pub fn evolve(&mut self, hamiltonian: &[Vec<f64>], dt: f64, steps: usize) {
+        for _ in 0..steps {
+            self.step(hamiltonian, dt);
+        }
+    }
+
+    /// Get amplitude at a node index. Returns `None` if index is out of range.
+    pub fn amplitude(&self, idx: usize) -> Option<Complex> {
+        self.amplitudes.get(idx).copied()
+    }
+
+    /// Compute quantum coherence score in `[0.0, 1.0]`.
+    ///
+    /// Measured as `1 − normalized_entropy(|ψ|²)`.  High coherence means
+    /// amplitude is concentrated (constructive interference, paths agree).
+    /// Low coherence flags destructive interference — a potential structural
+    /// inconsistency signal per hypothesis H-IC.
+    pub fn coherence(&self) -> f64 {
+        let total: f64 = self.amplitudes.iter().map(|a| a.norm_sq()).sum();
+        if total < 1e-12 {
+            return 0.0;
+        }
+        let n = self.num_nodes as f64;
+        let mut entropy = 0.0;
+        for a in &self.amplitudes {
+            let p = a.norm_sq() / total;
+            if p > 1e-12 {
+                entropy -= p * p.ln();
+            }
+        }
+        let max_entropy = if n > 1.0 { n.ln() } else { 1.0 };
+        1.0 - (entropy / max_entropy).clamp(0.0, 1.0)
+    }
+
+    /// Export current amplitudes as `QuantumAmplitude` structs tagged with a session id.
+    pub fn amplitudes_as_structs(&self, session_id: &str) -> Vec<QuantumAmplitude> {
+        self.amplitudes
+            .iter()
+            .map(|a| QuantumAmplitude::new(session_id, a.re, a.im))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Node kinds
+// ---------------------------------------------------------------------------
 
 /// The kind of artifact a DAG node represents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +328,16 @@ pub struct DagNode {
     /// interpret or validate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_cid: Option<Cid>,
+    /// Initial activation value stored at write time.
+    ///
+    /// The *decayed* activation is computed on query via `decayed_activation()`.
+    /// Storing the raw value here preserves content-addressing invariants —
+    /// the stored bytes (and thus the CID) never change due to decay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<f64>,
+    /// Per-node decay configuration. Absent means no decay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_config: Option<DecayConfig>,
 }
 
 impl DagNode {
@@ -76,6 +351,8 @@ impl DagNode {
             timestamp: chrono::Utc::now().to_rfc3339(),
             meta: Vec::new(),
             schema_cid: None,
+            activation: None,
+            decay_config: None,
         }
     }
 
@@ -89,6 +366,27 @@ impl DagNode {
     pub fn with_schema(mut self, schema_cid: Cid) -> Self {
         self.schema_cid = Some(schema_cid);
         self
+    }
+
+    /// Set the initial activation value and decay configuration.
+    ///
+    /// The raw `activation` is stored; the decayed value is computed on query
+    /// via `decayed_activation()` to preserve CID invariants.
+    pub fn with_decay(mut self, activation: f64, config: DecayConfig) -> Self {
+        self.activation = Some(activation);
+        self.decay_config = Some(config);
+        self
+    }
+
+    /// Compute the decay-adjusted activation at `elapsed_secs` after this node
+    /// was written.  Returns the stored activation (or `1.0`) if no decay config
+    /// is present.
+    pub fn decayed_activation(&self, elapsed_secs: f64) -> f64 {
+        let base = self.activation.unwrap_or(1.0);
+        match &self.decay_config {
+            Some(cfg) => compute_decayed_activation(base, elapsed_secs, cfg),
+            None => base,
+        }
     }
 
     /// Serialize this node to JSON bytes.
