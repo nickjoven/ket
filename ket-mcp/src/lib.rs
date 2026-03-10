@@ -284,7 +284,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "walk_classical".into(),
-            description: "Run a classical BFS walk from a root node across the DAG lineage. Returns each node with its decay-adjusted activation. Use alongside walk_quantum to compare classical vs quantum traversal — quantum walks preserve topological orientation under decay where classical approaches lose it.".into(),
+            description: "Run a classical BFS walk from a root node across the DAG lineage. Returns each node with its decay-adjusted activation. Use alongside walk_quantum to compare how BFS traversal and quantum amplitude evolution weight different nodes — the two walks give different graph-dynamics signals that may reveal different structural properties. Whether quantum walks preserve topological orientation better than classical traversal under decay (hypothesis H-QW) is not yet empirically verified.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

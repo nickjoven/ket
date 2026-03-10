@@ -125,17 +125,23 @@ impl QuantumAmplitude {
 /// Continuous-time quantum walk engine.
 ///
 /// Maintains ephemeral amplitude vectors over a DAG topology.  Amplitudes are
-/// **never persisted** — they exist only within a session to detect topological
-/// orientation and geometric inconsistency (hypothesis H-IC).
+/// **never persisted** — they exist only within a session.
 ///
-/// Evolution discretizes the Schrödinger equation via forward Euler:
-/// `|ψ(t+dt)⟩ ≈ (I − i·H·dt)|ψ(t)⟩`
-/// where H is the decay-weighted adjacency Hamiltonian.  Note that
-/// `(I − iH·dt)` is **not unitary** — its operator norm exceeds 1 for H ≠ 0.
-/// The state vector is renormalized after each step to keep ‖ψ‖ = 1, which
-/// compensates for norm growth but introduces a systematic phase distortion
-/// proportional to dt².  Keep dt small (≤ 0.1) and prefer more steps over
-/// larger steps to limit this error.
+/// **Experimental tool.** Hypotheses H-QW (quantum walks preserve topological
+/// orientation under decay better than classical traversal) and H-IC
+/// (destructive interference signals structural inconsistency) are design
+/// goals, not verified properties of this implementation.  Known limitations:
+/// - The adjacency list is symmetrized when building H, so DAG edge direction
+///   is discarded before the walk begins.
+/// - Evolution uses forward Euler + renormalization rather than a true unitary
+///   operator (`e^{−iHt}`).  `(I − iH·dt)` has operator norm > 1; the
+///   post-step renormalization corrects the norm but introduces O(dt²) phase
+///   distortion per step that accumulates across many steps.
+///
+/// Practical use: the walk gives a different graph-dynamics signal than BFS
+/// (amplitude can reach nodes via multiple interfering paths), which may reveal
+/// spectral structure not visible to classical traversal.  Treat outputs as
+/// exploratory rather than definitive.
 pub struct QuantumWalkEngine {
     /// Number of nodes in the walk.
     pub num_nodes: usize,
@@ -277,18 +283,21 @@ impl QuantumWalkEngine {
     /// probability distribution alone — it requires tracking the signed
     /// amplitudes relative to the graph structure.
     ///
-    /// What this metric *can* indicate:
+    /// What this metric indicates:
     /// - High score (close to 1): walk is localized — amplitude concentrated on
-    ///   few nodes, as happens early in a walk from a source or in disconnected
+    ///   few nodes, as happens early in a walk from a source or in sparse
     ///   subgraphs.
-    /// - Low score (close to 0): walk is delocalized — amplitude spread nearly
-    ///   uniformly, as expected for well-connected, topologically consistent
-    ///   subgraphs.
+    /// - Low score (close to 0): walk is delocalized — amplitude spread broadly,
+    ///   which occurs in densely connected subgraphs regardless of consistency.
     ///
-    /// The H-IC hypothesis relates structural inconsistency to interference
-    /// patterns; use `amplitude()` on individual nodes to inspect whether
-    /// specific nodes have anomalously suppressed amplitude relative to their
-    /// high-amplitude neighbors.
+    /// **Caveats**: a well-connected, consistent graph and a well-connected,
+    /// inconsistent graph can produce similar delocalized distributions.  This
+    /// metric cannot distinguish them.  H-IC posits that interference patterns
+    /// reflect structural inconsistency, but that connection is not established
+    /// by this measure.  Use `amplitude()` on individual nodes to inspect
+    /// whether specific nodes have anomalously suppressed amplitude relative to
+    /// their degree — that per-node signal is closer to what H-IC describes,
+    /// though the walk approximation errors noted above also apply.
     pub fn coherence(&self) -> f64 {
         let total: f64 = self.amplitudes.iter().map(|a| a.norm_sq()).sum();
         if total < 1e-12 {

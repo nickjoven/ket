@@ -24,8 +24,10 @@ pub enum ScoreError {
 ///
 /// The original four dimensions (Correctness, Efficiency, Style, Completeness)
 /// are extended with two decay–quantum walk dimensions:
-/// - `QuantumCoherence`: measures destructive interference in quantum walks;
-///   low values flag potential structural inconsistency (hypothesis H-IC).
+/// - `QuantumCoherence`: amplitude localization score from a quantum walk
+///   (1 − normalized Shannon entropy of |ψ|²). This is an **experimental**
+///   graph-dynamics signal — whether it correlates with structural
+///   inconsistency (hypothesis H-IC) is unverified.
 /// - `DecayAdjustedActivation`: activation after exponential decay; tracks
 ///   how "live" a node's contribution is given its age and half-life.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,8 +37,11 @@ pub enum Dimension {
     Efficiency,
     Style,
     Completeness,
-    /// Quantum walk coherence score — 0.0 = fully incoherent (inconsistent),
-    /// 1.0 = fully coherent (topologically consistent).
+    /// Amplitude localization score from a quantum walk
+    /// (1 − normalized Shannon entropy of |ψ|²).
+    /// 1.0 = amplitude concentrated on few nodes; 0.0 = amplitude spread
+    /// uniformly across all nodes.  **Experimental** — the connection to
+    /// structural consistency claimed by hypothesis H-IC is not yet verified.
     QuantumCoherence,
     /// Decay-adjusted activation — activation value after exponential decay
     /// is applied at query time.
