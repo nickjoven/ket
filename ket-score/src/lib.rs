@@ -22,14 +22,8 @@ pub enum ScoreError {
 
 /// Scoring dimensions.
 ///
-/// The original four dimensions (Correctness, Efficiency, Style, Completeness)
-/// are extended with two decay–quantum walk dimensions:
-/// - `QuantumCoherence`: amplitude localization score from a quantum walk
-///   (1 − normalized Shannon entropy of |ψ|²). This is an **experimental**
-///   graph-dynamics signal — whether it correlates with structural
-///   inconsistency (hypothesis H-IC) is unverified.
-/// - `DecayAdjustedActivation`: activation after exponential decay; tracks
-///   how "live" a node's contribution is given its age and half-life.
+/// Five dimensions: the original four plus `DecayAdjustedActivation` which
+/// records the decay-weighted activation of a node at the time of scoring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dimension {
@@ -37,14 +31,8 @@ pub enum Dimension {
     Efficiency,
     Style,
     Completeness,
-    /// Amplitude localization score from a quantum walk
-    /// (1 − normalized Shannon entropy of |ψ|²).
-    /// 1.0 = amplitude concentrated on few nodes; 0.0 = amplitude spread
-    /// uniformly across all nodes.  **Experimental** — the connection to
-    /// structural consistency claimed by hypothesis H-IC is not yet verified.
-    QuantumCoherence,
-    /// Decay-adjusted activation — activation value after exponential decay
-    /// is applied at query time.
+    /// Activation value after exponential decay is applied at query time.
+    /// Tracks how "live" a node's contribution is given its age and half-life.
     DecayAdjustedActivation,
 }
 
@@ -55,7 +43,6 @@ impl Dimension {
             Dimension::Efficiency => "efficiency",
             Dimension::Style => "style",
             Dimension::Completeness => "completeness",
-            Dimension::QuantumCoherence => "quantum_coherence",
             Dimension::DecayAdjustedActivation => "decay_adjusted_activation",
         }
     }
@@ -66,7 +53,6 @@ impl Dimension {
             "efficiency" => Ok(Dimension::Efficiency),
             "style" => Ok(Dimension::Style),
             "completeness" => Ok(Dimension::Completeness),
-            "quantum_coherence" => Ok(Dimension::QuantumCoherence),
             "decay_adjusted_activation" => Ok(Dimension::DecayAdjustedActivation),
             _ => Err(ScoreError::InvalidDimension(s.to_string())),
         }
@@ -78,7 +64,6 @@ impl Dimension {
             Dimension::Efficiency,
             Dimension::Style,
             Dimension::Completeness,
-            Dimension::QuantumCoherence,
             Dimension::DecayAdjustedActivation,
         ]
     }
@@ -126,8 +111,6 @@ pub struct AgentProfile {
     pub efficiency: Option<f64>,
     pub style: Option<f64>,
     pub completeness: Option<f64>,
-    /// Average quantum coherence score across scored nodes.
-    pub quantum_coherence: Option<f64>,
     /// Average decay-adjusted activation across scored nodes.
     pub decay_adjusted_activation: Option<f64>,
     pub total_scores: u64,
