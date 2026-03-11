@@ -165,7 +165,8 @@ impl DoltDb {
                 created_at VARCHAR(40) NOT NULL,
                 output_cid VARCHAR(64) NOT NULL,
                 meta TEXT,
-                schema_cid VARCHAR(64)
+                schema_cid VARCHAR(64),
+                saturation FLOAT
             )",
             "CREATE TABLE IF NOT EXISTS dag_edges (
                 parent_cid VARCHAR(64) NOT NULL,
@@ -737,6 +738,57 @@ impl DoltDb {
     /// Count nodes by agent.
     pub fn node_counts_by_agent(&self) -> Result<String, SqlError> {
         self.query("SELECT agent, COUNT(*) AS n FROM dag_nodes GROUP BY agent ORDER BY n DESC")
+    }
+
+    // --- Saturation queries ---
+
+    /// Write the saturation value for a node into the SQL index.
+    ///
+    /// The canonical saturation lives in the CAS-stored `DagNode` metadata.
+    /// This mirrors it into a dedicated SQL column so the optimizer and CLI can
+    /// run efficient range queries without scanning CAS blobs.
+    ///
+    /// Call this after creating or updating a node that carries a `saturation`
+    /// key in its `DagNode.meta`.
+    pub fn set_node_saturation(&self, cid: &str, saturation: f32) -> Result<(), SqlError> {
+        let clamped = saturation.clamp(0.0, 1.0);
+        self.exec(&format!(
+            "UPDATE dag_nodes SET saturation = {clamped} WHERE cid = '{cid}'"
+        ))
+    }
+
+    /// Return nodes that are open **queries** — saturation is NULL (undeclared)
+    /// or 0.0 (explicitly unresolved). These are the nodes that most need
+    /// exploration; no separate query substrate table is required.
+    pub fn open_queries(&self) -> Result<String, SqlError> {
+        self.query(
+            "SELECT cid, kind, agent, created_at, saturation \
+             FROM dag_nodes \
+             WHERE saturation IS NULL OR saturation = 0.0 \
+             ORDER BY created_at DESC"
+        )
+    }
+
+    /// Return nodes that are settled **claims** — saturation = 1.0.
+    /// These can be safely pruned by the optimizer (info_potential = 0).
+    pub fn settled_claims(&self) -> Result<String, SqlError> {
+        self.query(
+            "SELECT cid, kind, agent, created_at, saturation \
+             FROM dag_nodes \
+             WHERE saturation >= 1.0 \
+             ORDER BY created_at DESC"
+        )
+    }
+
+    /// Return nodes with saturation below `threshold` — partially resolved
+    /// beliefs that still carry exploration potential for the optimizer.
+    pub fn nodes_below_saturation(&self, threshold: f32) -> Result<String, SqlError> {
+        self.query(&format!(
+            "SELECT cid, kind, agent, created_at, saturation \
+             FROM dag_nodes \
+             WHERE saturation < {threshold} \
+             ORDER BY saturation ASC, created_at DESC"
+        ))
     }
 
     /// Summary stats for the database.
