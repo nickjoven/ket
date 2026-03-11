@@ -21,13 +21,19 @@ pub enum ScoreError {
 }
 
 /// Scoring dimensions.
+///
+/// Five dimensions: the original four plus `DecayAdjustedActivation` which
+/// records the decay-weighted activation of a node at the time of scoring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Dimension {
     Correctness,
     Efficiency,
     Style,
     Completeness,
+    /// Activation value after exponential decay is applied at query time.
+    /// Tracks how "live" a node's contribution is given its age and half-life.
+    DecayAdjustedActivation,
 }
 
 impl Dimension {
@@ -37,6 +43,7 @@ impl Dimension {
             Dimension::Efficiency => "efficiency",
             Dimension::Style => "style",
             Dimension::Completeness => "completeness",
+            Dimension::DecayAdjustedActivation => "decay_adjusted_activation",
         }
     }
 
@@ -46,6 +53,7 @@ impl Dimension {
             "efficiency" => Ok(Dimension::Efficiency),
             "style" => Ok(Dimension::Style),
             "completeness" => Ok(Dimension::Completeness),
+            "decay_adjusted_activation" => Ok(Dimension::DecayAdjustedActivation),
             _ => Err(ScoreError::InvalidDimension(s.to_string())),
         }
     }
@@ -56,6 +64,7 @@ impl Dimension {
             Dimension::Efficiency,
             Dimension::Style,
             Dimension::Completeness,
+            Dimension::DecayAdjustedActivation,
         ]
     }
 }
@@ -102,6 +111,8 @@ pub struct AgentProfile {
     pub efficiency: Option<f64>,
     pub style: Option<f64>,
     pub completeness: Option<f64>,
+    /// Average decay-adjusted activation across scored nodes.
+    pub decay_adjusted_activation: Option<f64>,
     pub total_scores: u64,
 }
 

@@ -187,7 +187,7 @@ fn mcp_tools_list() {
         if let Some(line) = stdout.lines().next() {
             let response: serde_json::Value = serde_json::from_str(line).unwrap();
             let tools = response["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 16);
+            assert_eq!(tools.len(), 17);
 
             let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
             assert!(names.contains(&"ket_put"));
