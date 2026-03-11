@@ -346,15 +346,18 @@ pub fn dag_to_tree(
         }
 
         // Try to get the node from CAS
-        let _dag_node = match dag.get_node(&cid) {
+        let dag_node = match dag.get_node(&cid) {
             Ok(n) => n,
             Err(ket_dag::DagError::Cas(ket_cas::CasError::NotFound(_)))
             | Err(ket_dag::DagError::Serde(_)) => continue,
             Err(e) => return Err(OptError::Dag(e)),
         };
 
-        // Compute info_potential from scores
-        let info_potential = compute_info_potential(&engine, &cid);
+        // Compute info_potential: prefer declared saturation from node metadata,
+        // fall back to score-derived value. This is the saturation-as-metadata
+        // mechanism — claims (sat=1.0) are pruned immediately; queries (sat=0.0)
+        // receive full exploration priority without consulting the scores table.
+        let info_potential = compute_info_potential(&engine, &cid, dag_node.saturation());
 
         let idx = nodes.len();
         nodes.push(TreeNode {
@@ -394,9 +397,33 @@ pub fn dag_to_tree(
     Ok(nodes)
 }
 
-/// Compute info_potential for a node: 1.0 - avg(scores).
-/// Unscored nodes get potential of 1.0 (maximum uncertainty).
-fn compute_info_potential(engine: &ScoringEngine<'_>, cid: &Cid) -> f64 {
+/// Compute info_potential for a node: `1.0 - saturation`.
+///
+/// Priority order:
+/// 1. **Declared saturation** — if the DAG node carries a `saturation` value
+///    in its metadata, use `1.0 - saturation` directly.  This is the
+///    "saturation-as-metadata" path: the node itself encodes its epistemic
+///    status, so the optimizer never needs a separate query substrate to decide
+///    whether a node is a settled claim or an open query.
+///    - `saturation = 1.0` → `info_potential = 0.0` → claim, assign `Skip`.
+///    - `saturation = 0.0` → `info_potential = 1.0` → query, assign `Deep`.
+/// 2. **Score-derived** — fall back to `1.0 - avg(scores)` when no saturation
+///    is declared and the node has existing score records.
+/// 3. **Unscored** — nodes with no saturation and no scores get `1.0`
+///    (maximum uncertainty, maximum exploration priority).
+fn compute_info_potential(
+    engine: &ScoringEngine<'_>,
+    cid: &Cid,
+    declared_saturation: Option<f32>,
+) -> f64 {
+    // Fast path: node declared its own epistemic status. No score lookup needed.
+    // This is the key elegance over a query substrate — the distinction lives
+    // in the node, not in a second data structure.
+    if let Some(sat) = declared_saturation {
+        return (1.0 - sat as f64).max(0.0);
+    }
+
+    // Fallback: derive from score records.
     let scores_csv = match engine.scores_for(cid) {
         Ok(csv) => csv,
         Err(_) => return 1.0,
@@ -577,7 +604,7 @@ pub fn traverse(
         }
 
         // Verify node exists in CAS
-        let _node = match dag.get_node(&cid) {
+        let traversal_node = match dag.get_node(&cid) {
             Ok(n) => n,
             Err(ket_dag::DagError::Cas(ket_cas::CasError::NotFound(_)))
             | Err(ket_dag::DagError::Serde(_)) => {
@@ -587,7 +614,8 @@ pub fn traverse(
             Err(e) => return Err(OptError::Dag(e)),
         };
 
-        let info_potential = compute_info_potential(&engine, &cid);
+        let info_potential =
+            compute_info_potential(&engine, &cid, traversal_node.saturation());
         let realized = info_potential * tier.gain_multiplier();
         let cost = tier.cost();
 
