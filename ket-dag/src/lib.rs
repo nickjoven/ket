@@ -151,6 +151,55 @@ impl DagNode {
         self
     }
 
+    /// Declare a saturation level for this node.
+    ///
+    /// Saturation encodes epistemic confidence on [0.0, 1.0]:
+    /// - `0.0` — open query: the content is a question or hypothesis with no
+    ///           supporting evidence; the optimizer treats it as maximally
+    ///           uncertain and will prioritize exploration.
+    /// - `1.0` — settled claim: the content is fully supported; the optimizer
+    ///           can skip re-examining it and prune its subtree.
+    /// - intermediate — partial belief: scored or partially-confirmed knowledge.
+    ///
+    /// This replaces the need for a separate "query substrate" layer. Rather
+    /// than maintaining two parallel structures (one for claims, one for
+    /// open questions), every DAG node carries its own epistemic status. The
+    /// optimizer reads `saturation` from metadata and computes
+    /// `info_potential = 1.0 - saturation` directly, without touching the
+    /// scores table for nodes that have declared their confidence explicitly.
+    pub fn with_saturation(mut self, value: f32) -> Self {
+        let clamped = value.clamp(0.0, 1.0);
+        self.meta.push(("saturation".to_string(), clamped.to_string()));
+        self
+    }
+
+    /// Read the declared saturation value, if any.
+    ///
+    /// Returns `None` when no saturation has been set — the optimizer then
+    /// falls back to deriving unsaturation from the scores table.
+    pub fn saturation(&self) -> Option<f32> {
+        self.get_meta("saturation")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|v| v.clamp(0.0, 1.0))
+    }
+
+    /// Returns `true` when this node is a settled **claim** (saturation = 1.0).
+    ///
+    /// A claim carries fully-supported content. The optimizer can treat it as
+    /// exhausted and will assign `Tier::Skip` without consulting the scores table.
+    pub fn is_claim(&self) -> bool {
+        self.saturation().map_or(false, |s| s >= 1.0)
+    }
+
+    /// Returns `true` when this node is an open **query** (saturation = 0.0 or unset).
+    ///
+    /// A query is a node whose content is a question, hypothesis, or placeholder
+    /// that has not yet been answered. It is maximally uncertain and will receive
+    /// the highest exploration priority from the optimizer.
+    pub fn is_query(&self) -> bool {
+        self.saturation().map_or(true, |s| s == 0.0)
+    }
+
     /// Set the initial activation value and decay configuration.
     ///
     /// The raw `activation` is stored; the decayed value is computed on query
@@ -525,6 +574,57 @@ mod tests {
         assert_eq!(all.len(), 4);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saturation_claim_query_classification() {
+        let (cas, dir) = temp_store("saturation");
+        let cid = cas.put(b"content").unwrap();
+
+        // No saturation → is_query, not is_claim, saturation() = None
+        let bare = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human");
+        assert!(bare.is_query(), "undeclared saturation should be a query");
+        assert!(!bare.is_claim(), "undeclared saturation should not be a claim");
+        assert_eq!(bare.saturation(), None);
+
+        // saturation = 0.0 → explicit query
+        let query = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
+            .with_saturation(0.0);
+        assert!(query.is_query());
+        assert!(!query.is_claim());
+        assert_eq!(query.saturation(), Some(0.0));
+
+        // saturation = 1.0 → settled claim
+        let claim = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
+            .with_saturation(1.0);
+        assert!(claim.is_claim());
+        assert!(!claim.is_query());
+        assert_eq!(claim.saturation(), Some(1.0));
+
+        // saturation = 0.75 → partial belief (neither pure query nor pure claim)
+        let partial = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
+            .with_saturation(0.75);
+        assert!(!partial.is_query());
+        assert!(!partial.is_claim());
+        assert_eq!(partial.saturation(), Some(0.75));
+
+        // Values are clamped to [0.0, 1.0]
+        let clamped_hi = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
+            .with_saturation(2.0);
+        assert_eq!(clamped_hi.saturation(), Some(1.0));
+
+        let clamped_lo = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
+            .with_saturation(-0.5);
+        assert_eq!(clamped_lo.saturation(), Some(0.0));
+
+        // Round-trip through CAS serialization
+        let dag = super::Dag::new(&cas);
+        let node_cid = dag.put_node(&claim).unwrap();
+        let retrieved = dag.get_node(&node_cid).unwrap();
+        assert!(retrieved.is_claim(), "saturation should survive CAS round-trip");
+        assert_eq!(retrieved.saturation(), Some(1.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
