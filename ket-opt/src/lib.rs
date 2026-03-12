@@ -97,6 +97,9 @@ pub struct TreeNode {
     pub info_potential: f64,
     /// Depth from root (0-indexed).
     pub depth: u32,
+    /// Decay half-life in seconds, if the node has a decay config.
+    /// Used to detect heterogeneous decay rates across the tree.
+    pub half_life_secs: Option<f64>,
 }
 
 /// Budget constraints for optimization.
@@ -132,10 +135,15 @@ pub struct CalibrationResult {
     pub total_gain: f64,
     /// Total compute cost incurred.
     pub total_cost: f64,
-    /// Number of binary search iterations.
+    /// Number of binary search (or grid search) iterations.
     pub iterations: u32,
     /// Root CID that was calibrated.
     pub root_cid: String,
+    /// True when heterogeneous decay rates were detected and the grid search
+    /// fallback was used instead of WQS binary search.  Heterogeneous decay
+    /// violates the stationarity assumption of WQS / Aliens trick.
+    #[serde(default)]
+    pub heterogeneous_decay: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +322,7 @@ pub fn wqs_optimize(
         total_cost: best_cost,
         iterations: total_iterations,
         root_cid: nodes.first().map(|n| n.cid.0.clone()).unwrap_or_default(),
+        heterogeneous_decay: false,
     }
 }
 
@@ -359,12 +368,15 @@ pub fn dag_to_tree(
         // receive full exploration priority without consulting the scores table.
         let info_potential = compute_info_potential(&engine, &cid, dag_node.saturation());
 
+        let half_life_secs = _dag_node.decay_config.as_ref().map(|c| c.half_life_secs);
+
         let idx = nodes.len();
         nodes.push(TreeNode {
             cid: cid.clone(),
             children: Vec::new(),
             info_potential,
             depth,
+            half_life_secs,
         });
         cid_to_idx.insert(cid.0.clone(), idx);
 
@@ -449,6 +461,88 @@ fn compute_info_potential(
     }
 }
 
+/// Detect whether the tree has heterogeneous decay rates.
+///
+/// Heterogeneous decay violates the stationarity assumption of WQS binary
+/// search — when nodes decay at substantially different rates the information
+/// landscape shifts non-uniformly, causing the concavity condition required
+/// by the Aliens trick to break down.  The fallback grid search is used when
+/// this is detected.
+///
+/// Uses the coefficient of variation (σ/μ) of the finite half-life values;
+/// returns `true` when CV > 0.5 (>50% relative spread).
+fn detect_heterogeneous_decay(nodes: &[TreeNode]) -> bool {
+    let half_lives: Vec<f64> = nodes
+        .iter()
+        .filter_map(|n| n.half_life_secs)
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .collect();
+
+    if half_lives.len() < 2 {
+        return false;
+    }
+
+    let mean = half_lives.iter().sum::<f64>() / half_lives.len() as f64;
+    if mean < 1e-12 {
+        return false;
+    }
+    let variance =
+        half_lives.iter().map(|h| (h - mean).powi(2)).sum::<f64>() / half_lives.len() as f64;
+    let cv = variance.sqrt() / mean;
+    cv > 0.5
+}
+
+/// Grid search fallback for non-stationary decay landscapes.
+///
+/// Enumerates a coarse grid of lambda triples (11³ = 1 331 evaluations) and
+/// picks the best feasible solution.  Less precise than WQS binary search but
+/// does not depend on the concavity / stationarity assumption.
+fn grid_search_fallback(nodes: &[TreeNode], constraints: &Constraints) -> CalibrationResult {
+    let grid_steps: u32 = 10;
+    let mut best_gain = -1.0_f64;
+    let mut best_cost = 0.0_f64;
+    let mut best_lambdas = Lambdas { lambda_cost: 0.0, lambda_depth: 0.0, lambda_tier3: 0.0 };
+    let mut best_assignments = vec![Tier::Skip; nodes.len()];
+
+    for i in 0..=grid_steps {
+        for j in 0..=grid_steps {
+            for k in 0..=grid_steps {
+                let lambda_cost = 10.0 * i as f64 / grid_steps as f64;
+                let lambda_tier3 = 10.0 * j as f64 / grid_steps as f64;
+                let lambda_depth = k as f64 / grid_steps as f64; // [0, 1]
+
+                let lambdas = Lambdas { lambda_cost, lambda_depth, lambda_tier3 };
+                let (gain, cost, tier3_count, assignments) = solve_penalized(nodes, &lambdas);
+
+                if cost <= constraints.max_cost
+                    && tier3_count <= constraints.max_tier3_calls
+                    && gain > best_gain
+                {
+                    best_gain = gain;
+                    best_cost = cost;
+                    best_lambdas = lambdas;
+                    best_assignments = assignments;
+                }
+            }
+        }
+    }
+
+    let mut allocated_tiers = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        allocated_tiers.insert(node.cid.0.clone(), best_assignments[i].to_string());
+    }
+
+    CalibrationResult {
+        lambdas: best_lambdas,
+        allocated_tiers,
+        total_gain: best_gain.max(0.0),
+        total_cost: best_cost,
+        iterations: (grid_steps + 1).pow(3),
+        root_cid: nodes.first().map(|n| n.cid.0.clone()).unwrap_or_default(),
+        heterogeneous_decay: true,
+    }
+}
+
 /// End-to-end calibration: build tree -> optimize -> store result as DAG node.
 ///
 /// Returns the CID of the calibration DAG node and the CalibrationResult.
@@ -463,8 +557,13 @@ pub fn calibrate(
     // Build spanning tree
     let tree = dag_to_tree(dag, db, root_cid)?;
 
-    // Optimize
-    let result = wqs_optimize(&tree, constraints);
+    // Choose optimizer: fall back to grid search when decay rates are
+    // heterogeneous (violates WQS stationarity assumption).
+    let result = if detect_heterogeneous_decay(&tree) {
+        grid_search_fallback(&tree, constraints)
+    } else {
+        wqs_optimize(&tree, constraints)
+    };
 
     // Store result as DAG node (kind=Reasoning, parent=root_cid)
     let result_json = serde_json::to_vec(&result).map_err(|e| {
@@ -677,6 +776,7 @@ pub fn inspect_calibration(db: &DoltDb, cid: &str) -> Result<CalibrationResult, 
         total_cost: parts[5].trim().parse().unwrap_or(0.0),
         iterations: parts[6].trim().parse().unwrap_or(0),
         root_cid: parts[0].trim().to_string(),
+        heterogeneous_decay: false,
     })
 }
 
@@ -705,6 +805,7 @@ pub fn calibration_history(db: &DoltDb, root_cid: &str) -> Result<Vec<Calibratio
             total_cost: parts[6].trim().parse().unwrap_or(0.0),
             iterations: parts[7].trim().parse().unwrap_or(0),
             root_cid: parts[1].trim().to_string(),
+            heterogeneous_decay: false,
         });
     }
 
@@ -732,6 +833,7 @@ mod tests {
                 children,
                 info_potential: 1.0, // all unscored
                 depth: i as u32,
+                half_life_secs: None,
             });
         }
         nodes
@@ -746,24 +848,28 @@ mod tests {
                 children: vec![1, 2],
                 info_potential: 1.0,
                 depth: 0,
+                half_life_secs: None,
             },
             TreeNode {
                 cid: Cid::from(format!("{:064x}", 1)),
                 children: vec![3],
                 info_potential: 0.8,
                 depth: 1,
+                half_life_secs: None,
             },
             TreeNode {
                 cid: Cid::from(format!("{:064x}", 2)),
                 children: vec![],
                 info_potential: 0.6,
                 depth: 1,
+                half_life_secs: None,
             },
             TreeNode {
                 cid: Cid::from(format!("{:064x}", 3)),
                 children: vec![],
                 info_potential: 0.9,
                 depth: 2,
+                half_life_secs: None,
             },
         ]
     }

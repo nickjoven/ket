@@ -4,7 +4,8 @@
 //! Tools: ket_put, ket_get, ket_verify, ket_dag_link, ket_dag_lineage,
 //!        ket_check_drift, ket_query_cdom, ket_store_reasoning,
 //!        ket_create_subtask, ket_get_reasoning, ket_score,
-//!        ket_schema_stats, ket_dag_ls, ket_status, ket_search.
+//!        ket_schema_stats, ket_dag_ls, ket_status, ket_search,
+//!        decay_status.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -265,6 +266,18 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "limit": { "type": "integer", "description": "Maximum number of results (default 20)" }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolDescriptor {
+            name: "decay_status".into(),
+            description: "Get the current decay-adjusted activation for a node. Reports the stored activation, decay configuration (half-life, floor), and the computed activation at the given elapsed time. Decay is applied on query — the stored value is never mutated.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cid": { "type": "string", "description": "Node CID to inspect" },
+                    "elapsed_secs": { "type": "number", "description": "Seconds elapsed since the node was written (default 0)" }
+                },
+                "required": ["cid"]
             }),
         },
     ]
@@ -684,6 +697,27 @@ pub fn handle_tool_call(
             }
 
             Ok(serde_json::json!({ "results": results }))
+        }
+        "decay_status" => {
+            let cid_str = params["cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
+            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let dag = ket_dag::Dag::new(cas);
+            let node = dag.get_node(&ket_cas::Cid::from(cid_str))?;
+            let stored_activation = node.activation.unwrap_or(1.0);
+            let decayed = node.decayed_activation(elapsed_secs);
+
+            Ok(serde_json::json!({
+                "cid": cid_str,
+                "stored_activation": stored_activation,
+                "decay_adjusted_activation": decayed,
+                "elapsed_secs": elapsed_secs,
+                "half_life_secs": node.decay_config.as_ref().map(|c| c.half_life_secs),
+                "activation_floor": node.decay_config.as_ref().map(|c| c.activation_floor),
+                "has_decay": node.decay_config.is_some(),
+            }))
         }
         _ => Err(McpError::UnknownTool(tool_name.to_string())),
     }

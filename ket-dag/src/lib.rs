@@ -2,6 +2,10 @@
 //!
 //! Each DagNode is serialized to JSON, stored in CAS, and addressable by CID.
 //! Parents form the DAG edges. Cycles use soft links (stored separately).
+//!
+//! Nodes optionally carry a `DecayConfig` and an initial `activation` value.
+//! Decay is applied on query (not write) to preserve CID invariants — stored
+//! bytes never change, so the CID remains stable.
 
 use ket_cas::{Cid, Store as CasStore};
 use serde::{Deserialize, Serialize};
@@ -15,6 +19,50 @@ pub enum DagError {
     #[error("Node not found: {0}")]
     NotFound(String),
 }
+
+// ---------------------------------------------------------------------------
+// Decay infrastructure
+// ---------------------------------------------------------------------------
+
+/// Per-node decay configuration.
+///
+/// Stored in `DagNode.decay_config` when a node should have time-varying
+/// activation. Absent means no decay (activation is constant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecayConfig {
+    /// Exponential decay half-life in seconds. Use `f64::INFINITY` for no decay.
+    pub half_life_secs: f64,
+    /// Minimum activation floor — decay never reduces activation below this.
+    pub activation_floor: f64,
+}
+
+impl Default for DecayConfig {
+    fn default() -> Self {
+        DecayConfig {
+            half_life_secs: f64::INFINITY,
+            activation_floor: 0.0,
+        }
+    }
+}
+
+/// Compute the decayed activation given elapsed seconds since the node was written.
+///
+/// Formula: `activation × e^(−elapsed × ln(2) / half_life)`, clamped to floor.
+///
+/// **Decay applies on query, not on write.** The stored `activation` value is
+/// never mutated — this function computes an ephemeral value for the caller.
+pub fn compute_decayed_activation(activation: f64, elapsed_secs: f64, config: &DecayConfig) -> f64 {
+    if config.half_life_secs.is_infinite() || config.half_life_secs <= 0.0 {
+        return activation.max(config.activation_floor);
+    }
+    let decay_factor =
+        (-elapsed_secs * std::f64::consts::LN_2 / config.half_life_secs).exp();
+    (activation * decay_factor).max(config.activation_floor)
+}
+
+// ---------------------------------------------------------------------------
+// Node kinds
+// ---------------------------------------------------------------------------
 
 /// The kind of artifact a DAG node represents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +111,16 @@ pub struct DagNode {
     /// interpret or validate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_cid: Option<Cid>,
+    /// Initial activation value stored at write time.
+    ///
+    /// The *decayed* activation is computed on query via `decayed_activation()`.
+    /// Storing the raw value here preserves content-addressing invariants —
+    /// the stored bytes (and thus the CID) never change due to decay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<f64>,
+    /// Per-node decay configuration. Absent means no decay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_config: Option<DecayConfig>,
 }
 
 impl DagNode {
@@ -76,6 +134,8 @@ impl DagNode {
             timestamp: chrono::Utc::now().to_rfc3339(),
             meta: Vec::new(),
             schema_cid: None,
+            activation: None,
+            decay_config: None,
         }
     }
 
@@ -111,6 +171,54 @@ impl DagNode {
         let clamped = value.clamp(0.0, 1.0);
         self.meta.push(("saturation".to_string(), clamped.to_string()));
         self
+    }
+
+    /// Read the declared saturation value, if any.
+    ///
+    /// Returns `None` when no saturation has been set — the optimizer then
+    /// falls back to deriving unsaturation from the scores table.
+    pub fn saturation(&self) -> Option<f32> {
+        self.get_meta("saturation")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|v| v.clamp(0.0, 1.0))
+    }
+
+    /// Returns `true` when this node is a settled **claim** (saturation = 1.0).
+    ///
+    /// A claim carries fully-supported content. The optimizer can treat it as
+    /// exhausted and will assign `Tier::Skip` without consulting the scores table.
+    pub fn is_claim(&self) -> bool {
+        self.saturation().map_or(false, |s| s >= 1.0)
+    }
+
+    /// Returns `true` when this node is an open **query** (saturation = 0.0 or unset).
+    ///
+    /// A query is a node whose content is a question, hypothesis, or placeholder
+    /// that has not yet been answered. It is maximally uncertain and will receive
+    /// the highest exploration priority from the optimizer.
+    pub fn is_query(&self) -> bool {
+        self.saturation().map_or(true, |s| s == 0.0)
+    }
+
+    /// Set the initial activation value and decay configuration.
+    ///
+    /// The raw `activation` is stored; the decayed value is computed on query
+    /// via `decayed_activation()` to preserve CID invariants.
+    pub fn with_decay(mut self, activation: f64, config: DecayConfig) -> Self {
+        self.activation = Some(activation);
+        self.decay_config = Some(config);
+        self
+    }
+
+    /// Compute the decay-adjusted activation at `elapsed_secs` after this node
+    /// was written.  Returns the stored activation (or `1.0`) if no decay config
+    /// is present.
+    pub fn decayed_activation(&self, elapsed_secs: f64) -> f64 {
+        let base = self.activation.unwrap_or(1.0);
+        match &self.decay_config {
+            Some(cfg) => compute_decayed_activation(base, elapsed_secs, cfg),
+            None => base,
+        }
     }
 
     /// Serialize this node to JSON bytes.
