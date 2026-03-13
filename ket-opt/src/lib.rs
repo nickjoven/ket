@@ -368,7 +368,7 @@ pub fn dag_to_tree(
         // receive full exploration priority without consulting the scores table.
         let info_potential = compute_info_potential(&engine, &cid, dag_node.saturation());
 
-        let half_life_secs = _dag_node.decay_config.as_ref().map(|c| c.half_life_secs);
+        let half_life_secs = dag_node.decay_config.as_ref().map(|c| c.half_life_secs);
 
         let idx = nodes.len();
         nodes.push(TreeNode {

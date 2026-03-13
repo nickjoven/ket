@@ -238,33 +238,6 @@ impl DagNode {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
-
-    /// Read the declared saturation value, if any.
-    ///
-    /// Returns `None` when no saturation has been set — the optimizer then
-    /// falls back to deriving unsaturation from the scores table.
-    pub fn saturation(&self) -> Option<f32> {
-        self.get_meta("saturation")
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|v| v.clamp(0.0, 1.0))
-    }
-
-    /// Returns `true` when this node is a settled **claim** (saturation = 1.0).
-    ///
-    /// A claim carries fully-supported content. The optimizer can treat it as
-    /// exhausted and will assign `Tier::Skip` without consulting the scores table.
-    pub fn is_claim(&self) -> bool {
-        self.saturation().map_or(false, |s| s >= 1.0)
-    }
-
-    /// Returns `true` when this node is an open **query** (saturation = 0.0 or unset).
-    ///
-    /// A query is a node whose content is a question, hypothesis, or placeholder
-    /// that has not yet been answered. It is maximally uncertain and will receive
-    /// the highest exploration priority from the optimizer.
-    pub fn is_query(&self) -> bool {
-        self.saturation().map_or(true, |s| s == 0.0)
-    }
 }
 
 /// A soft link — represents a relationship that would create a cycle in the DAG.

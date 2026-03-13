@@ -280,6 +280,32 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": ["cid"]
             }),
         },
+        ToolDescriptor {
+            name: "ket_soft_link".into(),
+            description: "Create a typed semantic edge between two DAG nodes. Use this to map ontological relationships between claims, theorems, observations, and models: 'supports', 'contradicts', 'formalizes', 'extends', 'cites', 'instantiates', 'refines', or any domain-specific label. Unlike DAG parent edges (which record derivation provenance), soft links record semantic relationships that cross the provenance graph and can be traversed by type. Requires Dolt.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "from_cid": { "type": "string", "description": "Source node CID" },
+                    "to_cid": { "type": "string", "description": "Target node CID" },
+                    "relation": { "type": "string", "description": "Relation type, e.g. supports, contradicts, formalizes, extends, cites, instantiates, refines" }
+                },
+                "required": ["from_cid", "to_cid", "relation"]
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_soft_link_query".into(),
+            description: "Query typed semantic edges for a DAG node. Returns all soft links involving the given CID. Use 'direction' to filter outgoing ('from'), incoming ('to'), or both (default). Use 'relation' to filter by edge type. Use this to traverse the ontology graph: find what a claim supports, what contradicts it, what formalizes a concept. Requires Dolt.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cid": { "type": "string", "description": "Node CID to query edges for" },
+                    "relation": { "type": "string", "description": "Optional: filter by relation type (e.g. contradicts)" },
+                    "direction": { "type": "string", "description": "Optional: 'from' (outgoing), 'to' (incoming), or 'both' (default)" }
+                },
+                "required": ["cid"]
+            }),
+        },
     ]
 }
 
@@ -719,6 +745,40 @@ pub fn handle_tool_call(
                 "has_decay": node.decay_config.is_some(),
             }))
         }
+        "ket_soft_link" => {
+            let db = db.ok_or_else(|| McpError::InvalidParams("ket_soft_link requires Dolt".into()))?;
+            let from_cid = params["from_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("from_cid required".into()))?;
+            let to_cid = params["to_cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("to_cid required".into()))?;
+            let relation = params["relation"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("relation required".into()))?;
+            db.insert_soft_link(from_cid, to_cid, relation)?;
+            Ok(serde_json::json!({
+                "created": true,
+                "from_cid": from_cid,
+                "to_cid": to_cid,
+                "relation": relation,
+            }))
+        }
+        "ket_soft_link_query" => {
+            let db = db.ok_or_else(|| McpError::InvalidParams("ket_soft_link_query requires Dolt".into()))?;
+            let cid = params["cid"]
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
+            let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+            let relation_filter = params.get("relation").and_then(|v| v.as_str());
+            let csv = match direction {
+                "from" => db.soft_links_from(cid)?,
+                "to" => db.soft_links_to(cid)?,
+                _ => db.soft_links_for(cid)?,
+            };
+            let links = parse_soft_links_csv(&csv, direction, relation_filter);
+            Ok(serde_json::json!({ "links": links, "cid": cid, "direction": direction }))
+        }
         _ => Err(McpError::UnknownTool(tool_name.to_string())),
     }
 }
@@ -794,6 +854,41 @@ pub fn handle_jsonrpc(
             }),
         },
     }
+}
+
+/// Parse soft_links CSV rows into JSON objects.
+///
+/// Column layout by direction:
+/// - "both": from_cid, to_cid, relation, created_at
+/// - "from": to_cid, relation, created_at
+/// - "to":   from_cid, relation, created_at
+fn parse_soft_links_csv(csv: &str, direction: &str, relation_filter: Option<&str>) -> Vec<serde_json::Value> {
+    let mut lines = csv.lines();
+    let _header = lines.next();
+    let mut links = Vec::new();
+    for line in lines {
+        let cols: Vec<&str> = line.splitn(4, ',').collect();
+        let (from, to, rel, ts) = match direction {
+            "from" if cols.len() >= 3 => ("", cols[0], cols[1], cols.get(2).copied().unwrap_or("")),
+            "to"   if cols.len() >= 3 => (cols[0], "", cols[1], cols.get(2).copied().unwrap_or("")),
+            _      if cols.len() >= 4 => (cols[0], cols[1], cols[2], cols[3]),
+            _ => continue,
+        };
+        if let Some(filter) = relation_filter {
+            if rel.trim() != filter {
+                continue;
+            }
+        }
+        let mut obj = serde_json::json!({ "relation": rel.trim(), "created_at": ts.trim() });
+        if !from.is_empty() {
+            obj["from_cid"] = serde_json::json!(from.trim());
+        }
+        if !to.is_empty() {
+            obj["to_cid"] = serde_json::json!(to.trim());
+        }
+        links.push(obj);
+    }
+    links
 }
 
 fn parse_node_kind(s: &str) -> Result<ket_dag::NodeKind, McpError> {
