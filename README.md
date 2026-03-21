@@ -1,6 +1,6 @@
 # Ket $|\psi\rangle$
 
-Content-addressable substrate for multi-agent memory systems.
+**Purpose:** Content-addressable substrate for multi-agent memory systems — BLAKE3-hashed, immutable storage with Merkle DAG provenance, scoring, and MCP integration. The infrastructure layer for externalizing LLM memory, lineage, and traversal control.
 
 Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and stored in an immutable content-addressed store with a queryable SQL mirror powered by [Dolt](https://github.com/dolthub/dolt). Built for multi-agent workflows where provenance, lineage, and scoring matter.
 
