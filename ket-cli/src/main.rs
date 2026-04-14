@@ -349,6 +349,33 @@ Examples:
   ket rebuild-projection --json     Machine-readable report")]
     RebuildProjection,
 
+    /// Migrate a stale Dolt schema to the current binary's expected shape
+    #[command(long_about = "\
+Bring an older .ket Dolt database up to the current binary's expected schema.
+
+Handles two drift cases:
+  1. Entire tables missing (e.g. `calibrations` added in a later release)
+  2. Individual columns missing from existing tables (e.g. `dag_nodes.schema_cid`)
+
+Missing tables are created via the same DDL as `ket init` (idempotent).
+Missing columns are added via `ALTER TABLE ADD COLUMN`. Only nullable columns
+or columns with a DEFAULT are added automatically — unsafe NOT-NULL additions
+require manual intervention.
+
+Run this after upgrading the ket binary on an existing .ket store, especially
+if `ket status` reports `table not found` or `Unknown column` errors. Does not
+touch CAS blobs — pair with `ket repair` afterward to sync any DAG nodes that
+failed to index under the old schema.
+
+Examples:
+  ket migrate              Plan and apply any needed schema migrations
+  ket migrate --dry-run    Show the plan without writing")]
+    Migrate {
+        /// Show what would be migrated without actually writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Show .ket health dashboard (CAS blobs, SQL stats, Dolt HEAD)
     #[command(long_about = "\
 Display a health overview of the .ket directory.
@@ -888,6 +915,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
         Commands::VerifyProjection => cmd_verify_projection(&base, cli.json),
         Commands::RebuildProjection => cmd_rebuild_projection(&base, cli.json),
+        Commands::Migrate { dry_run } => cmd_migrate(&base, dry_run, cli.json),
         Commands::Status => cmd_status(&base, cli.json),
         Commands::History { n } => cmd_history(&base, n, cli.json),
         Commands::Diff { from, to } => cmd_diff(&base, from.as_deref(), to.as_deref(), cli.json),
@@ -2057,6 +2085,49 @@ fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn s
 
     let log_path = base.join("log");
     log_event(&log_path, "repair", &format!("reconciled={to_fix}"));
+
+    Ok(())
+}
+
+fn cmd_migrate(
+    base: &PathBuf,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+    let steps = db.plan_migration()?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": dry_run,
+                "steps": steps,
+                "applied": !dry_run && !steps.is_empty(),
+            }))?
+        );
+    } else if steps.is_empty() {
+        println!("Schema is current. No migration needed.");
+    } else {
+        let verb = if dry_run { "would apply" } else { "applying" };
+        println!("Migration plan ({} step{}):", steps.len(), if steps.len() == 1 { "" } else { "s" });
+        for step in &steps {
+            println!("  {verb}: {}", step.describe());
+        }
+    }
+
+    if !dry_run && !steps.is_empty() {
+        db.apply_migration(&steps)?;
+        if !json {
+            println!("\nMigration applied. Run `ket repair` next if CAS contains nodes that failed to index under the old schema.");
+        }
+        let log_path = base.join("log");
+        log::append(
+            &log_path,
+            "migrate",
+            &format!("applied={}", steps.len()),
+        )?;
+    }
 
     Ok(())
 }

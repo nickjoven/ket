@@ -554,6 +554,57 @@ fn repair_idempotent() {
     );
 }
 
+// --- Migrate test ---
+
+#[test]
+fn migrate_restores_dropped_schema() {
+    let (ket_dir, _dir) = fresh_ket("migrate");
+    if !has_dolt() {
+        return;
+    }
+
+    // Simulate a pre-schema-drift database: drop the calibrations table and
+    // the dag_nodes.schema_cid column. Matches the real-world failure mode
+    // from old .ket stores created before these were added.
+    ket(&ket_dir, &["sql", "DROP TABLE calibrations"]);
+    ket(&ket_dir, &["sql", "ALTER TABLE dag_nodes DROP COLUMN schema_cid"]);
+
+    // Status should now fail (reproduces the sandbox/.ket symptom).
+    let (ok, _, _) = ket(&ket_dir, &["status"]);
+    assert!(!ok, "status should fail on a drifted schema");
+
+    // Dry-run should report both drift cases without touching the DB.
+    let plan = ket_json(&ket_dir, &["migrate", "--dry-run"]);
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["applied"], false);
+    let steps = plan["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "expected 2 drift steps, got: {steps:?}");
+    let kinds: Vec<&str> = steps
+        .iter()
+        .map(|s| s["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"create_table"));
+    assert!(kinds.contains(&"add_column"));
+
+    // Status should still fail (dry-run must not mutate).
+    let (still_broken, _, _) = ket(&ket_dir, &["status"]);
+    assert!(!still_broken);
+
+    // Apply.
+    let applied = ket_json(&ket_dir, &["migrate"]);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["steps"].as_array().unwrap().len(), 2);
+
+    // Status should now succeed.
+    let (ok2, _, _) = ket(&ket_dir, &["status"]);
+    assert!(ok2, "status should succeed after migrate");
+
+    // Re-running migrate is a no-op.
+    let noop = ket_json(&ket_dir, &["migrate"]);
+    assert_eq!(noop["applied"], false);
+    assert_eq!(noop["steps"].as_array().unwrap().len(), 0);
+}
+
 // --- CDOM test ---
 
 #[test]

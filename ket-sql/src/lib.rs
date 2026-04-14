@@ -223,6 +223,35 @@ fn diff_nodes(diff: &mut ProjectionDiff, expected: Vec<NodeRow>, actual: Vec<Nod
     }
 }
 
+/// One step in a schema migration plan.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MigrationStep {
+    CreateTable {
+        name: String,
+    },
+    AddColumn {
+        table: String,
+        column: String,
+        column_def: String,
+    },
+}
+
+impl MigrationStep {
+    /// Short human-readable description, e.g. `create table calibrations` or
+    /// `add column dag_nodes.schema_cid (VARCHAR(64))`.
+    pub fn describe(&self) -> String {
+        match self {
+            MigrationStep::CreateTable { name } => format!("create table {name}"),
+            MigrationStep::AddColumn {
+                table,
+                column,
+                column_def,
+            } => format!("add column {table}.{column} ({column_def})"),
+        }
+    }
+}
+
 /// Split one CSV record into fields, honoring RFC-4180 double-quote quoting
 /// (Dolt quotes a field that contains a comma, quote, or newline). Agent names
 /// are user-controlled and may contain commas, so a naive `split(',')` would
@@ -252,6 +281,27 @@ fn parse_csv_line(line: &str) -> Vec<String> {
     fields.push(cur);
     fields
 }
+
+/// Tables the current binary expects to exist. `create_schema()` is the source
+/// of truth for their DDL; this list is used by migration to detect missing
+/// tables in older databases.
+const EXPECTED_TABLES: &[&str] = &[
+    "dag_nodes",
+    "dag_edges",
+    "soft_links",
+    "tasks",
+    "agents",
+    "context_files",
+    "cdom_symbols",
+    "scores",
+    "calibrations",
+];
+
+/// Columns added to existing tables after the initial schema release. Each
+/// entry is `(table, column_name, column_def)`. The `column_def` MUST be
+/// nullable (no `NOT NULL`) or carry an explicit `DEFAULT` so that
+/// `ALTER TABLE ADD COLUMN` on a non-empty table is safe.
+const POST_INIT_COLUMNS: &[(&str, &str, &str)] = &[("dag_nodes", "schema_cid", "VARCHAR(64)")];
 
 /// The Dolt database handle.
 pub struct DoltDb {
@@ -489,6 +539,115 @@ impl DoltDb {
 
         self.commit("Initialize ket schema")?;
         Ok(())
+    }
+
+    /// List all tables in the current database. Parses `SHOW TABLES` CSV output.
+    pub fn list_tables(&self) -> Result<Vec<String>, SqlError> {
+        let csv = self.query("SHOW TABLES")?;
+        Ok(csv
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// List column names for a table. Parses `SHOW COLUMNS FROM <t>` CSV output.
+    /// Only the Field column is extracted; type/null/default are ignored.
+    pub fn list_columns(&self, table: &str) -> Result<Vec<String>, SqlError> {
+        let csv = self.query(&format!("SHOW COLUMNS FROM {table}"))?;
+        Ok(csv
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split(',').next())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Plan a schema migration without applying it. Returns the list of steps
+    /// needed to bring the current DB up to the binary's expected schema.
+    ///
+    /// Handles two kinds of drift:
+    ///   1. Entire tables missing (added in a later release)
+    ///   2. Individual columns missing from existing tables (post-init columns
+    ///      declared in [`POST_INIT_COLUMNS`])
+    ///
+    /// Does NOT handle: column type changes, index changes, NOT NULL columns
+    /// added to non-empty tables (unsafe without a default). Such cases require
+    /// manual migration.
+    pub fn plan_migration(&self) -> Result<Vec<MigrationStep>, SqlError> {
+        let mut steps = Vec::new();
+        let existing_tables = self.list_tables()?;
+        let table_set: std::collections::HashSet<&str> =
+            existing_tables.iter().map(String::as_str).collect();
+
+        for table in EXPECTED_TABLES {
+            if !table_set.contains(table) {
+                steps.push(MigrationStep::CreateTable {
+                    name: (*table).into(),
+                });
+            }
+        }
+
+        for (table, column, column_def) in POST_INIT_COLUMNS {
+            if !table_set.contains(table) {
+                continue;
+            }
+            let columns = self.list_columns(table)?;
+            if !columns.iter().any(|c| c == column) {
+                steps.push(MigrationStep::AddColumn {
+                    table: (*table).into(),
+                    column: (*column).into(),
+                    column_def: (*column_def).into(),
+                });
+            }
+        }
+
+        Ok(steps)
+    }
+
+    /// Apply a list of migration steps. Creates any missing tables by delegating
+    /// to `create_schema()` (which uses `CREATE TABLE IF NOT EXISTS`) and issues
+    /// `ALTER TABLE ADD COLUMN` for missing columns. Commits with a single Dolt
+    /// commit message on success.
+    pub fn apply_migration(&self, steps: &[MigrationStep]) -> Result<(), SqlError> {
+        if steps.is_empty() {
+            return Ok(());
+        }
+
+        let needs_create = steps
+            .iter()
+            .any(|s| matches!(s, MigrationStep::CreateTable { .. }));
+        if needs_create {
+            self.create_schema()?;
+        }
+
+        for step in steps {
+            if let MigrationStep::AddColumn {
+                table,
+                column,
+                column_def,
+            } = step
+            {
+                let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}");
+                self.exec(&sql)?;
+            }
+        }
+
+        self.commit("Migrate schema")?;
+        Ok(())
+    }
+
+    /// Plan and apply a schema migration in one call. Equivalent to
+    /// `plan_migration()` followed by `apply_migration()`. Returns the list of
+    /// steps that were applied so callers can report them.
+    pub fn migrate(&self) -> Result<Vec<MigrationStep>, SqlError> {
+        let steps = self.plan_migration()?;
+        self.apply_migration(&steps)?;
+        Ok(steps)
     }
 
     /// Insert a DAG node record.
