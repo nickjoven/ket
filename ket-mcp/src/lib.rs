@@ -110,7 +110,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_dag_link".into(),
-            description: "Create a new DAG node with content and provenance. This is the primary way to record work — every node captures what was produced (content), what it derived from (parents), who produced it (agent), and what kind of artifact it is (kind). Always link parents to maintain provenance chains.".into(),
+            description: "Create a new DAG node with content and provenance. This is the primary way to record work — every node captures what was produced (content), what it derived from (parents), who produced it (agent), and what kind of artifact it is (kind). Always link parents to maintain provenance chains. Optional: declare epistemic confidence via `saturation` (0.0 = open query, 1.0 = settled claim) and time-decay via `activation`, `half_life_secs`, `activation_floor`.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -118,7 +118,11 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "kind": { "type": "string", "description": "Node kind: memory, code, reasoning, task, cdom, score, context" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
                     "agent": { "type": "string", "description": "Agent name" },
-                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
+                    "saturation": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open query (maximally uncertain, prioritised for exploration); 1.0 = settled claim (optimizer treats subtree as exhausted). Omit to leave unset. Values outside the unit interval are rejected." },
+                    "activation": { "type": "number", "minimum": 0.0, "description": "Initial activation value for time-decay (default 1.0). Must be finite and >= 0. Requires half_life_secs." },
+                    "half_life_secs": { "type": "number", "exclusiveMinimum": 0.0, "description": "Exponential decay half-life in seconds. Must be finite and > 0. Omit the param entirely for no decay. Read back with decay_status tool." },
+                    "activation_floor": { "type": "number", "minimum": 0.0, "description": "Minimum activation after decay (default 0.0). Must be finite, >= 0, and <= activation." }
                 },
                 "required": ["content", "kind", "agent"]
             }),
@@ -160,14 +164,18 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_store_reasoning".into(),
-            description: "Persist a reasoning step as a DAG node with kind=reasoning. Shorthand for ket_dag_link with kind pre-set. Use this to record conclusions, plans, or analysis so future sessions can retrieve context via ket_get_reasoning.".into(),
+            description: "Persist a reasoning step as a DAG node with kind=reasoning. Shorthand for ket_dag_link with kind pre-set. Use this to record conclusions, plans, or analysis so future sessions can retrieve context via ket_get_reasoning. Optional: declare epistemic confidence via `saturation` and time-decay via `activation` + `half_life_secs`.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": { "type": "string", "description": "Reasoning content" },
                     "agent": { "type": "string", "description": "Agent name" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
-                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
+                    "saturation": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open question; 1.0 = settled conclusion. Omit to leave unset. Values outside the unit interval are rejected." },
+                    "activation": { "type": "number", "minimum": 0.0, "description": "Initial activation value for time-decay (default 1.0). Must be finite and >= 0. Requires half_life_secs." },
+                    "half_life_secs": { "type": "number", "exclusiveMinimum": 0.0, "description": "Exponential decay half-life in seconds. Must be finite and > 0. Omit the param entirely for no decay. Read back with decay_status tool." },
+                    "activation_floor": { "type": "number", "minimum": 0.0, "description": "Minimum activation after decay (default 0.0). Must be finite, >= 0, and <= activation." }
                 },
                 "required": ["content", "agent"]
             }),
@@ -309,6 +317,93 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
     ]
 }
 
+/// Parse and validate the optional `saturation` param.
+///
+/// Saturation encodes epistemic confidence on [0.0, 1.0]. Values outside
+/// the unit interval, or non-finite values, are rejected — they would
+/// silently break the optimizer's claim/query semantics.
+fn parse_saturation_param(params: &Value) -> Result<Option<f32>, McpError> {
+    match params.get("saturation") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let n = v.as_f64().ok_or_else(|| {
+                McpError::InvalidParams("saturation must be a number".into())
+            })?;
+            if !n.is_finite() || !(0.0..=1.0).contains(&n) {
+                return Err(McpError::InvalidParams(
+                    "saturation must be finite and in [0.0, 1.0]".into(),
+                ));
+            }
+            Ok(Some(n as f32))
+        }
+    }
+}
+
+/// Parse and validate the optional decay params.
+///
+/// Returns `Some((activation, config))` if `half_life_secs` is present
+/// (decay requested), otherwise `None`. `activation` and `activation_floor`
+/// default to 1.0 and 0.0 respectively when omitted but `half_life_secs`
+/// is set. All values must be finite and non-negative; `half_life_secs`
+/// must additionally be strictly positive (omit the param for "no decay"
+/// rather than passing 0 or infinity).
+fn parse_decay_params(params: &Value) -> Result<Option<(f64, ket_dag::DecayConfig)>, McpError> {
+    fn finite_f64(params: &Value, key: &str) -> Result<Option<f64>, McpError> {
+        match params.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let n = v.as_f64().ok_or_else(|| {
+                    McpError::InvalidParams(format!("{} must be a number", key))
+                })?;
+                if !n.is_finite() {
+                    return Err(McpError::InvalidParams(format!(
+                        "{} must be finite",
+                        key
+                    )));
+                }
+                Ok(Some(n))
+            }
+        }
+    }
+
+    let half_life = match finite_f64(params, "half_life_secs")? {
+        Some(hl) => hl,
+        None => return Ok(None),
+    };
+    if half_life <= 0.0 {
+        return Err(McpError::InvalidParams(
+            "half_life_secs must be > 0 (omit the param for no decay)".into(),
+        ));
+    }
+
+    let activation = finite_f64(params, "activation")?.unwrap_or(1.0);
+    if activation < 0.0 {
+        return Err(McpError::InvalidParams(
+            "activation must be >= 0".into(),
+        ));
+    }
+
+    let floor = finite_f64(params, "activation_floor")?.unwrap_or(0.0);
+    if floor < 0.0 {
+        return Err(McpError::InvalidParams(
+            "activation_floor must be >= 0".into(),
+        ));
+    }
+    if floor > activation {
+        return Err(McpError::InvalidParams(
+            "activation_floor must be <= activation".into(),
+        ));
+    }
+
+    Ok(Some((
+        activation,
+        ket_dag::DecayConfig {
+            half_life_secs: half_life,
+            activation_floor: floor,
+        },
+    )))
+}
+
 /// Handle an MCP tool call.
 pub fn handle_tool_call(
     tool_name: &str,
@@ -363,6 +458,9 @@ pub fn handle_tool_call(
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
 
             let kind = parse_node_kind(kind_str)?;
+            let saturation_param = parse_saturation_param(params)?;
+            let decay_param = parse_decay_params(params)?;
+
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
             let mut node = ket_dag::DagNode::new(
@@ -373,6 +471,12 @@ pub fn handle_tool_call(
             );
             if let Some(s) = schema_cid_param {
                 node = node.with_schema(ket_cas::Cid::from(s));
+            }
+            if let Some(sat) = saturation_param {
+                node = node.with_saturation(sat);
+            }
+            if let Some((activation, config)) = decay_param {
+                node = node.with_decay(activation, config);
             }
             let node_cid = dag.put_node(&node)?;
 
@@ -472,6 +576,8 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
+            let saturation_param = parse_saturation_param(params)?;
+            let decay_param = parse_decay_params(params)?;
 
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
@@ -483,6 +589,12 @@ pub fn handle_tool_call(
             );
             if let Some(s) = schema_cid_param {
                 node = node.with_schema(ket_cas::Cid::from(s));
+            }
+            if let Some(sat) = saturation_param {
+                node = node.with_saturation(sat);
+            }
+            if let Some((activation, config)) = decay_param {
+                node = node.with_decay(activation, config);
             }
             let node_cid = dag.put_node(&node)?;
 
@@ -938,4 +1050,115 @@ pub fn run_stdio_server(cas: &ket_cas::Store, db: Option<&ket_sql::DoltDb>) -> R
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn saturation_absent_is_none() {
+        assert!(parse_saturation_param(&json!({})).unwrap().is_none());
+        assert!(parse_saturation_param(&json!({ "saturation": null }))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn saturation_in_range_accepted() {
+        assert_eq!(
+            parse_saturation_param(&json!({ "saturation": 0.0 })).unwrap(),
+            Some(0.0)
+        );
+        assert_eq!(
+            parse_saturation_param(&json!({ "saturation": 1.0 })).unwrap(),
+            Some(1.0)
+        );
+        assert_eq!(
+            parse_saturation_param(&json!({ "saturation": 0.5 })).unwrap(),
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn saturation_out_of_range_rejected() {
+        assert!(parse_saturation_param(&json!({ "saturation": -0.1 })).is_err());
+        assert!(parse_saturation_param(&json!({ "saturation": 1.1 })).is_err());
+        assert!(parse_saturation_param(&json!({ "saturation": 2.0 })).is_err());
+    }
+
+    #[test]
+    fn saturation_non_numeric_rejected() {
+        assert!(parse_saturation_param(&json!({ "saturation": "0.5" })).is_err());
+        assert!(parse_saturation_param(&json!({ "saturation": true })).is_err());
+    }
+
+    #[test]
+    fn decay_absent_is_none() {
+        assert!(parse_decay_params(&json!({})).unwrap().is_none());
+        assert!(parse_decay_params(&json!({ "activation": 1.0 }))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn decay_with_half_life_uses_defaults() {
+        let (activation, config) = parse_decay_params(&json!({ "half_life_secs": 60.0 }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(activation, 1.0);
+        assert_eq!(config.half_life_secs, 60.0);
+        assert_eq!(config.activation_floor, 0.0);
+    }
+
+    #[test]
+    fn decay_full_params_accepted() {
+        let (activation, config) = parse_decay_params(&json!({
+            "activation": 2.5,
+            "half_life_secs": 120.0,
+            "activation_floor": 0.1,
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(activation, 2.5);
+        assert_eq!(config.half_life_secs, 120.0);
+        assert_eq!(config.activation_floor, 0.1);
+    }
+
+    #[test]
+    fn decay_non_positive_half_life_rejected() {
+        assert!(parse_decay_params(&json!({ "half_life_secs": 0.0 })).is_err());
+        assert!(parse_decay_params(&json!({ "half_life_secs": -1.0 })).is_err());
+    }
+
+    #[test]
+    fn decay_non_numeric_rejected() {
+        assert!(parse_decay_params(&json!({ "half_life_secs": "60" })).is_err());
+        assert!(parse_decay_params(&json!({ "half_life_secs": true })).is_err());
+        assert!(parse_decay_params(&json!({
+            "half_life_secs": 60.0,
+            "activation": "1.0",
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn decay_negative_activation_rejected() {
+        assert!(parse_decay_params(&json!({
+            "half_life_secs": 60.0,
+            "activation": -0.5,
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn decay_floor_above_activation_rejected() {
+        assert!(parse_decay_params(&json!({
+            "half_life_secs": 60.0,
+            "activation": 0.5,
+            "activation_floor": 0.6,
+        }))
+        .is_err());
+    }
 }
