@@ -110,7 +110,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_dag_link".into(),
-            description: "Create a new DAG node with content and provenance. This is the primary way to record work — every node captures what was produced (content), what it derived from (parents), who produced it (agent), and what kind of artifact it is (kind). Always link parents to maintain provenance chains. Optional: declare epistemic confidence via `saturation` (0.0 = open query, 1.0 = settled claim) and time-decay via `activation`, `half_life_secs`, `activation_floor`.".into(),
+            description: "Create a new DAG node with content and provenance. This is the primary way to record work — every node captures what was produced (content), what it derived from (parents), who produced it (agent), and what kind of artifact it is (kind). Always link parents to maintain provenance chains.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -118,11 +118,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "kind": { "type": "string", "description": "Node kind: memory, code, reasoning, task, cdom, score, context" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
                     "agent": { "type": "string", "description": "Agent name" },
-                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
-                    "saturation": { "type": "number", "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open query (maximally uncertain, prioritised for exploration); 1.0 = settled claim (optimizer treats subtree as exhausted). Omit to leave unset." },
-                    "activation": { "type": "number", "description": "Initial activation value for time-decay (default 1.0). Requires half_life_secs." },
-                    "half_life_secs": { "type": "number", "description": "Exponential decay half-life in seconds. Omit or set to Infinity for no decay. Read back with decay_status tool." },
-                    "activation_floor": { "type": "number", "description": "Minimum activation after decay (default 0.0). Decay never reduces activation below this floor." }
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
                 },
                 "required": ["content", "kind", "agent"]
             }),
@@ -164,18 +160,14 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_store_reasoning".into(),
-            description: "Persist a reasoning step as a DAG node with kind=reasoning. Shorthand for ket_dag_link with kind pre-set. Use this to record conclusions, plans, or analysis so future sessions can retrieve context via ket_get_reasoning. Optional: declare epistemic confidence via `saturation` and time-decay via `activation` + `half_life_secs`.".into(),
+            description: "Persist a reasoning step as a DAG node with kind=reasoning. Shorthand for ket_dag_link with kind pre-set. Use this to record conclusions, plans, or analysis so future sessions can retrieve context via ket_get_reasoning.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": { "type": "string", "description": "Reasoning content" },
                     "agent": { "type": "string", "description": "Agent name" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
-                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
-                    "saturation": { "type": "number", "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open question; 1.0 = settled conclusion. Omit to leave unset." },
-                    "activation": { "type": "number", "description": "Initial activation value for time-decay (default 1.0). Requires half_life_secs." },
-                    "half_life_secs": { "type": "number", "description": "Exponential decay half-life in seconds. Omit for no decay. Read back with decay_status tool." },
-                    "activation_floor": { "type": "number", "description": "Minimum activation after decay (default 0.0)." }
+                    "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" }
                 },
                 "required": ["content", "agent"]
             }),
@@ -371,11 +363,6 @@ pub fn handle_tool_call(
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
 
             let kind = parse_node_kind(kind_str)?;
-            let saturation_param = params.get("saturation").and_then(|v| v.as_f64());
-            let activation_param = params.get("activation").and_then(|v| v.as_f64());
-            let half_life_param = params.get("half_life_secs").and_then(|v| v.as_f64());
-            let floor_param = params.get("activation_floor").and_then(|v| v.as_f64());
-
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
             let mut node = ket_dag::DagNode::new(
@@ -386,17 +373,6 @@ pub fn handle_tool_call(
             );
             if let Some(s) = schema_cid_param {
                 node = node.with_schema(ket_cas::Cid::from(s));
-            }
-            if let Some(sat) = saturation_param {
-                node = node.with_saturation(sat as f32);
-            }
-            if let Some(hl) = half_life_param {
-                let activation = activation_param.unwrap_or(1.0);
-                let floor = floor_param.unwrap_or(0.0);
-                node = node.with_decay(
-                    activation,
-                    ket_dag::DecayConfig { half_life_secs: hl, activation_floor: floor },
-                );
             }
             let node_cid = dag.put_node(&node)?;
 
@@ -496,10 +472,6 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
-            let saturation_param = params.get("saturation").and_then(|v| v.as_f64());
-            let activation_param = params.get("activation").and_then(|v| v.as_f64());
-            let half_life_param = params.get("half_life_secs").and_then(|v| v.as_f64());
-            let floor_param = params.get("activation_floor").and_then(|v| v.as_f64());
 
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
@@ -511,17 +483,6 @@ pub fn handle_tool_call(
             );
             if let Some(s) = schema_cid_param {
                 node = node.with_schema(ket_cas::Cid::from(s));
-            }
-            if let Some(sat) = saturation_param {
-                node = node.with_saturation(sat as f32);
-            }
-            if let Some(hl) = half_life_param {
-                let activation = activation_param.unwrap_or(1.0);
-                let floor = floor_param.unwrap_or(0.0);
-                node = node.with_decay(
-                    activation,
-                    ket_dag::DecayConfig { half_life_secs: hl, activation_floor: floor },
-                );
             }
             let node_cid = dag.put_node(&node)?;
 
