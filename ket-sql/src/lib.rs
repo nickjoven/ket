@@ -172,6 +172,7 @@ impl DoltDb {
                 parent_cid VARCHAR(64) NOT NULL,
                 child_cid VARCHAR(64) NOT NULL,
                 ordinal INT NOT NULL DEFAULT 0,
+                edge_kind VARCHAR(20) NOT NULL DEFAULT 'derives',
                 PRIMARY KEY (parent_cid, child_cid)
             )",
             "CREATE TABLE IF NOT EXISTS soft_links (
@@ -250,6 +251,11 @@ impl DoltDb {
             self.exec(stmt)?;
         }
 
+        // Migration: add edge_kind column to existing dag_edges tables
+        let _ = self.exec(
+            "ALTER TABLE dag_edges ADD COLUMN edge_kind VARCHAR(20) NOT NULL DEFAULT 'derives'"
+        );
+
         self.commit("Initialize ket schema")?;
         Ok(())
     }
@@ -274,22 +280,32 @@ impl DoltDb {
         self.exec(&sql)
     }
 
-    /// Insert a DAG edge.
+    /// Insert a DAG edge with an epistemic kind.
+    ///
+    /// Edge kinds classify the epistemic relationship between parent and child:
+    /// - `grounds`: parent is irreducible (axiom, measurement, definition)
+    /// - `derives`: child follows from parent by stated mechanism (default)
+    /// - `proposes`: child is suggested by parent but not entailed
     pub fn insert_dag_edge(
         &self,
         parent_cid: &str,
         child_cid: &str,
         ordinal: i32,
+        edge_kind: &str,
     ) -> Result<(), SqlError> {
+        let kind = validate_edge_kind(edge_kind);
         let sql = format!(
-            "INSERT INTO dag_edges (parent_cid, child_cid, ordinal) \
-             VALUES ('{parent_cid}', '{child_cid}', {ordinal})"
+            "INSERT INTO dag_edges (parent_cid, child_cid, ordinal, edge_kind) \
+             VALUES ('{parent_cid}', '{child_cid}', {ordinal}, '{kind}')"
         );
         self.exec(&sql)
     }
 
     /// Sync a DAG node + its edges to SQL in a single transaction.
     /// Uses INSERT IGNORE so re-syncing the same node is idempotent.
+    ///
+    /// Each parent is a tuple of (cid, ordinal, edge_kind).
+    /// Edge kind defaults to "derives" when not specified.
     #[allow(clippy::too_many_arguments)]
     pub fn sync_dag_node(
         &self,
@@ -299,7 +315,7 @@ impl DoltDb {
         created_at: &str,
         output_cid: &str,
         meta: &str,
-        parent_cids: &[(&str, i32)],
+        parent_cids: &[(&str, i32, &str)],
         schema_cid: Option<&str>,
     ) -> Result<(), SqlError> {
         let mut stmts = Vec::with_capacity(1 + parent_cids.len());
@@ -311,10 +327,11 @@ impl DoltDb {
             escape_sql(meta)
         ));
 
-        for (parent_cid, ordinal) in parent_cids {
+        for (parent_cid, ordinal, edge_kind) in parent_cids {
+            let ek = validate_edge_kind(edge_kind);
             stmts.push(format!(
-                "INSERT IGNORE INTO dag_edges (parent_cid, child_cid, ordinal) \
-                 VALUES ('{parent_cid}', '{cid}', {ordinal})"
+                "INSERT IGNORE INTO dag_edges (parent_cid, child_cid, ordinal, edge_kind) \
+                 VALUES ('{parent_cid}', '{cid}', {ordinal}, '{ek}')"
             ));
         }
 
@@ -841,4 +858,18 @@ fn parse_count(csv: &str) -> u64 {
 
 fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Validate and normalize an edge kind string.
+///
+/// Valid edge kinds:
+/// - `grounds`: irreducible input (axiom, measurement, definition)
+/// - `derives`: logically follows from parent (default)
+/// - `proposes`: suggested by parent but not entailed (hypothesis)
+fn validate_edge_kind(kind: &str) -> &str {
+    match kind {
+        "grounds" | "derives" | "proposes" => kind,
+        "" => "derives",
+        _ => "derives", // unknown kinds fall back to derives
+    }
 }

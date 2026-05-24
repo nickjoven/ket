@@ -230,10 +230,10 @@ impl<'a> Orchestrator<'a> {
             dag.store_with_node(content.as_bytes(), NodeKind::Reasoning, parents.clone(), agent)?;
 
         let node = dag.get_node(&node_cid)?;
-        let parent_refs: Vec<(&str, i32)> = parents
+        let parent_refs: Vec<(&str, i32, &str)> = parents
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.as_str(), i as i32))
+            .map(|(i, p)| (p.as_str(), i as i32, "derives"))
             .collect();
         self.db.sync_dag_node(
             node_cid.as_str(),
