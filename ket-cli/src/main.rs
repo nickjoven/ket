@@ -583,6 +583,9 @@ enum DagAction {
         /// Parent node CIDs (can specify multiple for merge)
         #[arg(long)]
         parent: Vec<String>,
+        /// Epistemic edge kind for parent links: grounds, derives (default), proposes
+        #[arg(long, default_value = "derives")]
+        edge_kind: String,
         /// Schema CID that the output conforms to
         #[arg(long)]
         schema: Option<String>,
@@ -1039,6 +1042,7 @@ fn cmd_dag(
             kind,
             agent,
             parent,
+            edge_kind,
             schema,
         } => {
             let node_kind = match kind.as_str() {
@@ -1063,10 +1067,10 @@ fn cmd_dag(
             // Dual-write to SQL if Dolt is available (single transaction)
             if let Ok(db) = open_db(base) {
                 let node = dag.get_node(&node_cid)?;
-                let parent_refs: Vec<(&str, i32)> = parents
+                let parent_refs: Vec<(&str, i32, &str)> = parents
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind.as_str()))
                     .collect();
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
@@ -1780,11 +1784,12 @@ fn cmd_repair(
         }
 
         // Sync node + edges in one transaction
-        let parent_refs: Vec<(&str, i32)> = node
+        // Repair from CAS has no edge_kind info; default to "derives"
+        let parent_refs: Vec<(&str, i32, &str)> = node
             .parents
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.as_str(), i as i32))
+            .map(|(i, p)| (p.as_str(), i as i32, "derives"))
             .collect();
 
         match db.sync_dag_node(
@@ -2249,11 +2254,11 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
     if let Ok(db) = open_db(base) {
         for entry in &bundle.entries {
             if let Ok(node) = dag.get_node(&entry.node_cid) {
-                let parent_refs: Vec<(&str, i32)> = node
+                let parent_refs: Vec<(&str, i32, &str)> = node
                     .parents
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .map(|(i, p)| (p.as_str(), i as i32, "derives"))
                     .collect();
                 if db
                     .sync_dag_node(
@@ -2341,10 +2346,10 @@ fn cmd_merge(
     // Dual-write to SQL
     if let Ok(db) = open_db(base) {
         let node = dag.get_node(&node_cid)?;
-        let parent_refs: Vec<(&str, i32)> = parent_cids
+        let parent_refs: Vec<(&str, i32, &str)> = parent_cids
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.as_str(), i as i32))
+            .map(|(i, p)| (p.as_str(), i as i32, "derives"))
             .collect();
         let _ = db.sync_dag_node(
             node_cid.as_str(),

@@ -117,6 +117,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "content": { "type": "string", "description": "Content for the new node" },
                     "kind": { "type": "string", "description": "Node kind: memory, code, reasoning, task, cdom, score, context" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
+                    "edge_kind": { "type": "string", "enum": ["grounds", "derives", "proposes"], "description": "Epistemic edge kind for parent links. grounds = irreducible input (axiom, measurement); derives = logically follows (default); proposes = suggested but not entailed (hypothesis)" },
                     "agent": { "type": "string", "description": "Agent name" },
                     "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
                     "saturation": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open query (maximally uncertain, prioritised for exploration); 1.0 = settled claim (optimizer treats subtree as exhausted). Omit to leave unset. Values outside the unit interval are rejected." },
@@ -456,6 +457,7 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
+            let edge_kind = params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives");
 
             let kind = parse_node_kind(kind_str)?;
             let saturation_param = parse_saturation_param(params)?;
@@ -482,10 +484,10 @@ pub fn handle_tool_call(
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
-                let parent_refs: Vec<(&str, i32)> = parents
+                let parent_refs: Vec<(&str, i32, &str)> = parents
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind))
                     .collect();
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
@@ -576,6 +578,7 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
+            let edge_kind = params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives");
             let saturation_param = parse_saturation_param(params)?;
             let decay_param = parse_decay_params(params)?;
 
@@ -600,10 +603,10 @@ pub fn handle_tool_call(
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
-                let parent_refs: Vec<(&str, i32)> = parents
+                let parent_refs: Vec<(&str, i32, &str)> = parents
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32))
+                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind))
                     .collect();
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
