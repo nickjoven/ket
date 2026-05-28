@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "ket-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ket-cas",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "ket-cas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "serde",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "ket-cdom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ket-cas",
  "serde",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "ket-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "ket-dag"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "ket-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ket-agent",
  "ket-cas",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "ket-opt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ket-cas",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "ket-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ket-cas",
  "ket-dag",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "ket-score"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ket-cas",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "ket-sql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ket-cas",
