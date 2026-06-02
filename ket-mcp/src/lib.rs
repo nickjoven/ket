@@ -172,6 +172,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "content": { "type": "string", "description": "Reasoning content" },
                     "agent": { "type": "string", "description": "Agent name" },
                     "parents": { "type": "array", "items": { "type": "string" }, "description": "Parent CIDs" },
+                    "edge_kind": { "type": "string", "enum": ["grounds", "derives", "proposes"], "description": "Epistemic edge kind for parent links. grounds = irreducible input (axiom, measurement); derives = logically follows (default); proposes = suggested but not entailed (hypothesis)" },
                     "schema_cid": { "type": "string", "description": "Schema CID that the output conforms to" },
                     "saturation": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Epistemic confidence on [0.0, 1.0]. 0.0 = open question; 1.0 = settled conclusion. Omit to leave unset. Values outside the unit interval are rejected." },
                     "activation": { "type": "number", "minimum": 0.0, "description": "Initial activation value for time-decay (default 1.0). Must be finite and >= 0. Requires half_life_secs." },
