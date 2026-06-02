@@ -91,6 +91,54 @@ impl std::fmt::Display for NodeKind {
     }
 }
 
+/// The epistemic kind of a parent edge.
+///
+/// `derives` is the default; an edge with this kind carries no extra meaning
+/// over a bare provenance link, which is why it is the omittable case in the
+/// node encoding (see `DagNode::parent_kinds`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeKind {
+    /// Irreducible input — an axiom, a measurement, a given.
+    Grounds,
+    /// Logical consequence — this node follows from the parent. The default.
+    Derives,
+    /// Suggested but not entailed — a hypothesis or conjecture.
+    Proposes,
+}
+
+impl Default for EdgeKind {
+    fn default() -> Self {
+        EdgeKind::Derives
+    }
+}
+
+impl EdgeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeKind::Grounds => "grounds",
+            EdgeKind::Derives => "derives",
+            EdgeKind::Proposes => "proposes",
+        }
+    }
+
+    /// Parse a kind word, falling back to the default (`derives`) for anything
+    /// unrecognized — mirrors ket-sql's `validate_edge_kind`.
+    pub fn parse_or_default(s: &str) -> Self {
+        match s {
+            "grounds" => EdgeKind::Grounds,
+            "proposes" => EdgeKind::Proposes,
+            _ => EdgeKind::Derives,
+        }
+    }
+}
+
+impl std::fmt::Display for EdgeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// A node in the Merkle DAG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagNode {
@@ -98,6 +146,17 @@ pub struct DagNode {
     pub kind: NodeKind,
     /// Parent node CIDs (what this derived from).
     pub parents: Vec<Cid>,
+    /// Per-parent epistemic edge kind, index-aligned with `parents`.
+    ///
+    /// Empty (and omitted from the serialized bytes) means *every* edge is the
+    /// default `derives`. This is the canonicalization rule that keeps the CID a
+    /// function of meaning, not of whether typing was "set": a node whose edges
+    /// are all-default is byte-identical to — and shares its CID with — the
+    /// untyped form. When non-empty, `parent_kinds.len() == parents.len()`.
+    /// Constructed via `new_typed` / `with_parent_kinds`, which enforce both
+    /// invariants; read via `parent_links()`, which defaults missing entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_kinds: Vec<EdgeKind>,
     /// CID of the produced artifact content.
     pub output_cid: Cid,
     /// Which agent produced this (claude, codex, copilot, evermemos, human).
@@ -129,6 +188,7 @@ impl DagNode {
         DagNode {
             kind,
             parents,
+            parent_kinds: Vec::new(),
             output_cid,
             agent: agent.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -137,6 +197,52 @@ impl DagNode {
             activation: None,
             decay_config: None,
         }
+    }
+
+    /// Create a node from typed parent links `(parent_cid, edge_kind)`.
+    ///
+    /// Canonicalizes the kinds: if every edge is the default `derives`, the
+    /// kind vector is dropped, so the result is byte-identical to the untyped
+    /// `new(...)` form and shares its CID. Only a non-default kind changes the
+    /// node's identity — which is correct, because only then does its meaning
+    /// differ.
+    pub fn new_typed(
+        kind: NodeKind,
+        parent_links: Vec<(Cid, EdgeKind)>,
+        output_cid: Cid,
+        agent: &str,
+    ) -> Self {
+        let (parents, kinds): (Vec<Cid>, Vec<EdgeKind>) = parent_links.into_iter().unzip();
+        DagNode::new(kind, parents, output_cid, agent).with_parent_kinds(kinds)
+    }
+
+    /// Attach per-parent edge kinds (index-aligned with `parents`).
+    ///
+    /// Drops the vector when all kinds are the default `derives` (the
+    /// canonicalization rule). Panics if `kinds.len() != parents.len()` and the
+    /// kinds are not all-default — alignment is an invariant, not a soft error.
+    pub fn with_parent_kinds(mut self, kinds: Vec<EdgeKind>) -> Self {
+        if kinds.iter().all(|k| *k == EdgeKind::Derives) {
+            self.parent_kinds = Vec::new();
+        } else {
+            assert_eq!(
+                kinds.len(),
+                self.parents.len(),
+                "parent_kinds must be index-aligned with parents",
+            );
+            self.parent_kinds = kinds;
+        }
+        self
+    }
+
+    /// Iterate `(parent_cid, edge_kind)`, defaulting untyped edges to `derives`.
+    /// The single read path for edge kinds — callers never index `parent_kinds`
+    /// directly, so the omitted-when-default encoding stays an implementation
+    /// detail.
+    pub fn parent_links(&self) -> impl Iterator<Item = (&Cid, EdgeKind)> + '_ {
+        self.parents.iter().enumerate().map(move |(i, c)| {
+            (c, self.parent_kinds.get(i).copied().unwrap_or_default())
+        })
     }
 
     /// Add a metadata key-value pair.
@@ -512,6 +618,91 @@ mod tests {
         let node = dag.get_node(&node_cid).unwrap();
         assert_eq!(node.output_cid, content_cid);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_default_typed_node_shares_untyped_cid() {
+        // The content-addressing invariant: typing every edge `derives` (the
+        // default) must canonicalize away, so the node is byte-identical to —
+        // and shares its CID with — the untyped form. Edge kind only enters the
+        // identity when it carries non-default meaning.
+        let (cas, dir) = temp_store("typed-canonical");
+        let dag = Dag::new(&cas);
+        let out = cas.put(b"x").unwrap();
+        let p0 = cas.put(b"p0").unwrap();
+        let p1 = cas.put(b"p1").unwrap();
+        let ts = "2026-01-01T00:00:00+00:00".to_string();
+
+        let mut untyped =
+            DagNode::new(NodeKind::Reasoning, vec![p0.clone(), p1.clone()], out.clone(), "claude");
+        untyped.timestamp = ts.clone();
+        let mut typed = DagNode::new_typed(
+            NodeKind::Reasoning,
+            vec![(p0.clone(), EdgeKind::Derives), (p1.clone(), EdgeKind::Derives)],
+            out.clone(),
+            "claude",
+        );
+        typed.timestamp = ts.clone();
+
+        assert!(typed.parent_kinds.is_empty(), "all-default kinds must be dropped");
+        assert_eq!(untyped.to_bytes().unwrap(), typed.to_bytes().unwrap());
+        assert_eq!(dag.put_node(&untyped).unwrap(), dag.put_node(&typed).unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nondefault_edge_kind_changes_cid_and_roundtrips() {
+        let (cas, dir) = temp_store("typed-nondefault");
+        let dag = Dag::new(&cas);
+        let out = cas.put(b"y").unwrap();
+        let p0 = cas.put(b"q0").unwrap();
+        let p1 = cas.put(b"q1").unwrap();
+        let ts = "2026-01-01T00:00:00+00:00".to_string();
+
+        let mut untyped =
+            DagNode::new(NodeKind::Reasoning, vec![p0.clone(), p1.clone()], out.clone(), "claude");
+        untyped.timestamp = ts.clone();
+        let mut typed = DagNode::new_typed(
+            NodeKind::Reasoning,
+            vec![(p0.clone(), EdgeKind::Grounds), (p1.clone(), EdgeKind::Derives)],
+            out.clone(),
+            "claude",
+        );
+        typed.timestamp = ts.clone();
+
+        // A non-default kind is meaning → distinct bytes → distinct CID.
+        assert_eq!(typed.parent_kinds.len(), 2);
+        let untyped_cid = dag.put_node(&untyped).unwrap();
+        let typed_cid = dag.put_node(&typed).unwrap();
+        assert_ne!(untyped_cid, typed_cid);
+
+        // Round-trip preserves the typed edges via the accessor.
+        let back = dag.get_node(&typed_cid).unwrap();
+        let links: Vec<(String, EdgeKind)> = back
+            .parent_links()
+            .map(|(c, k)| (c.as_str().to_string(), k))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                (p0.as_str().to_string(), EdgeKind::Grounds),
+                (p1.as_str().to_string(), EdgeKind::Derives),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parent_links_defaults_untyped_to_derives() {
+        let (cas, dir) = temp_store("typed-defaults");
+        let out = cas.put(b"z").unwrap();
+        let p0 = cas.put(b"r0").unwrap();
+        let node = DagNode::new(NodeKind::Memory, vec![p0], out, "human");
+        let kinds: Vec<EdgeKind> = node.parent_links().map(|(_, k)| k).collect();
+        assert_eq!(kinds, vec![EdgeKind::Derives]);
         let _ = fs::remove_dir_all(&dir);
     }
 
