@@ -2,6 +2,9 @@
 name = "ket-cli"
 version.workspace = true
 edition.workspace = true
+description = "Command-line interface for Ket."
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ket"

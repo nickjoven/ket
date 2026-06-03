@@ -2,6 +2,9 @@
 name = "ket-score"
 version.workspace = true
 edition.workspace = true
+description = "Scoring engine for agent outputs in Ket."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ket-cas.workspace = true

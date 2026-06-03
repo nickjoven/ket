@@ -2,6 +2,9 @@
 name = "ket-cdom"
 version.workspace = true
 edition.workspace = true
+description = "Code Document Object Model: tree-sitter AST parsing and content-addressed snapshots."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ket-cas.workspace = true
