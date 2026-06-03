@@ -57,6 +57,33 @@ impl ProjectionDiff {
     }
 }
 
+/// What `rebuild_projection` wrote back into Dolt.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RebuildStats {
+    pub nodes: usize,
+    pub edges: usize,
+}
+
+/// Collect every CAS blob that parses as a `DagNode`, paired with its CID (the
+/// node's identity = its child_cid in `dag_edges`). Content/schema blobs that
+/// don't parse as nodes are skipped. Shared by `verify_projection` and
+/// `rebuild_projection` so both derive edges from one source.
+///
+/// Sketch: collects all nodes in memory; a production version would stream.
+fn cas_nodes(
+    cas: &ket_cas::Store,
+) -> Result<Vec<(ket_cas::Cid, ket_dag::DagNode)>, SqlError> {
+    let mut out = Vec::new();
+    for cid in cas.list().map_err(|e| SqlError::DoltError(e.to_string()))? {
+        if let Ok(bytes) = cas.get(&cid) {
+            if let Ok(node) = ket_dag::DagNode::from_bytes(&bytes) {
+                out.push((cid, node));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Pure diff of two edge sets, keyed by the `dag_edges` primary key
 /// `(parent_cid, child_cid)`. Factored out so the audit logic is testable
 /// without a live Dolt database.
@@ -545,23 +572,13 @@ impl DoltDb {
     /// longer holds primary state with no upstream source.
     ///
     /// Sketch: linear scan of the CAS and a full in-memory read of the table. A
-    /// production version would page both rather than collecting them whole, and
-    /// a sibling `rebuild_projection` would replay the derived edges back into
-    /// Dolt to *heal* a divergence this surfaces.
+    /// production version would page both rather than collecting them whole.
+    /// `rebuild_projection` is the self-heal counterpart that replays the
+    /// derived edges back into Dolt to repair a divergence this surfaces.
     pub fn verify_projection(&self, cas: &ket_cas::Store) -> Result<ProjectionDiff, SqlError> {
-        // Expected: derive every edge from the nodes in CAS. A blob's CID is the
-        // child; only blobs that parse as DagNodes contribute (content/schema
-        // blobs are skipped).
+        // Expected: derive every edge from the nodes in CAS.
         let mut expected = Vec::new();
-        for cid in cas.list().map_err(|e| SqlError::DoltError(e.to_string()))? {
-            let bytes = match cas.get(&cid) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let node = match ket_dag::DagNode::from_bytes(&bytes) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
+        for (cid, node) in cas_nodes(cas)? {
             let child = cid.as_str().to_string();
             for (i, (parent, kind)) in node.parent_links().enumerate() {
                 expected.push(EdgeRow {
@@ -574,6 +591,48 @@ impl DoltDb {
         }
 
         Ok(diff_edges(expected, self.dag_edges()?))
+    }
+
+    /// Heal the `dag_edges` projection from the CAS — the source of truth.
+    ///
+    /// Clears the derived edge table and replays every edge the `DagNode`s in
+    /// `cas` imply (re-inserting node rows too). After this, `verify_projection`
+    /// is clean by construction. The self-heal counterpart to
+    /// `verify_projection`: together they close the loop for `dag_edges`
+    /// (DESIGN.md) — the table is now *reconstructible from* (heal) and
+    /// *checkable against* (audit) the substrate.
+    ///
+    /// The clear is what makes it a true heal: `sync_dag_node` uses
+    /// `INSERT IGNORE`, so without first deleting, a row whose `edge_kind` or
+    /// `ordinal` had drifted would be preserved. Node rows can't drift (keyed by
+    /// CID = content), so they only need re-inserting, not clearing.
+    ///
+    /// Sketch: full clear+replay; a production version would scope the rewrite to
+    /// the divergence `verify_projection` reports rather than rebuilding whole.
+    pub fn rebuild_projection(&self, cas: &ket_cas::Store) -> Result<RebuildStats, SqlError> {
+        self.exec("DELETE FROM dag_edges")?;
+        let nodes = cas_nodes(cas)?;
+        let mut edges = 0usize;
+        for (cid, node) in &nodes {
+            let kind_str = node.kind.to_string();
+            let parent_refs: Vec<(&str, i32, &str)> = node
+                .parent_links()
+                .enumerate()
+                .map(|(i, (p, k))| (p.as_str(), i as i32, k.as_str()))
+                .collect();
+            edges += parent_refs.len();
+            self.sync_dag_node(
+                cid.as_str(),
+                &kind_str,
+                &node.agent,
+                &node.timestamp,
+                node.output_cid.as_str(),
+                "",
+                &parent_refs,
+                node.schema_cid.as_ref().map(|c| c.as_str()),
+            )?;
+        }
+        Ok(RebuildStats { nodes: nodes.len(), edges })
     }
 
     /// Query all agents.
@@ -1047,5 +1106,59 @@ mod tests {
         let (exp, act) = &diff.mismatched[0];
         assert_eq!(exp.edge_kind, "grounds");
         assert_eq!(act.edge_kind, "derives");
+    }
+
+    fn dolt_available() -> bool {
+        std::process::Command::new("dolt")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Round-trip the self-audit/self-heal loop against a live Dolt db.
+    /// Skips where dolt is unavailable (the diff logic is covered dolt-free
+    /// above).
+    #[test]
+    fn rebuild_heals_then_verify_is_clean() {
+        if !dolt_available() {
+            eprintln!("skipping rebuild_heals_then_verify_is_clean: dolt not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join("ket-sql-rebuild-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cas = ket_cas::Store::init(&dir.join("cas")).unwrap();
+        let db = DoltDb::init(&dir.join("db")).unwrap();
+
+        // One typed node: a grounds parent and a derives parent into a child.
+        let p_axiom = cas.put(b"axiom").unwrap();
+        let p_lemma = cas.put(b"lemma").unwrap();
+        let out = cas.put(b"claim-content").unwrap();
+        let node = ket_dag::DagNode::new_typed(
+            ket_dag::NodeKind::Reasoning,
+            vec![
+                (p_axiom, ket_dag::EdgeKind::Grounds),
+                (p_lemma, ket_dag::EdgeKind::Derives),
+            ],
+            out,
+            "claude",
+        );
+        ket_dag::Dag::new(&cas).put_node(&node).unwrap();
+
+        // Rebuild from the CAS → projection populated, verify clean.
+        let stats = db.rebuild_projection(&cas).unwrap();
+        assert_eq!(stats.edges, 2);
+        assert!(db.verify_projection(&cas).unwrap().is_clean());
+
+        // Drift an edge_kind in the projection → audit catches it.
+        db.exec("UPDATE dag_edges SET edge_kind = 'derives' WHERE edge_kind = 'grounds'")
+            .unwrap();
+        assert!(!db.verify_projection(&cas).unwrap().is_clean());
+
+        // Heal → audit clean again.
+        db.rebuild_projection(&cas).unwrap();
+        assert!(db.verify_projection(&cas).unwrap().is_clean());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
