@@ -1,0 +1,16 @@
+# cargo-release configuration for the ket workspace.
+# Goal: version bump + changelog + git tag, without publishing to crates.io.
+
+# All workspace crates share one version and one tag (e.g. v0.3.0).
+shared-version = true
+
+# Do not upload to crates.io. This skips `cargo publish` (and its --verify
+# build), avoiding the new-crate rate limit and the ket-py PyO3 link step.
+publish = false
+
+# Create an annotated git tag for the release commit.
+tag = true
+tag-name = "v{{version}}"
+
+# Do not push automatically — pushing is a manual, explicit step.
+push = false

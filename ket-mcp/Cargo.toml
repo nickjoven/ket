@@ -2,6 +2,9 @@
 name = "ket-mcp"
 version.workspace = true
 edition.workspace = true
+description = "Model Context Protocol (MCP) server exposing Ket operations."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ket-cas.workspace = true

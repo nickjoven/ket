@@ -2,6 +2,9 @@
 name = "ket-sql"
 version.workspace = true
 edition.workspace = true
+description = "Dolt SQL storage layer for Ket."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ket-cas.workspace = true

@@ -2,6 +2,9 @@
 name = "ket-opt"
 version.workspace = true
 edition.workspace = true
+description = "WQS binary search optimizer for Ket substrate traversal allocation."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ket-cas.workspace = true

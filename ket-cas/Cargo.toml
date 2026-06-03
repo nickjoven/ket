@@ -2,6 +2,9 @@
 name = "ket-cas"
 version.workspace = true
 edition.workspace = true
+description = "Content-addressable store using BLAKE3 hashing."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
