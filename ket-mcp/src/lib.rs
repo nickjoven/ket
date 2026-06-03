@@ -458,20 +458,22 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
-            let edge_kind = params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives");
+            let edge_kind = ket_dag::EdgeKind::parse_or_default(
+                params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives"),
+            );
 
             let kind = parse_node_kind(kind_str)?;
             let saturation_param = parse_saturation_param(params)?;
             let decay_param = parse_decay_params(params)?;
 
+            // Edge kind is part of the content-addressed node (the source of
+            // truth); apply the requested kind to every parent link.
+            let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> =
+                parents.iter().cloned().map(|p| (p, edge_kind)).collect();
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
-            let mut node = ket_dag::DagNode::new(
-                kind,
-                parents.clone(),
-                content_cid.clone(),
-                agent,
-            );
+            let mut node =
+                ket_dag::DagNode::new_typed(kind, parent_links, content_cid.clone(), agent);
             if let Some(s) = schema_cid_param {
                 node = node.with_schema(ket_cas::Cid::from(s));
             }
@@ -485,10 +487,12 @@ pub fn handle_tool_call(
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
-                let parent_refs: Vec<(&str, i32, &str)> = parents
-                    .iter()
+                // Derive the projection edges from the node — Dolt mirrors the
+                // node; the node is the source of truth.
+                let parent_refs: Vec<(&str, i32, &str)> = node
+                    .parent_links()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind))
+                    .map(|(i, (cid, k))| (cid.as_str(), i as i32, k.as_str()))
                     .collect();
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
@@ -579,15 +583,21 @@ pub fn handle_tool_call(
                 })
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
-            let edge_kind = params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives");
+            let edge_kind = ket_dag::EdgeKind::parse_or_default(
+                params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives"),
+            );
             let saturation_param = parse_saturation_param(params)?;
             let decay_param = parse_decay_params(params)?;
 
+            // Edge kind is part of the content-addressed node (the source of
+            // truth); apply the requested kind to every parent link.
+            let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> =
+                parents.iter().cloned().map(|p| (p, edge_kind)).collect();
             let dag = ket_dag::Dag::new(cas);
             let content_cid = cas.put(content.as_bytes())?;
-            let mut node = ket_dag::DagNode::new(
+            let mut node = ket_dag::DagNode::new_typed(
                 ket_dag::NodeKind::Reasoning,
-                parents.clone(),
+                parent_links,
                 content_cid.clone(),
                 agent,
             );
@@ -604,10 +614,12 @@ pub fn handle_tool_call(
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
-                let parent_refs: Vec<(&str, i32, &str)> = parents
-                    .iter()
+                // Derive the projection edges from the node — Dolt mirrors the
+                // node; the node is the source of truth.
+                let parent_refs: Vec<(&str, i32, &str)> = node
+                    .parent_links()
                     .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind))
+                    .map(|(i, (cid, k))| (cid.as_str(), i as i32, k.as_str()))
                     .collect();
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
