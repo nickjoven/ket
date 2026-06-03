@@ -14,7 +14,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/nickjoven/ket"
@@ -31,11 +31,11 @@ thiserror = "2"
 base64 = "0.22"
 
 # Internal crates
-ket-cas = { path = "ket-cas", version = "0.2.0" }
-ket-dag = { path = "ket-dag", version = "0.2.0" }
-ket-sql = { path = "ket-sql", version = "0.2.0" }
-ket-mcp = { path = "ket-mcp", version = "0.2.0" }
-ket-agent = { path = "ket-agent", version = "0.2.0" }
-ket-score = { path = "ket-score", version = "0.2.0" }
-ket-cdom = { path = "ket-cdom", version = "0.2.0" }
-ket-opt = { path = "ket-opt", version = "0.2.0" }
+ket-cas = { path = "ket-cas", version = "0.3.0" }
+ket-dag = { path = "ket-dag", version = "0.3.0" }
+ket-sql = { path = "ket-sql", version = "0.3.0" }
+ket-mcp = { path = "ket-mcp", version = "0.3.0" }
+ket-agent = { path = "ket-agent", version = "0.3.0" }
+ket-score = { path = "ket-score", version = "0.3.0" }
+ket-cdom = { path = "ket-cdom", version = "0.3.0" }
+ket-opt = { path = "ket-opt", version = "0.3.0" }
