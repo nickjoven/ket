@@ -27,6 +27,64 @@ pub struct QueryResult {
     pub columns: Vec<String>,
 }
 
+/// A row of the `dag_edges` projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeRow {
+    pub parent_cid: String,
+    pub child_cid: String,
+    pub ordinal: i64,
+    pub edge_kind: String,
+}
+
+/// Result of auditing the `dag_edges` projection against the CAS/DAG.
+///
+/// The projection is *correct* exactly when all three lists are empty: every
+/// edge in SQL is derivable from a node in the CAS, with the same ordinal and
+/// kind, and nothing extra.
+#[derive(Debug, Default)]
+pub struct ProjectionDiff {
+    /// Edges the nodes imply but SQL lacks — the projection is stale/incomplete.
+    pub missing: Vec<EdgeRow>,
+    /// Edges in SQL with no node-derived counterpart — orphan/stale rows.
+    pub extra: Vec<EdgeRow>,
+    /// Same (parent, child) but ordinal or kind disagree: (expected, actual).
+    pub mismatched: Vec<(EdgeRow, EdgeRow)>,
+}
+
+impl ProjectionDiff {
+    pub fn is_clean(&self) -> bool {
+        self.missing.is_empty() && self.extra.is_empty() && self.mismatched.is_empty()
+    }
+}
+
+/// Pure diff of two edge sets, keyed by the `dag_edges` primary key
+/// `(parent_cid, child_cid)`. Factored out so the audit logic is testable
+/// without a live Dolt database.
+fn diff_edges(expected: Vec<EdgeRow>, actual: Vec<EdgeRow>) -> ProjectionDiff {
+    use std::collections::HashMap;
+    let key = |r: &EdgeRow| (r.parent_cid.clone(), r.child_cid.clone());
+
+    let exp: HashMap<_, _> = expected.into_iter().map(|r| (key(&r), r)).collect();
+    let act: HashMap<_, _> = actual.into_iter().map(|r| (key(&r), r)).collect();
+
+    let mut diff = ProjectionDiff::default();
+    for (k, e) in &exp {
+        match act.get(k) {
+            None => diff.missing.push(e.clone()),
+            Some(a) if a.ordinal != e.ordinal || a.edge_kind != e.edge_kind => {
+                diff.mismatched.push((e.clone(), a.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+    for (k, a) in &act {
+        if !exp.contains_key(k) {
+            diff.extra.push(a.clone());
+        }
+    }
+    diff
+}
+
 /// The Dolt database handle.
 pub struct DoltDb {
     db_path: PathBuf,
@@ -451,6 +509,73 @@ impl DoltDb {
         self.query("SELECT cid, kind, agent, created_at, output_cid, schema_cid FROM dag_nodes ORDER BY created_at")
     }
 
+    /// Read every row of the `dag_edges` projection.
+    pub fn dag_edges(&self) -> Result<Vec<EdgeRow>, SqlError> {
+        let csv = self.query(
+            "SELECT parent_cid, child_cid, ordinal, edge_kind FROM dag_edges \
+             ORDER BY child_cid, ordinal",
+        )?;
+        let mut rows = Vec::new();
+        for line in csv.lines().skip(1) {
+            // CSV: parent_cid,child_cid,ordinal,edge_kind. CIDs are hex and
+            // kinds are bare words, so a plain split is safe here.
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() != 4 {
+                continue;
+            }
+            rows.push(EdgeRow {
+                parent_cid: f[0].to_string(),
+                child_cid: f[1].to_string(),
+                ordinal: f[2].parse().unwrap_or(0),
+                edge_kind: f[3].to_string(),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Audit the `dag_edges` projection against the CAS/DAG — the source of
+    /// truth — and return what disagrees.
+    ///
+    /// Re-derives the edges every `DagNode` in `cas` implies (via
+    /// `DagNode::parent_links()`) and diffs them against what `dag_edges` holds.
+    /// A clean result proves the projection is *reconstructible* from the
+    /// substrate (self-heal) and *agrees* with it (self-audit). This is the L3
+    /// mirror of `verify_cas` — and it only became possible once the edge kind
+    /// moved into the content-addressed node (ket >= 0.3), so this table no
+    /// longer holds primary state with no upstream source.
+    ///
+    /// Sketch: linear scan of the CAS and a full in-memory read of the table. A
+    /// production version would page both rather than collecting them whole, and
+    /// a sibling `rebuild_projection` would replay the derived edges back into
+    /// Dolt to *heal* a divergence this surfaces.
+    pub fn verify_projection(&self, cas: &ket_cas::Store) -> Result<ProjectionDiff, SqlError> {
+        // Expected: derive every edge from the nodes in CAS. A blob's CID is the
+        // child; only blobs that parse as DagNodes contribute (content/schema
+        // blobs are skipped).
+        let mut expected = Vec::new();
+        for cid in cas.list().map_err(|e| SqlError::DoltError(e.to_string()))? {
+            let bytes = match cas.get(&cid) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let node = match ket_dag::DagNode::from_bytes(&bytes) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let child = cid.as_str().to_string();
+            for (i, (parent, kind)) in node.parent_links().enumerate() {
+                expected.push(EdgeRow {
+                    parent_cid: parent.as_str().to_string(),
+                    child_cid: child.clone(),
+                    ordinal: i as i64,
+                    edge_kind: kind.as_str().to_string(),
+                });
+            }
+        }
+
+        Ok(diff_edges(expected, self.dag_edges()?))
+    }
+
     /// Query all agents.
     pub fn list_agents(&self) -> Result<String, SqlError> {
         self.query("SELECT name, cli_command, mcp_capable, model, updated_at FROM agents ORDER BY name")
@@ -871,5 +996,56 @@ fn validate_edge_kind(kind: &str) -> &str {
         "grounds" | "derives" | "proposes" => kind,
         "" => "derives",
         _ => "derives", // unknown kinds fall back to derives
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge(parent: &str, child: &str, ord: i64, kind: &str) -> EdgeRow {
+        EdgeRow {
+            parent_cid: parent.into(),
+            child_cid: child.into(),
+            ordinal: ord,
+            edge_kind: kind.into(),
+        }
+    }
+
+    #[test]
+    fn projection_in_sync_is_clean() {
+        let nodes = vec![edge("a", "c", 0, "grounds"), edge("b", "c", 1, "derives")];
+        let sql = nodes.clone();
+        assert!(diff_edges(nodes, sql).is_clean());
+    }
+
+    #[test]
+    fn projection_diff_classifies_every_divergence() {
+        // expected (from nodes): a->c grounds@0, b->c derives@1, d->e derives@0
+        let expected = vec![
+            edge("a", "c", 0, "grounds"),
+            edge("b", "c", 1, "derives"),
+            edge("d", "e", 0, "derives"),
+        ];
+        // actual (in SQL): a->c kind disagrees (stale), b->c ok, d->e absent,
+        // x->y orphan row with no node behind it.
+        let actual = vec![
+            edge("a", "c", 0, "derives"), // kind drifted from grounds
+            edge("b", "c", 1, "derives"), // agrees
+            edge("x", "y", 0, "derives"), // orphan
+        ];
+
+        let diff = diff_edges(expected, actual);
+        assert!(!diff.is_clean());
+
+        // d->e is implied by a node but missing from SQL.
+        assert_eq!(diff.missing, vec![edge("d", "e", 0, "derives")]);
+        // x->y is in SQL with no node behind it.
+        assert_eq!(diff.extra, vec![edge("x", "y", 0, "derives")]);
+        // a->c exists in both but the kind disagrees.
+        assert_eq!(diff.mismatched.len(), 1);
+        let (exp, act) = &diff.mismatched[0];
+        assert_eq!(exp.edge_kind, "grounds");
+        assert_eq!(act.edge_kind, "derives");
     }
 }
