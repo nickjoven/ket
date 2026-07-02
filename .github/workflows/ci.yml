@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * *"   # nightly: catches substrate drift even with no commits
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Non-Dolt half of the suite: unit tests, ket-cas/dag/sql pure paths.
+  # Always runs, always gates. Anything that doesn't need a live Dolt goes here.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Unit tests (all crates)
+        # Skip ket-cli's integration.rs — its Dolt-touching tests short-circuit
+        # via has_dolt(), so running them here would be silently vacuous.
+        # The dolt-gate job below is the honest home for those.
+        run: |
+          cargo test --workspace --lib
+          cargo test -p ket-sql
+      - name: Lint (informational, non-blocking)
+        continue-on-error: true
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+  # The L3 audit gate: verify_projection must return clean on a fresh substrate,
+  # and rebuild_projection must be idempotent. This is the CI form of the ket
+  # DESIGN.md test — "throw away everything except CAS + log; can you rebuild
+  # the projection bit-identically?" A failure here is a substrate bug, not a
+  # flake, so we DO NOT continue-on-error.
+  projection-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Dolt
+        run: |
+          curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+          dolt version
+      - name: Configure Dolt identity
+        # dolt needs a name/email or `dolt init` refuses to run.
+        run: |
+          dolt config --global --add user.name "ket-ci"
+          dolt config --global --add user.email "ci@ket.local"
+      - name: Run the projection audit + heal round-trip
+        run: |
+          cargo test -p ket-cli --test integration -- \
+            verify_projection_after_repair_is_clean \
+            rebuild_projection_heals_and_is_idempotent
