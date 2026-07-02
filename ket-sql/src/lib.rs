@@ -51,6 +51,18 @@ pub struct ProjectionDiff {
     pub mismatched: Vec<(EdgeRow, EdgeRow)>,
 }
 
+/// Result of replaying the substrate into the projection.
+///
+/// `edges_purged` is the count of rows wiped from `dag_edges` before the
+/// replay; `edges_written` is the count of rows the replay re-inserted. A
+/// healthy rebuild against an already-clean projection has
+/// `purged == written`; a heal of a tampered projection will have them differ.
+#[derive(Debug, Default)]
+pub struct RebuildReport {
+    pub edges_purged: u64,
+    pub edges_written: usize,
+}
+
 impl ProjectionDiff {
     pub fn is_clean(&self) -> bool {
         self.missing.is_empty() && self.extra.is_empty() && self.mismatched.is_empty()
@@ -545,35 +557,72 @@ impl DoltDb {
     /// longer holds primary state with no upstream source.
     ///
     /// Sketch: linear scan of the CAS and a full in-memory read of the table. A
-    /// production version would page both rather than collecting them whole, and
-    /// a sibling `rebuild_projection` would replay the derived edges back into
-    /// Dolt to *heal* a divergence this surfaces.
+    /// production version would page both rather than collecting them whole.
+    /// `rebuild_projection` is the companion *heal* — replay the derived edges
+    /// back into Dolt to repair any divergence this surfaces.
     pub fn verify_projection(&self, cas: &ket_cas::Store) -> Result<ProjectionDiff, SqlError> {
-        // Expected: derive every edge from the nodes in CAS. A blob's CID is the
-        // child; only blobs that parse as DagNodes contribute (content/schema
-        // blobs are skipped).
-        let mut expected = Vec::new();
-        for cid in cas.list().map_err(|e| SqlError::DoltError(e.to_string()))? {
-            let bytes = match cas.get(&cid) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let node = match ket_dag::DagNode::from_bytes(&bytes) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let child = cid.as_str().to_string();
-            for (i, (parent, kind)) in node.parent_links().enumerate() {
-                expected.push(EdgeRow {
-                    parent_cid: parent.as_str().to_string(),
-                    child_cid: child.clone(),
-                    ordinal: i as i64,
-                    edge_kind: kind.as_str().to_string(),
-                });
-            }
+        let expected = expected_edges_from_cas(cas)?;
+        Ok(diff_edges(expected, self.dag_edges()?))
+    }
+
+    /// Heal the `dag_edges` projection by replaying the substrate.
+    ///
+    /// Truncates `dag_edges` and re-inserts every edge derivable from the
+    /// `DagNode`s in `cas`, all inside one transaction. Idempotent: running it
+    /// twice from the same CAS leaves the projection bit-identical. After it
+    /// returns, `verify_projection(cas).is_clean()` must hold — that is the
+    /// invariant; if it doesn't, the canonicalization of edges itself is the
+    /// bug, not the projection.
+    ///
+    /// Sketch: full in-memory read of the CAS into one batch, same as
+    /// `verify_projection`. A production version would page the replay; here
+    /// the rebuild is the *audit's heal partner*, not the high-throughput path.
+    /// Closes the second DESIGN.md L3 target (`verify` had no `rebuild`, so a
+    /// surfaced divergence had no mechanical fix).
+    pub fn rebuild_projection(
+        &self,
+        cas: &ket_cas::Store,
+    ) -> Result<RebuildReport, SqlError> {
+        let expected = expected_edges_from_cas(cas)?;
+
+        // One transaction: wipe + replay. exec_batch wraps in BEGIN/COMMIT, so
+        // a failure mid-replay leaves the projection at its pre-rebuild state
+        // (no partial table).
+        let mut stmts = Vec::with_capacity(1 + expected.len());
+        stmts.push("DELETE FROM dag_edges".to_string());
+        for row in &expected {
+            stmts.push(format!(
+                "INSERT INTO dag_edges (parent_cid, child_cid, ordinal, edge_kind) \
+                 VALUES ('{}', '{}', {}, '{}')",
+                row.parent_cid,
+                row.child_cid,
+                row.ordinal,
+                validate_edge_kind(&row.edge_kind),
+            ));
         }
 
-        Ok(diff_edges(expected, self.dag_edges()?))
+        // The current row count before purge is the audit-relevant "what was
+        // there"; we read it first so the report is honest even when the wipe
+        // succeeds and the replay surprises us.
+        let edges_purged = self.count_dag_edges()?;
+        self.exec_batch(&stmts)?;
+
+        Ok(RebuildReport {
+            edges_purged,
+            edges_written: expected.len(),
+        })
+    }
+
+    /// Row count of `dag_edges`, used by [`rebuild_projection`] to report what
+    /// the wipe removed before the replay.
+    fn count_dag_edges(&self) -> Result<u64, SqlError> {
+        let csv = self.query("SELECT COUNT(*) AS n FROM dag_edges")?;
+        let n = csv
+            .lines()
+            .nth(1)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        Ok(n)
     }
 
     /// Query all agents.
@@ -999,6 +1048,39 @@ fn validate_edge_kind(kind: &str) -> &str {
     }
 }
 
+/// Derive every edge the substrate implies, in canonical
+/// `(child_cid, ordinal)` order. The single source of truth for what
+/// `dag_edges` *ought* to contain — shared by `verify_projection` (audit) and
+/// `rebuild_projection` (heal), so they cannot disagree about what's expected.
+///
+/// Only blobs that parse as `DagNode`s contribute; content/schema blobs are
+/// silently skipped (they have no edges to project).
+fn expected_edges_from_cas(cas: &ket_cas::Store) -> Result<Vec<EdgeRow>, SqlError> {
+    let mut expected = Vec::new();
+    let mut cids = cas.list().map_err(|e| SqlError::DoltError(e.to_string()))?;
+    cids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for cid in cids {
+        let bytes = match cas.get(&cid) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let node = match ket_dag::DagNode::from_bytes(&bytes) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let child = cid.as_str().to_string();
+        for (i, (parent, kind)) in node.parent_links().enumerate() {
+            expected.push(EdgeRow {
+                parent_cid: parent.as_str().to_string(),
+                child_cid: child.clone(),
+                ordinal: i as i64,
+                edge_kind: kind.as_str().to_string(),
+            });
+        }
+    }
+    Ok(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,6 +1099,54 @@ mod tests {
         let nodes = vec![edge("a", "c", 0, "grounds"), edge("b", "c", 1, "derives")];
         let sql = nodes.clone();
         assert!(diff_edges(nodes, sql).is_clean());
+    }
+
+    #[test]
+    fn rebuild_plan_matches_verify_plan_over_a_real_cas() {
+        // The single fact: verify and rebuild compute the *same* expected
+        // edge set. If they ever drift, a heal would re-introduce the
+        // divergence the audit just flagged.
+        use ket_cas::Store as CasStore;
+        use ket_dag::{DagNode, EdgeKind, NodeKind};
+        use std::fs;
+
+        let dir = std::env::temp_dir().join("ket-sql-rebuild-plan-test");
+        let _ = fs::remove_dir_all(&dir);
+        let cas = CasStore::init(&dir).unwrap();
+
+        // Two grounding leaves + one node with mixed-kind parents. The mixed
+        // kinds are what node-sourced edges *had* to make possible; verifying
+        // them lives in the same plan rebuild relies on.
+        let a = cas.put(b"axiom-a").unwrap();
+        let b = cas.put(b"axiom-b").unwrap();
+        let out = cas.put(b"derived-output").unwrap();
+        let child = DagNode::new_typed(
+            NodeKind::Reasoning,
+            vec![(a.clone(), EdgeKind::Grounds), (b.clone(), EdgeKind::Derives)],
+            out,
+            "claude",
+        );
+        let child_cid = cas.put(&child.to_bytes().unwrap()).unwrap();
+
+        let plan = expected_edges_from_cas(&cas).unwrap();
+        // Both grounding-leaf blobs are not DagNodes, so they contribute no
+        // edges. Only `child` contributes — two parent links.
+        let mut have: Vec<_> = plan
+            .iter()
+            .filter(|r| r.child_cid == child_cid.as_str())
+            .collect();
+        have.sort_by_key(|r| r.ordinal);
+        assert_eq!(have.len(), 2);
+        assert_eq!(have[0].parent_cid, a.as_str());
+        assert_eq!(have[0].edge_kind, "grounds");
+        assert_eq!(have[1].parent_cid, b.as_str());
+        assert_eq!(have[1].edge_kind, "derives");
+
+        // Verify-shape: feeding the plan as both expected and actual is
+        // clean (the round-trip invariant rebuild must satisfy).
+        assert!(diff_edges(plan.clone(), plan).is_clean());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
