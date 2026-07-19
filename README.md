@@ -14,7 +14,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 │              22 commands, --json output             │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
-│ 16 tools │  tasks   │ 4 dims    │   tree-sitter     │
+│ 19 tools │  tasks   │ 4 dims    │   tree-sitter     │
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
 ├──────────┼──────────┴───────────┴───────────────────┤
 │ ket-opt  │  WQS binary search · tier allocation     │
@@ -37,7 +37,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 | **ket-cas** | BLAKE3 content-addressed blob store (`.ket/cas/<hash>`) |
 | **ket-dag** | Merkle DAG for provenance — parent chains, soft links, export/import bundles |
 | **ket-sql** | Dolt SQL wrapper — 9 tables, versioned commits, lineage queries |
-| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 16 tools for Claude and other agents. Dolt is optional — CAS-only tools work without it. |
+| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 19 tools for Claude and other agents. Dolt is optional — CAS-only tools work without it. |
 | **ket-agent** | Multi-agent orchestration — task lifecycle, subprocess spawning, context injection |
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
 | **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
@@ -51,7 +51,7 @@ Three tiers — start minimal, add capabilities when you need them.
 
 ### Tier 1: Just ket (no dependencies beyond Rust)
 
-Everything you need for content-addressed agent memory: store, DAG, lineage, drift detection, MCP server. **13 of 16 MCP tools work at this tier.**
+Everything you need for content-addressed agent memory: store, DAG, lineage, drift detection, MCP server. **14 of 19 MCP tools work at this tier.**
 
 ```sh
 # Build
@@ -82,7 +82,7 @@ ket cdom "parse"
 
 ### Tier 2: Add Docker (scoring, tasks, SQL queries)
 
-Docker runs Dolt in a container — you never install it directly. This unlocks scoring, task delegation, SQL queries, and calibration. **All 16 MCP tools.**
+Docker runs Dolt in a container — you never install it directly. This unlocks scoring, task delegation, SQL queries, and calibration. **All 19 MCP tools.**
 
 ```sh
 # Start the Dolt sidecar
@@ -178,9 +178,9 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 
 ## MCP Integration
 
-Ket exposes 16 tools over MCP (Model Context Protocol) for agent integration.
+Ket exposes 19 tools over MCP (Model Context Protocol) for agent integration.
 
-**Dolt is optional.** The MCP server starts with CAS alone — 13 of 16 tools work without Dolt. Only scoring, tasks, and calibration require it.
+**Dolt is optional.** The MCP server starts with CAS alone — 14 of 19 tools work without Dolt. Only scoring, tasks, calibration, and soft links require it.
 
 | Tool | What it does | Needs Dolt? |
 |------|-------------|-------------|
@@ -197,9 +197,12 @@ Ket exposes 16 tools over MCP (Model Context Protocol) for agent integration.
 | `ket_get_reasoning` | Retrieve reasoning with context | No |
 | `ket_query_cdom` | Search code symbols | No |
 | `ket_schema_stats` | Check schema dedup effectiveness | No |
+| `decay_status` | Decay-adjusted activation for a node | No |
 | `ket_score` | Record quality scores | **Yes** |
 | `ket_create_subtask` | Delegate work to agents | **Yes** |
 | `ket_calibrate` | Optimize traversal tiers | **Yes** |
+| `ket_soft_link` | Create typed semantic edge | **Yes** |
+| `ket_soft_link_query` | Query typed semantic edges | **Yes** |
 
 Add to your Claude MCP config:
 
