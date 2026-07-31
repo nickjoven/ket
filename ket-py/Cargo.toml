@@ -9,9 +9,18 @@ repository.workspace = true
 [lib]
 name = "ket"
 crate-type = ["cdylib"]
+# No Rust-side tests or doctests live here; the surface is exercised from
+# Python. Building a test harness would link libpython for no benefit and
+# breaks `cargo test --workspace` on any machine without python3-dev.
+test = false
+doctest = false
 
 [dependencies]
 ket-cas.workspace = true
 ket-dag.workspace = true
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+# extension-module, not auto-initialize. This crate is imported *by* Python,
+# so the interpreter already exists and libpython must not be linked in.
+# auto-initialize is for embedding Python *in* Rust — the opposite direction —
+# and made `cargo test` fail with `unable to find library -lpython3.12`.
+pyo3 = { version = "0.23", features = ["extension-module"] }
 serde_json.workspace = true
