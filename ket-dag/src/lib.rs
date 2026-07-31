@@ -55,8 +55,7 @@ pub fn compute_decayed_activation(activation: f64, elapsed_secs: f64, config: &D
     if config.half_life_secs.is_infinite() || config.half_life_secs <= 0.0 {
         return activation.max(config.activation_floor);
     }
-    let decay_factor =
-        (-elapsed_secs * std::f64::consts::LN_2 / config.half_life_secs).exp();
+    let decay_factor = (-elapsed_secs * std::f64::consts::LN_2 / config.half_life_secs).exp();
     (activation * decay_factor).max(config.activation_floor)
 }
 
@@ -240,9 +239,10 @@ impl DagNode {
     /// directly, so the omitted-when-default encoding stays an implementation
     /// detail.
     pub fn parent_links(&self) -> impl Iterator<Item = (&Cid, EdgeKind)> + '_ {
-        self.parents.iter().enumerate().map(move |(i, c)| {
-            (c, self.parent_kinds.get(i).copied().unwrap_or_default())
-        })
+        self.parents
+            .iter()
+            .enumerate()
+            .map(move |(i, c)| (c, self.parent_kinds.get(i).copied().unwrap_or_default()))
     }
 
     /// Add a metadata key-value pair.
@@ -275,7 +275,8 @@ impl DagNode {
     /// scores table for nodes that have declared their confidence explicitly.
     pub fn with_saturation(mut self, value: f32) -> Self {
         let clamped = value.clamp(0.0, 1.0);
-        self.meta.push(("saturation".to_string(), clamped.to_string()));
+        self.meta
+            .push(("saturation".to_string(), clamped.to_string()));
         self
     }
 
@@ -440,7 +441,11 @@ impl<'a> Dag<'a> {
     }
 
     /// Check if content has drifted by comparing a file's current hash to a stored CID.
-    pub fn check_drift(&self, path: &std::path::Path, expected_cid: &Cid) -> Result<bool, DagError> {
+    pub fn check_drift(
+        &self,
+        path: &std::path::Path,
+        expected_cid: &Cid,
+    ) -> Result<bool, DagError> {
         let current_cid = ket_cas::hash_file(path)?;
         Ok(current_cid != *expected_cid)
     }
@@ -609,8 +614,9 @@ mod tests {
         let (cas, dir) = temp_store("store-with-node");
         let dag = Dag::new(&cas);
 
-        let (node_cid, content_cid) =
-            dag.store_with_node(b"artifact content", NodeKind::Code, vec![], "claude").unwrap();
+        let (node_cid, content_cid) = dag
+            .store_with_node(b"artifact content", NodeKind::Code, vec![], "claude")
+            .unwrap();
 
         assert!(cas.exists(&node_cid));
         assert!(cas.exists(&content_cid));
@@ -634,20 +640,33 @@ mod tests {
         let p1 = cas.put(b"p1").unwrap();
         let ts = "2026-01-01T00:00:00+00:00".to_string();
 
-        let mut untyped =
-            DagNode::new(NodeKind::Reasoning, vec![p0.clone(), p1.clone()], out.clone(), "claude");
+        let mut untyped = DagNode::new(
+            NodeKind::Reasoning,
+            vec![p0.clone(), p1.clone()],
+            out.clone(),
+            "claude",
+        );
         untyped.timestamp = ts.clone();
         let mut typed = DagNode::new_typed(
             NodeKind::Reasoning,
-            vec![(p0.clone(), EdgeKind::Derives), (p1.clone(), EdgeKind::Derives)],
+            vec![
+                (p0.clone(), EdgeKind::Derives),
+                (p1.clone(), EdgeKind::Derives),
+            ],
             out.clone(),
             "claude",
         );
         typed.timestamp = ts.clone();
 
-        assert!(typed.parent_kinds.is_empty(), "all-default kinds must be dropped");
+        assert!(
+            typed.parent_kinds.is_empty(),
+            "all-default kinds must be dropped"
+        );
         assert_eq!(untyped.to_bytes().unwrap(), typed.to_bytes().unwrap());
-        assert_eq!(dag.put_node(&untyped).unwrap(), dag.put_node(&typed).unwrap());
+        assert_eq!(
+            dag.put_node(&untyped).unwrap(),
+            dag.put_node(&typed).unwrap()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -661,12 +680,19 @@ mod tests {
         let p1 = cas.put(b"q1").unwrap();
         let ts = "2026-01-01T00:00:00+00:00".to_string();
 
-        let mut untyped =
-            DagNode::new(NodeKind::Reasoning, vec![p0.clone(), p1.clone()], out.clone(), "claude");
+        let mut untyped = DagNode::new(
+            NodeKind::Reasoning,
+            vec![p0.clone(), p1.clone()],
+            out.clone(),
+            "claude",
+        );
         untyped.timestamp = ts.clone();
         let mut typed = DagNode::new_typed(
             NodeKind::Reasoning,
-            vec![(p0.clone(), EdgeKind::Grounds), (p1.clone(), EdgeKind::Derives)],
+            vec![
+                (p0.clone(), EdgeKind::Grounds),
+                (p1.clone(), EdgeKind::Derives),
+            ],
             out.clone(),
             "claude",
         );
@@ -712,12 +738,20 @@ mod tests {
         let dag = Dag::new(&cas);
 
         // Create a chain: root -> child -> grandchild
-        let (root_cid, _) =
-            dag.store_with_node(b"root", NodeKind::Memory, vec![], "human").unwrap();
-        let (child_cid, _) =
-            dag.store_with_node(b"child", NodeKind::Memory, vec![root_cid.clone()], "human").unwrap();
-        let (grandchild_cid, _) =
-            dag.store_with_node(b"grandchild", NodeKind::Memory, vec![child_cid.clone()], "human").unwrap();
+        let (root_cid, _) = dag
+            .store_with_node(b"root", NodeKind::Memory, vec![], "human")
+            .unwrap();
+        let (child_cid, _) = dag
+            .store_with_node(b"child", NodeKind::Memory, vec![root_cid.clone()], "human")
+            .unwrap();
+        let (grandchild_cid, _) = dag
+            .store_with_node(
+                b"grandchild",
+                NodeKind::Memory,
+                vec![child_cid.clone()],
+                "human",
+            )
+            .unwrap();
 
         let lineage = dag.lineage(&grandchild_cid).unwrap();
         assert_eq!(lineage.len(), 3);
@@ -731,14 +765,20 @@ mod tests {
         let dag = Dag::new(&cas);
 
         // Create a chain: root -> child -> grandchild -> great_grandchild
-        let (root_cid, _) =
-            dag.store_with_node(b"root", NodeKind::Memory, vec![], "human").unwrap();
-        let (child_cid, _) =
-            dag.store_with_node(b"child", NodeKind::Memory, vec![root_cid.clone()], "human")
-                .unwrap();
-        let (gc_cid, _) =
-            dag.store_with_node(b"grandchild", NodeKind::Memory, vec![child_cid.clone()], "human")
-                .unwrap();
+        let (root_cid, _) = dag
+            .store_with_node(b"root", NodeKind::Memory, vec![], "human")
+            .unwrap();
+        let (child_cid, _) = dag
+            .store_with_node(b"child", NodeKind::Memory, vec![root_cid.clone()], "human")
+            .unwrap();
+        let (gc_cid, _) = dag
+            .store_with_node(
+                b"grandchild",
+                NodeKind::Memory,
+                vec![child_cid.clone()],
+                "human",
+            )
+            .unwrap();
         let (ggc_cid, _) = dag
             .store_with_node(
                 b"great_grandchild",
@@ -775,44 +815,50 @@ mod tests {
         // No saturation → is_query, not is_claim, saturation() = None
         let bare = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human");
         assert!(bare.is_query(), "undeclared saturation should be a query");
-        assert!(!bare.is_claim(), "undeclared saturation should not be a claim");
+        assert!(
+            !bare.is_claim(),
+            "undeclared saturation should not be a claim"
+        );
         assert_eq!(bare.saturation(), None);
 
         // saturation = 0.0 → explicit query
-        let query = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
-            .with_saturation(0.0);
+        let query =
+            DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human").with_saturation(0.0);
         assert!(query.is_query());
         assert!(!query.is_claim());
         assert_eq!(query.saturation(), Some(0.0));
 
         // saturation = 1.0 → settled claim
-        let claim = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
-            .with_saturation(1.0);
+        let claim =
+            DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human").with_saturation(1.0);
         assert!(claim.is_claim());
         assert!(!claim.is_query());
         assert_eq!(claim.saturation(), Some(1.0));
 
         // saturation = 0.75 → partial belief (neither pure query nor pure claim)
-        let partial = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
-            .with_saturation(0.75);
+        let partial =
+            DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human").with_saturation(0.75);
         assert!(!partial.is_query());
         assert!(!partial.is_claim());
         assert_eq!(partial.saturation(), Some(0.75));
 
         // Values are clamped to [0.0, 1.0]
-        let clamped_hi = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
-            .with_saturation(2.0);
+        let clamped_hi =
+            DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human").with_saturation(2.0);
         assert_eq!(clamped_hi.saturation(), Some(1.0));
 
-        let clamped_lo = DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human")
-            .with_saturation(-0.5);
+        let clamped_lo =
+            DagNode::new(NodeKind::Memory, vec![], cid.clone(), "human").with_saturation(-0.5);
         assert_eq!(clamped_lo.saturation(), Some(0.0));
 
         // Round-trip through CAS serialization
         let dag = super::Dag::new(&cas);
         let node_cid = dag.put_node(&claim).unwrap();
         let retrieved = dag.get_node(&node_cid).unwrap();
-        assert!(retrieved.is_claim(), "saturation should survive CAS round-trip");
+        assert!(
+            retrieved.is_claim(),
+            "saturation should survive CAS round-trip"
+        );
         assert_eq!(retrieved.saturation(), Some(1.0));
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -157,10 +157,7 @@ pub struct CalibrationResult {
 /// Assigns the tier with the best net gain; skips if all are negative.
 ///
 /// Returns (total_gain, total_cost, tier3_count, assignments).
-fn solve_penalized(
-    nodes: &[TreeNode],
-    lambdas: &Lambdas,
-) -> (f64, f64, u32, Vec<Tier>) {
+fn solve_penalized(nodes: &[TreeNode], lambdas: &Lambdas) -> (f64, f64, u32, Vec<Tier>) {
     let mut total_gain = 0.0;
     let mut total_cost = 0.0;
     let mut tier3_count = 0u32;
@@ -207,10 +204,7 @@ fn solve_penalized(
 /// Nested binary search: outer loop on lambda_cost (controls total cost),
 /// inner loops on lambda_depth and lambda_tier3. ~20 iterations per dimension
 /// for precision of 2^-20.
-pub fn wqs_optimize(
-    nodes: &[TreeNode],
-    constraints: &Constraints,
-) -> CalibrationResult {
+pub fn wqs_optimize(nodes: &[TreeNode], constraints: &Constraints) -> CalibrationResult {
     let max_iters: u32 = 20;
     let mut total_iterations = 0u32;
 
@@ -334,11 +328,7 @@ pub fn wqs_optimize(
 ///
 /// Diamonds (nodes reachable via multiple paths) are resolved by first-visit.
 /// Score data is pulled from ket-score to compute info_potential per node.
-pub fn dag_to_tree(
-    dag: &Dag<'_>,
-    db: &DoltDb,
-    root_cid: &Cid,
-) -> Result<Vec<TreeNode>, OptError> {
+pub fn dag_to_tree(dag: &Dag<'_>, db: &DoltDb, root_cid: &Cid) -> Result<Vec<TreeNode>, OptError> {
     let engine = ScoringEngine::new(db);
     let mut nodes: Vec<TreeNode> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -501,7 +491,11 @@ fn grid_search_fallback(nodes: &[TreeNode], constraints: &Constraints) -> Calibr
     let grid_steps: u32 = 10;
     let mut best_gain = -1.0_f64;
     let mut best_cost = 0.0_f64;
-    let mut best_lambdas = Lambdas { lambda_cost: 0.0, lambda_depth: 0.0, lambda_tier3: 0.0 };
+    let mut best_lambdas = Lambdas {
+        lambda_cost: 0.0,
+        lambda_depth: 0.0,
+        lambda_tier3: 0.0,
+    };
     let mut best_assignments = vec![Tier::Skip; nodes.len()];
 
     for i in 0..=grid_steps {
@@ -511,7 +505,11 @@ fn grid_search_fallback(nodes: &[TreeNode], constraints: &Constraints) -> Calibr
                 let lambda_tier3 = 10.0 * j as f64 / grid_steps as f64;
                 let lambda_depth = k as f64 / grid_steps as f64; // [0, 1]
 
-                let lambdas = Lambdas { lambda_cost, lambda_depth, lambda_tier3 };
+                let lambdas = Lambdas {
+                    lambda_cost,
+                    lambda_depth,
+                    lambda_tier3,
+                };
                 let (gain, cost, tier3_count, assignments) = solve_penalized(nodes, &lambdas);
 
                 if cost <= constraints.max_cost
@@ -566,9 +564,8 @@ pub fn calibrate(
     };
 
     // Store result as DAG node (kind=Reasoning, parent=root_cid)
-    let result_json = serde_json::to_vec(&result).map_err(|e| {
-        OptError::ConstraintViolation(format!("Failed to serialize result: {e}"))
-    })?;
+    let result_json = serde_json::to_vec(&result)
+        .map_err(|e| OptError::ConstraintViolation(format!("Failed to serialize result: {e}")))?;
 
     let (node_cid, _content_cid) = dag.store_with_node(
         &result_json,
@@ -585,7 +582,10 @@ pub fn calibrate(
         agent,
         &node.timestamp,
         node.output_cid.as_str(),
-        &format!("calibration for {}", &root_cid.0[..12.min(root_cid.0.len())]),
+        &format!(
+            "calibration for {}",
+            &root_cid.0[..12.min(root_cid.0.len())]
+        ),
         &[(root_cid.as_str(), 0, "derives")],
         node.schema_cid.as_ref().map(|c| c.as_str()),
     )?;
@@ -713,8 +713,7 @@ pub fn traverse(
             Err(e) => return Err(OptError::Dag(e)),
         };
 
-        let info_potential =
-            compute_info_potential(&engine, &cid, traversal_node.saturation());
+        let info_potential = compute_info_potential(&engine, &cid, traversal_node.saturation());
         let realized = info_potential * tier.gain_multiplier();
         let cost = tier.cost();
 
@@ -781,7 +780,10 @@ pub fn inspect_calibration(db: &DoltDb, cid: &str) -> Result<CalibrationResult, 
 }
 
 /// Get all calibrations for a subtree root, ordered by timestamp.
-pub fn calibration_history(db: &DoltDb, root_cid: &str) -> Result<Vec<CalibrationResult>, OptError> {
+pub fn calibration_history(
+    db: &DoltDb,
+    root_cid: &str,
+) -> Result<Vec<CalibrationResult>, OptError> {
     let csv = db.query(&format!(
         "SELECT cid, root_cid, lambda_cost, lambda_depth, lambda_tier3, \
          total_gain, total_cost, iterations FROM calibrations \
@@ -926,7 +928,10 @@ mod tests {
             .values()
             .filter(|t| t.as_str() == "skip")
             .count();
-        assert!(skip_count > 0, "Some nodes should be skipped with tight budget");
+        assert!(
+            skip_count > 0,
+            "Some nodes should be skipped with tight budget"
+        );
     }
 
     #[test]

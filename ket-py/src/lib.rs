@@ -29,8 +29,8 @@ impl Store {
     /// Open an existing CAS store.
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let inner =
-            ket_cas::Store::open(PathBuf::from(path)).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let inner = ket_cas::Store::open(PathBuf::from(path))
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(Store { inner })
     }
 
@@ -161,7 +161,11 @@ impl Dag {
             dict.set_item("output_cid", node.output_cid.as_str())?;
             let parents: Vec<&str> = node.parents.iter().map(|p| p.as_str()).collect();
             dict.set_item("parents", parents)?;
-            let meta: Vec<(&str, &str)> = node.meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let meta: Vec<(&str, &str)> = node
+                .meta
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             dict.set_item("meta", meta)?;
             Ok(dict.into())
         })
@@ -193,8 +197,11 @@ impl Dag {
     /// Check if a file has drifted from a CID.
     fn check_drift(&self, path: &str, expected_cid: &str) -> PyResult<bool> {
         let dag = ket_dag::Dag::new(&self.cas);
-        dag.check_drift(std::path::Path::new(path), &ket_cas::Cid::from(expected_cid))
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+        dag.check_drift(
+            std::path::Path::new(path),
+            &ket_cas::Cid::from(expected_cid),
+        )
+        .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
     /// Export a subgraph as JSON string.

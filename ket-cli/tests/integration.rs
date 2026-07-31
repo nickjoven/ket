@@ -3,8 +3,8 @@
 //! These test the real binary end-to-end: init, CAS, DAG, MCP JSON-RPC,
 //! repair, drift detection, CDOM scanning.
 
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn ket_bin() -> PathBuf {
     // cargo test builds to target/debug
@@ -23,17 +23,18 @@ fn fresh_ket(name: &str) -> (PathBuf, tempfile::TempDir) {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(output.status.success(), "init failed for {name}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "init failed for {name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     (ket_dir, dir)
 }
 
 fn ket(ket_dir: &PathBuf, args: &[&str]) -> (bool, String, String) {
     let mut full_args = vec!["--home", ket_dir.to_str().unwrap()];
     full_args.extend_from_slice(args);
-    let output = Command::new(ket_bin())
-        .args(&full_args)
-        .output()
-        .unwrap();
+    let output = Command::new(ket_bin()).args(&full_args).output().unwrap();
     (
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -44,13 +45,20 @@ fn ket(ket_dir: &PathBuf, args: &[&str]) -> (bool, String, String) {
 fn ket_json(ket_dir: &PathBuf, args: &[&str]) -> serde_json::Value {
     let mut full_args = vec!["--home", ket_dir.to_str().unwrap(), "--json"];
     full_args.extend_from_slice(args);
-    let output = Command::new(ket_bin())
-        .args(&full_args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "ket {:?} failed: {}", args, String::from_utf8_lossy(&output.stderr));
-    serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-        .unwrap_or_else(|e| panic!("JSON parse failed for {:?}: {e}\nstdout: {}", args, String::from_utf8_lossy(&output.stdout)))
+    let output = Command::new(ket_bin()).args(&full_args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "ket {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap_or_else(|e| {
+        panic!(
+            "JSON parse failed for {:?}: {e}\nstdout: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
 }
 
 // --- CAS tests ---
@@ -101,10 +109,34 @@ fn cas_dedup() {
 fn dag_create_and_lineage() {
     let (ket_dir, _dir) = fresh_ket("dag-lineage");
 
-    let root = ket_json(&ket_dir, &["dag", "create", "root content", "--kind", "memory", "--agent", "human"]);
+    let root = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "root content",
+            "--kind",
+            "memory",
+            "--agent",
+            "human",
+        ],
+    );
     let root_cid = root["node_cid"].as_str().unwrap().to_string();
 
-    let child = ket_json(&ket_dir, &["dag", "create", "child content", "--kind", "memory", "--agent", "claude", "--parent", &root_cid]);
+    let child = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "child content",
+            "--kind",
+            "memory",
+            "--agent",
+            "claude",
+            "--parent",
+            &root_cid,
+        ],
+    );
     let child_cid = child["node_cid"].as_str().unwrap().to_string();
 
     // Lineage should have 2 nodes
@@ -123,12 +155,18 @@ fn dag_drift_detection() {
     let cid = result["cid"].as_str().unwrap();
 
     // No drift
-    let drift = ket_json(&ket_dir, &["dag", "drift", test_file.to_str().unwrap(), cid]);
+    let drift = ket_json(
+        &ket_dir,
+        &["dag", "drift", test_file.to_str().unwrap(), cid],
+    );
     assert!(!drift["drifted"].as_bool().unwrap());
 
     // Modify file
     std::fs::write(&test_file, b"modified").unwrap();
-    let drift = ket_json(&ket_dir, &["dag", "drift", test_file.to_str().unwrap(), cid]);
+    let drift = ket_json(
+        &ket_dir,
+        &["dag", "drift", test_file.to_str().unwrap(), cid],
+    );
     assert!(drift["drifted"].as_bool().unwrap());
 }
 
@@ -240,8 +278,18 @@ fn repair_idempotent() {
     let (ket_dir, _dir) = fresh_ket("repair-idempotent");
 
     // Create some nodes
-    ket_json(&ket_dir, &["dag", "create", "node 1", "--kind", "memory", "--agent", "human"]);
-    ket_json(&ket_dir, &["dag", "create", "node 2", "--kind", "code", "--agent", "claude"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "node 1", "--kind", "memory", "--agent", "human",
+        ],
+    );
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "node 2", "--kind", "code", "--agent", "claude",
+        ],
+    );
 
     if !has_dolt() {
         return;
@@ -266,7 +314,9 @@ fn repair_idempotent() {
 fn cdom_parse_and_query() {
     let (ket_dir, dir) = fresh_ket("cdom");
     let py_file = dir.path().join("example.py");
-    std::fs::write(&py_file, r#"
+    std::fs::write(
+        &py_file,
+        r#"
 class UserProfile:
     def __init__(self, name):
         self.name = name
@@ -276,13 +326,18 @@ class UserProfile:
 
 def process_data(items):
     return [x * 2 for x in items]
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let result = ket_json(&ket_dir, &["scan", py_file.to_str().unwrap()]);
     assert!(result["symbols"].as_u64().unwrap() >= 3);
 
     // Query specific symbol
-    let (ok, stdout, _) = ket(&ket_dir, &["cdom", "UserProfile", py_file.to_str().unwrap()]);
+    let (ok, stdout, _) = ket(
+        &ket_dir,
+        &["cdom", "UserProfile", py_file.to_str().unwrap()],
+    );
     assert!(ok);
     assert!(stdout.contains("UserProfile"));
     assert!(stdout.contains("class"));
@@ -297,7 +352,12 @@ fn log_records_operations() {
     std::fs::write(&f, b"data").unwrap();
 
     ket(&ket_dir, &["put", f.to_str().unwrap()]);
-    ket(&ket_dir, &["dag", "create", "test", "--kind", "code", "--agent", "human"]);
+    ket(
+        &ket_dir,
+        &[
+            "dag", "create", "test", "--kind", "code", "--agent", "human",
+        ],
+    );
 
     let result = ket_json(&ket_dir, &["log", "-n", "10"]);
     let entries = result.as_array().unwrap();
@@ -316,7 +376,12 @@ fn gc_identifies_orphans() {
     ket(&ket_dir, &["put", f.to_str().unwrap()]);
 
     // Create a DAG node (references a content blob)
-    ket_json(&ket_dir, &["dag", "create", "kept", "--kind", "code", "--agent", "human"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "kept", "--kind", "code", "--agent", "human",
+        ],
+    );
 
     // GC dry run should find the orphan
     let result = ket_json(&ket_dir, &["gc"]);
@@ -340,15 +405,36 @@ fn export_import_roundtrip() {
     let (ket_dir_b, _dir_b) = fresh_ket("export-b");
 
     // Create a chain in store A
-    let root = ket_json(&ket_dir_a, &["dag", "create", "root", "--kind", "memory", "--agent", "human"]);
+    let root = ket_json(
+        &ket_dir_a,
+        &[
+            "dag", "create", "root", "--kind", "memory", "--agent", "human",
+        ],
+    );
     let root_cid = root["node_cid"].as_str().unwrap().to_string();
 
-    let child = ket_json(&ket_dir_a, &["dag", "create", "child", "--kind", "reasoning", "--agent", "claude", "--parent", &root_cid]);
+    let child = ket_json(
+        &ket_dir_a,
+        &[
+            "dag",
+            "create",
+            "child",
+            "--kind",
+            "reasoning",
+            "--agent",
+            "claude",
+            "--parent",
+            &root_cid,
+        ],
+    );
     let child_cid = child["node_cid"].as_str().unwrap().to_string();
 
     // Export from A
     let bundle_path = dir_a.path().join("bundle.json");
-    let (ok, _, _) = ket(&ket_dir_a, &["export", &child_cid, "-o", bundle_path.to_str().unwrap()]);
+    let (ok, _, _) = ket(
+        &ket_dir_a,
+        &["export", &child_cid, "-o", bundle_path.to_str().unwrap()],
+    );
     assert!(ok);
 
     // Import into B
@@ -367,14 +453,47 @@ fn merge_creates_multi_parent_node() {
     let (ket_dir, _dir) = fresh_ket("merge");
 
     // Create two independent branches
-    let a = ket_json(&ket_dir, &["dag", "create", "branch A", "--kind", "reasoning", "--agent", "claude"]);
+    let a = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "branch A",
+            "--kind",
+            "reasoning",
+            "--agent",
+            "claude",
+        ],
+    );
     let a_cid = a["node_cid"].as_str().unwrap().to_string();
 
-    let b = ket_json(&ket_dir, &["dag", "create", "branch B", "--kind", "reasoning", "--agent", "codex"]);
+    let b = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "branch B",
+            "--kind",
+            "reasoning",
+            "--agent",
+            "codex",
+        ],
+    );
     let b_cid = b["node_cid"].as_str().unwrap().to_string();
 
     // Merge them
-    let merged = ket_json(&ket_dir, &["merge", "synthesis of A and B", "--parents", &a_cid, &b_cid, "--agent", "human"]);
+    let merged = ket_json(
+        &ket_dir,
+        &[
+            "merge",
+            "synthesis of A and B",
+            "--parents",
+            &a_cid,
+            &b_cid,
+            "--agent",
+            "human",
+        ],
+    );
     let merge_cid = merged["node_cid"].as_str().unwrap().to_string();
     assert_eq!(merged["parents"].as_array().unwrap().len(), 2);
 
@@ -393,7 +512,12 @@ fn cas_stats_shows_breakdown() {
     let f = dir.path().join("f.txt");
     std::fs::write(&f, b"stats test").unwrap();
     ket(&ket_dir, &["put", f.to_str().unwrap()]);
-    ket_json(&ket_dir, &["dag", "create", "node", "--kind", "code", "--agent", "human"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "node", "--kind", "code", "--agent", "human",
+        ],
+    );
 
     let result = ket_json(&ket_dir, &["cas-stats"]);
     assert!(result["total_blobs"].as_u64().unwrap() >= 3); // orphan + dag node + content
@@ -407,9 +531,33 @@ fn cas_stats_shows_breakdown() {
 fn dot_outputs_graphviz() {
     let (ket_dir, _dir) = fresh_ket("dot");
 
-    let root = ket_json(&ket_dir, &["dag", "create", "root node", "--kind", "memory", "--agent", "human"]);
+    let root = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "root node",
+            "--kind",
+            "memory",
+            "--agent",
+            "human",
+        ],
+    );
     let root_cid = root["node_cid"].as_str().unwrap().to_string();
-    ket_json(&ket_dir, &["dag", "create", "child node", "--kind", "code", "--agent", "claude", "--parent", &root_cid]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "child node",
+            "--kind",
+            "code",
+            "--agent",
+            "claude",
+            "--parent",
+            &root_cid,
+        ],
+    );
 
     let (ok, stdout, _) = ket(&ket_dir, &["dot"]);
     assert!(ok);
@@ -431,7 +579,10 @@ fn search_finds_content() {
     let result = ket_json(&ket_dir, &["search", "quick brown"]);
     let results = result.as_array().unwrap();
     assert!(!results.is_empty());
-    assert!(results[0]["matches"][0]["text"].as_str().unwrap().contains("quick brown"));
+    assert!(results[0]["matches"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("quick brown"));
 }
 
 // --- Snapshot test ---
@@ -440,8 +591,18 @@ fn search_finds_content() {
 fn snapshot_create_and_verify() {
     let (ket_dir, _dir) = fresh_ket("snapshot");
 
-    ket_json(&ket_dir, &["dag", "create", "node A", "--kind", "memory", "--agent", "human"]);
-    ket_json(&ket_dir, &["dag", "create", "node B", "--kind", "code", "--agent", "claude"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "node A", "--kind", "memory", "--agent", "human",
+        ],
+    );
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "node B", "--kind", "code", "--agent", "claude",
+        ],
+    );
 
     // Create snapshot
     let result = ket_json(&ket_dir, &["snapshot", "create", "v1"]);

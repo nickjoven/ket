@@ -328,9 +328,9 @@ fn parse_saturation_param(params: &Value) -> Result<Option<f32>, McpError> {
     match params.get("saturation") {
         None | Some(Value::Null) => Ok(None),
         Some(v) => {
-            let n = v.as_f64().ok_or_else(|| {
-                McpError::InvalidParams("saturation must be a number".into())
-            })?;
+            let n = v
+                .as_f64()
+                .ok_or_else(|| McpError::InvalidParams("saturation must be a number".into()))?;
             if !n.is_finite() || !(0.0..=1.0).contains(&n) {
                 return Err(McpError::InvalidParams(
                     "saturation must be finite and in [0.0, 1.0]".into(),
@@ -354,14 +354,11 @@ fn parse_decay_params(params: &Value) -> Result<Option<(f64, ket_dag::DecayConfi
         match params.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(v) => {
-                let n = v.as_f64().ok_or_else(|| {
-                    McpError::InvalidParams(format!("{} must be a number", key))
-                })?;
+                let n = v
+                    .as_f64()
+                    .ok_or_else(|| McpError::InvalidParams(format!("{} must be a number", key)))?;
                 if !n.is_finite() {
-                    return Err(McpError::InvalidParams(format!(
-                        "{} must be finite",
-                        key
-                    )));
+                    return Err(McpError::InvalidParams(format!("{} must be finite", key)));
                 }
                 Ok(Some(n))
             }
@@ -380,9 +377,7 @@ fn parse_decay_params(params: &Value) -> Result<Option<(f64, ket_dag::DecayConfi
 
     let activation = finite_f64(params, "activation")?.unwrap_or(1.0);
     if activation < 0.0 {
-        return Err(McpError::InvalidParams(
-            "activation must be >= 0".into(),
-        ));
+        return Err(McpError::InvalidParams("activation must be >= 0".into()));
     }
 
     let floor = finite_f64(params, "activation_floor")?.unwrap_or(0.0);
@@ -459,7 +454,10 @@ pub fn handle_tool_call(
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
             let edge_kind = ket_dag::EdgeKind::parse_or_default(
-                params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives"),
+                params
+                    .get("edge_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("derives"),
             );
 
             let kind = parse_node_kind(kind_str)?;
@@ -584,7 +582,10 @@ pub fn handle_tool_call(
                 .unwrap_or_default();
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
             let edge_kind = ket_dag::EdgeKind::parse_or_default(
-                params.get("edge_kind").and_then(|v| v.as_str()).unwrap_or("derives"),
+                params
+                    .get("edge_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("derives"),
             );
             let saturation_param = parse_saturation_param(params)?;
             let decay_param = parse_decay_params(params)?;
@@ -636,9 +637,9 @@ pub fn handle_tool_call(
             Ok(serde_json::json!({ "node_cid": node_cid.as_str() }))
         }
         "ket_create_subtask" => {
-            let db = db.ok_or_else(|| McpError::InvalidParams(
-                "ket_create_subtask requires Dolt (see ket README)".into(),
-            ))?;
+            let db = db.ok_or_else(|| {
+                McpError::InvalidParams("ket_create_subtask requires Dolt (see ket README)".into())
+            })?;
             let title = params["title"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("title required".into()))?;
@@ -677,15 +678,24 @@ pub fn handle_tool_call(
             }
         }
         "ket_calibrate" => {
-            let db = db.ok_or_else(|| McpError::InvalidParams(
-                "ket_calibrate requires Dolt (see ket README)".into(),
-            ))?;
+            let db = db.ok_or_else(|| {
+                McpError::InvalidParams("ket_calibrate requires Dolt (see ket README)".into())
+            })?;
             let root_cid = params["root_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("root_cid required".into()))?;
-            let max_cost = params.get("max_cost").and_then(|v| v.as_f64()).unwrap_or(50.0);
-            let max_depth = params.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
-            let max_tier3 = params.get("max_tier3").and_then(|v| v.as_u64()).unwrap_or(5) as u32;
+            let max_cost = params
+                .get("max_cost")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(50.0);
+            let max_depth = params
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as u32;
+            let max_tier3 = params
+                .get("max_tier3")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5) as u32;
 
             let dag = ket_dag::Dag::new(cas);
             let constraints = ket_opt::Constraints {
@@ -694,8 +704,7 @@ pub fn handle_tool_call(
                 max_tier3_calls: max_tier3,
             };
             let cid = ket_cas::Cid::from(root_cid);
-            let (node_cid, result) =
-                ket_opt::calibrate(cas, &dag, db, &cid, &constraints, "mcp")?;
+            let (node_cid, result) = ket_opt::calibrate(cas, &dag, db, &cid, &constraints, "mcp")?;
 
             Ok(serde_json::json!({
                 "node_cid": node_cid.as_str(),
@@ -703,9 +712,9 @@ pub fn handle_tool_call(
             }))
         }
         "ket_score" => {
-            let db = db.ok_or_else(|| McpError::InvalidParams(
-                "ket_score requires Dolt (see ket README)".into(),
-            ))?;
+            let db = db.ok_or_else(|| {
+                McpError::InvalidParams("ket_score requires Dolt (see ket README)".into())
+            })?;
             let node_cid = params["node_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("node_cid required".into()))?;
@@ -759,10 +768,7 @@ pub fn handle_tool_call(
         }
         "ket_dag_ls" => {
             let kind_filter = params.get("kind").and_then(|v| v.as_str());
-            let limit = params
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(50) as usize;
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
             let dag = ket_dag::Dag::new(cas);
             let cids = cas.list()?;
@@ -820,10 +826,7 @@ pub fn handle_tool_call(
             let query = params["query"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("query required".into()))?;
-            let limit = params
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(20) as usize;
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
             let cids = cas.list()?;
             let query_lower = query.to_lowercase();
@@ -856,7 +859,10 @@ pub fn handle_tool_call(
             let cid_str = params["cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
-            let elapsed_secs = params.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let elapsed_secs = params
+                .get("elapsed_secs")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
 
             let dag = ket_dag::Dag::new(cas);
             let node = dag.get_node(&ket_cas::Cid::from(cid_str))?;
@@ -874,7 +880,8 @@ pub fn handle_tool_call(
             }))
         }
         "ket_soft_link" => {
-            let db = db.ok_or_else(|| McpError::InvalidParams("ket_soft_link requires Dolt".into()))?;
+            let db =
+                db.ok_or_else(|| McpError::InvalidParams("ket_soft_link requires Dolt".into()))?;
             let from_cid = params["from_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("from_cid required".into()))?;
@@ -893,11 +900,16 @@ pub fn handle_tool_call(
             }))
         }
         "ket_soft_link_query" => {
-            let db = db.ok_or_else(|| McpError::InvalidParams("ket_soft_link_query requires Dolt".into()))?;
+            let db = db.ok_or_else(|| {
+                McpError::InvalidParams("ket_soft_link_query requires Dolt".into())
+            })?;
             let cid = params["cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
-            let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+            let direction = params
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("both");
             let relation_filter = params.get("relation").and_then(|v| v.as_str());
             let csv = match direction {
                 "from" => db.soft_links_from(cid)?,
@@ -944,7 +956,11 @@ pub fn handle_jsonrpc(
         }
         "tools/call" => {
             let tool_name = request.params["name"].as_str().unwrap_or("");
-            let arguments = request.params.get("arguments").cloned().unwrap_or(Value::Object(Default::default()));
+            let arguments = request
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
 
             match handle_tool_call(tool_name, &arguments, cas, db) {
                 Ok(result) => JsonRpcResponse {
@@ -990,7 +1006,11 @@ pub fn handle_jsonrpc(
 /// - "both": from_cid, to_cid, relation, created_at
 /// - "from": to_cid, relation, created_at
 /// - "to":   from_cid, relation, created_at
-fn parse_soft_links_csv(csv: &str, direction: &str, relation_filter: Option<&str>) -> Vec<serde_json::Value> {
+fn parse_soft_links_csv(
+    csv: &str,
+    direction: &str,
+    relation_filter: Option<&str>,
+) -> Vec<serde_json::Value> {
     let mut lines = csv.lines();
     let _header = lines.next();
     let mut links = Vec::new();
@@ -998,8 +1018,8 @@ fn parse_soft_links_csv(csv: &str, direction: &str, relation_filter: Option<&str
         let cols: Vec<&str> = line.splitn(4, ',').collect();
         let (from, to, rel, ts) = match direction {
             "from" if cols.len() >= 3 => ("", cols[0], cols[1], cols.get(2).copied().unwrap_or("")),
-            "to"   if cols.len() >= 3 => (cols[0], "", cols[1], cols.get(2).copied().unwrap_or("")),
-            _      if cols.len() >= 4 => (cols[0], cols[1], cols[2], cols[3]),
+            "to" if cols.len() >= 3 => (cols[0], "", cols[1], cols.get(2).copied().unwrap_or("")),
+            _ if cols.len() >= 4 => (cols[0], cols[1], cols[2], cols[3]),
             _ => continue,
         };
         if let Some(filter) = relation_filter {
@@ -1033,7 +1053,10 @@ fn parse_node_kind(s: &str) -> Result<ket_dag::NodeKind, McpError> {
 }
 
 /// Run the MCP server loop on stdio (synchronous, line-delimited JSON-RPC).
-pub fn run_stdio_server(cas: &ket_cas::Store, db: Option<&ket_sql::DoltDb>) -> Result<(), McpError> {
+pub fn run_stdio_server(
+    cas: &ket_cas::Store,
+    db: Option<&ket_sql::DoltDb>,
+) -> Result<(), McpError> {
     use std::io::{BufRead, BufReader, Write};
 
     let stdin = std::io::stdin();

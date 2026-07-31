@@ -311,7 +311,7 @@ impl DoltDb {
 
         // Migration: add edge_kind column to existing dag_edges tables
         let _ = self.exec(
-            "ALTER TABLE dag_edges ADD COLUMN edge_kind VARCHAR(20) NOT NULL DEFAULT 'derives'"
+            "ALTER TABLE dag_edges ADD COLUMN edge_kind VARCHAR(20) NOT NULL DEFAULT 'derives'",
         );
 
         self.commit("Initialize ket schema")?;
@@ -443,9 +443,8 @@ impl DoltDb {
     /// Update task status.
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<(), SqlError> {
         let now = chrono::Utc::now().to_rfc3339();
-        let sql = format!(
-            "UPDATE tasks SET status = '{status}', updated_at = '{now}' WHERE id = '{id}'"
-        );
+        let sql =
+            format!("UPDATE tasks SET status = '{status}', updated_at = '{now}' WHERE id = '{id}'");
         self.exec(&sql)
     }
 
@@ -578,7 +577,9 @@ impl DoltDb {
 
     /// Query all agents.
     pub fn list_agents(&self) -> Result<String, SqlError> {
-        self.query("SELECT name, cli_command, mcp_capable, model, updated_at FROM agents ORDER BY name")
+        self.query(
+            "SELECT name, cli_command, mcp_capable, model, updated_at FROM agents ORDER BY name",
+        )
     }
 
     // --- Context tracking ---
@@ -677,9 +678,7 @@ impl DoltDb {
 
     /// Count symbols by kind across the codebase.
     pub fn symbol_stats(&self) -> Result<String, SqlError> {
-        self.query(
-            "SELECT kind, COUNT(*) AS n FROM cdom_symbols GROUP BY kind ORDER BY n DESC"
-        )
+        self.query("SELECT kind, COUNT(*) AS n FROM cdom_symbols GROUP BY kind ORDER BY n DESC")
     }
 
     /// Query scores for a node.
@@ -740,7 +739,11 @@ impl DoltDb {
             .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.split_whitespace().next().unwrap_or("unknown").to_string())
+        Ok(stdout
+            .split_whitespace()
+            .next()
+            .unwrap_or("unknown")
+            .to_string())
     }
 
     /// Get commit history.
@@ -859,7 +862,7 @@ impl DoltDb {
         self.query(
             "SELECT n.cid, n.kind, n.agent, n.created_at \
              FROM dag_nodes n LEFT JOIN dag_edges e ON n.cid = e.child_cid \
-             WHERE e.parent_cid IS NULL ORDER BY n.created_at"
+             WHERE e.parent_cid IS NULL ORDER BY n.created_at",
         )
     }
 
@@ -868,7 +871,7 @@ impl DoltDb {
         self.query(
             "SELECT n.cid, n.kind, n.agent, n.created_at \
              FROM dag_nodes n LEFT JOIN dag_edges e ON n.cid = e.parent_cid \
-             WHERE e.child_cid IS NULL ORDER BY n.created_at"
+             WHERE e.child_cid IS NULL ORDER BY n.created_at",
         )
     }
 
@@ -907,7 +910,7 @@ impl DoltDb {
             "SELECT cid, kind, agent, created_at, saturation \
              FROM dag_nodes \
              WHERE saturation IS NULL OR saturation = 0.0 \
-             ORDER BY created_at DESC"
+             ORDER BY created_at DESC",
         )
     }
 
@@ -918,7 +921,7 @@ impl DoltDb {
             "SELECT cid, kind, agent, created_at, saturation \
              FROM dag_nodes \
              WHERE saturation >= 1.0 \
-             ORDER BY created_at DESC"
+             ORDER BY created_at DESC",
         )
     }
 
