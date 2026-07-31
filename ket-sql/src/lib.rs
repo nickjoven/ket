@@ -319,6 +319,10 @@ impl DoltDb {
     }
 
     /// Insert a DAG node record.
+    // The arity mirrors the dag_nodes table columns one-for-one. Collapsing
+    // them into a params struct would buy a lint and cost the call-site
+    // readability that makes a column omission obvious at a glance.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_dag_node(
         &self,
         cid: &str,

@@ -97,19 +97,15 @@ impl std::fmt::Display for NodeKind {
 /// node encoding (see `DagNode::parent_kinds`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EdgeKind {
     /// Irreducible input — an axiom, a measurement, a given.
     Grounds,
     /// Logical consequence — this node follows from the parent. The default.
+    #[default]
     Derives,
     /// Suggested but not entailed — a hypothesis or conjecture.
     Proposes,
-}
-
-impl Default for EdgeKind {
-    fn default() -> Self {
-        EdgeKind::Derives
-    }
 }
 
 impl EdgeKind {
@@ -261,10 +257,10 @@ impl DagNode {
     ///
     /// Saturation encodes epistemic confidence on [0.0, 1.0]:
     /// - `0.0` — open query: the content is a question or hypothesis with no
-    ///           supporting evidence; the optimizer treats it as maximally
-    ///           uncertain and will prioritize exploration.
+    ///   supporting evidence; the optimizer treats it as maximally uncertain
+    ///   and will prioritize exploration.
     /// - `1.0` — settled claim: the content is fully supported; the optimizer
-    ///           can skip re-examining it and prune its subtree.
+    ///   can skip re-examining it and prune its subtree.
     /// - intermediate — partial belief: scored or partially-confirmed knowledge.
     ///
     /// This replaces the need for a separate "query substrate" layer. Rather
@@ -295,7 +291,7 @@ impl DagNode {
     /// A claim carries fully-supported content. The optimizer can treat it as
     /// exhausted and will assign `Tier::Skip` without consulting the scores table.
     pub fn is_claim(&self) -> bool {
-        self.saturation().map_or(false, |s| s >= 1.0)
+        self.saturation().is_some_and(|s| s >= 1.0)
     }
 
     /// Returns `true` when this node is an open **query** (saturation = 0.0 or unset).
@@ -304,7 +300,7 @@ impl DagNode {
     /// that has not yet been answered. It is maximally uncertain and will receive
     /// the highest exploration priority from the optimizer.
     pub fn is_query(&self) -> bool {
-        self.saturation().map_or(true, |s| s == 0.0)
+        self.saturation().is_none_or(|s| s == 0.0)
     }
 
     /// Set the initial activation value and decay configuration.
@@ -419,7 +415,7 @@ impl<'a> Dag<'a> {
             }
             match self.get_node(&current) {
                 Ok(node) => {
-                    let within_bound = max_depth.map_or(true, |d| depth < d);
+                    let within_bound = max_depth.is_none_or(|d| depth < d);
                     if within_bound {
                         for parent in &node.parents {
                             queue.push_back((parent.clone(), depth + 1));

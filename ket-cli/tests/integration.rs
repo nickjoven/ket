@@ -3,7 +3,7 @@
 //! These test the real binary end-to-end: init, CAS, DAG, MCP JSON-RPC,
 //! repair, drift detection, CDOM scanning.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn ket_bin() -> PathBuf {
@@ -31,7 +31,7 @@ fn fresh_ket(name: &str) -> (PathBuf, tempfile::TempDir) {
     (ket_dir, dir)
 }
 
-fn ket(ket_dir: &PathBuf, args: &[&str]) -> (bool, String, String) {
+fn ket(ket_dir: &Path, args: &[&str]) -> (bool, String, String) {
     let mut full_args = vec!["--home", ket_dir.to_str().unwrap()];
     full_args.extend_from_slice(args);
     let output = Command::new(ket_bin()).args(&full_args).output().unwrap();
@@ -42,7 +42,7 @@ fn ket(ket_dir: &PathBuf, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-fn ket_json(ket_dir: &PathBuf, args: &[&str]) -> serde_json::Value {
+fn ket_json(ket_dir: &Path, args: &[&str]) -> serde_json::Value {
     let mut full_args = vec!["--home", ket_dir.to_str().unwrap(), "--json"];
     full_args.extend_from_slice(args);
     let output = Command::new(ket_bin()).args(&full_args).output().unwrap();
