@@ -11,7 +11,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     ket-cli                         │
-│              22 commands, --json output             │
+│              30 commands, --json output             │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
 │ 19 tools │  tasks   │ 4 dims    │   tree-sitter     │
@@ -42,7 +42,7 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
 | **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
 | **ket-cdom** | Code Document Object Model — tree-sitter parsing for Rust and Python symbol extraction |
-| **ket-cli** | CLI binary with 22 commands |
+| **ket-cli** | CLI binary with 30 commands |
 | **ket-py** | PyO3 Python bindings for CAS and DAG operations |
 
 ## Getting Started
@@ -54,7 +54,10 @@ Three tiers — start minimal, add capabilities when you need them.
 Everything you need for content-addressed agent memory: store, DAG, lineage, drift detection, MCP server. **14 of 19 MCP tools work at this tier.**
 
 ```sh
-# Build
+# Install (puts `ket` on your PATH)
+cargo install --git https://github.com/nickjoven/ket ket-cli
+
+# ...or build from a clone, and run it as ./target/release/ket
 cargo build --release
 
 # Initialize a ket store
