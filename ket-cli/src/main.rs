@@ -314,6 +314,39 @@ Examples:
         dry_run: bool,
     },
 
+    /// Audit the `dag_edges` projection against the CAS/DAG substrate
+    #[command(long_about = "\
+Verify the SQL projection matches what the CAS/DAG imply.
+
+Re-derives every edge the sealed DagNodes carry and diffs against
+`dag_edges`. Exit codes are the standard drift-check contract:
+  0  clean — projection agrees with the substrate
+  1  divergence found — projection is stale, orphaned, or wrong-kind
+  2  environment error — no .ket / no Dolt / cannot read
+
+Examples:
+  ket verify-projection            Human-readable diff summary
+  ket verify-projection --json     Machine-readable diff summary")]
+    VerifyProjection,
+
+    /// Heal the `dag_edges` projection by replaying the substrate
+    #[command(long_about = "\
+Rebuild the SQL projection from the sealed CAS/DAG.
+
+Truncates `dag_edges` and re-inserts every edge derivable from the
+DagNodes in CAS, inside one transaction. Idempotent — running it twice
+leaves the projection bit-identical. After it returns, verify-projection
+must be clean; if it isn't, the canonicalization itself is the bug.
+
+Exit codes:
+  0  ok — projection healed
+  2  environment error — no .ket / no Dolt / write failed
+
+Examples:
+  ket rebuild-projection            Replay + report counts
+  ket rebuild-projection --json     Machine-readable report")]
+    RebuildProjection,
+
     /// Show .ket health dashboard (CAS blobs, SQL stats, Dolt HEAD)
     #[command(long_about = "\
 Display a health overview of the .ket directory.
@@ -796,6 +829,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Scores { action } => cmd_scores(&base, action, cli.json),
         Commands::Calibrate { action } => cmd_calibrate(&base, action, cli.json),
         Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
+        Commands::VerifyProjection => cmd_verify_projection(&base, cli.json),
+        Commands::RebuildProjection => cmd_rebuild_projection(&base, cli.json),
         Commands::Status => cmd_status(&base, cli.json),
         Commands::History { n } => cmd_history(&base, n, cli.json),
         Commands::Diff { from, to } => cmd_diff(&base, from.as_deref(), to.as_deref(), cli.json),
@@ -2774,4 +2809,131 @@ fn open_cas(base: &PathBuf) -> Result<ket_cas::Store, Box<dyn std::error::Error>
 fn open_db(base: &PathBuf) -> Result<ket_sql::DoltDb, Box<dyn std::error::Error>> {
     let db_path = base.join("ket.db");
     Ok(ket_sql::DoltDb::open(db_path)?)
+}
+
+/// Drift-check exit code contract (matches the PORTING.md audit convention).
+///
+/// 0 = clean · 1 = divergence found · 2 = env error (missing dolt / .ket / io).
+fn cmd_verify_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = match open_cas(base) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("verify-projection: cannot open CAS ({e})");
+            std::process::exit(2);
+        }
+    };
+    let db = match open_db(base) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("verify-projection: cannot open Dolt ({e})");
+            std::process::exit(2);
+        }
+    };
+
+    let diff = match db.verify_projection(&cas) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("verify-projection: substrate walk failed ({e})");
+            std::process::exit(2);
+        }
+    };
+
+    let missing = diff.missing.len();
+    let extra = diff.extra.len();
+    let mismatched = diff.mismatched.len();
+    let clean = diff.is_clean();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "clean": clean,
+                "missing": missing,
+                "extra": extra,
+                "mismatched": mismatched,
+            }))?
+        );
+    } else if clean {
+        println!("verify-projection: clean (projection agrees with substrate)");
+    } else {
+        println!(
+            "verify-projection: divergence — missing={missing} extra={extra} mismatched={mismatched}"
+        );
+        for row in &diff.missing {
+            println!(
+                "  missing: {}→{} ord={} kind={}",
+                &row.parent_cid[..12.min(row.parent_cid.len())],
+                &row.child_cid[..12.min(row.child_cid.len())],
+                row.ordinal,
+                row.edge_kind
+            );
+        }
+        for row in &diff.extra {
+            println!(
+                "  extra:   {}→{} ord={} kind={}",
+                &row.parent_cid[..12.min(row.parent_cid.len())],
+                &row.child_cid[..12.min(row.child_cid.len())],
+                row.ordinal,
+                row.edge_kind
+            );
+        }
+        for (exp, act) in &diff.mismatched {
+            println!(
+                "  mismatch: {}→{} exp(ord={},kind={}) act(ord={},kind={})",
+                &exp.parent_cid[..12.min(exp.parent_cid.len())],
+                &exp.child_cid[..12.min(exp.child_cid.len())],
+                exp.ordinal,
+                exp.edge_kind,
+                act.ordinal,
+                act.edge_kind
+            );
+        }
+    }
+
+    if clean {
+        std::process::exit(0);
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn cmd_rebuild_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cas = match open_cas(base) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rebuild-projection: cannot open CAS ({e})");
+            std::process::exit(2);
+        }
+    };
+    let db = match open_db(base) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("rebuild-projection: cannot open Dolt ({e})");
+            std::process::exit(2);
+        }
+    };
+
+    let report = match db.rebuild_projection(&cas) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rebuild-projection: replay failed ({e})");
+            std::process::exit(2);
+        }
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "edges_purged": report.edges_purged,
+                "edges_written": report.edges_written,
+            }))?
+        );
+    } else {
+        println!(
+            "rebuild-projection: purged {} · wrote {}",
+            report.edges_purged, report.edges_written
+        );
+    }
+    Ok(())
 }

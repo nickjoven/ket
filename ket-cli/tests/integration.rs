@@ -458,6 +458,71 @@ fn snapshot_create_and_verify() {
     assert!(result["ok"].as_bool().unwrap());
 }
 
+// --- Verify + rebuild projection (L3 audit contract) ---
+
+/// The projection self-audit gate: after `repair`, the substrate and the
+/// projection must agree. Fails loudly on non-clean exit codes so a regression
+/// in the L3 mirror (verify_projection) or in node-sourced edges surfaces in CI
+/// rather than at runtime.
+#[test]
+fn verify_projection_after_repair_is_clean() {
+    let (ket_dir, _dir) = fresh_ket("verify-projection-clean");
+
+    // Seed the substrate with a small mixed-kind DAG. `repair` gives us a
+    // populated projection to audit against; without it, verify would be a
+    // trivial "empty vs empty" tautology.
+    ket_json(&ket_dir, &["dag", "create", "root A", "--kind", "memory", "--agent", "human"]);
+    ket_json(&ket_dir, &["dag", "create", "root B", "--kind", "memory", "--agent", "human"]);
+
+    if !has_dolt() {
+        return;
+    }
+
+    ket_json(&ket_dir, &["repair"]);
+
+    let (ok, stdout, stderr) = ket(&ket_dir, &["--json", "verify-projection"]);
+    assert!(
+        ok,
+        "verify-projection exit code must be 0 after repair; stdout={stdout} stderr={stderr}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("verify-projection JSON parse: {e}; stdout={stdout}"));
+    assert_eq!(json["clean"], serde_json::Value::Bool(true));
+    assert_eq!(json["missing"], serde_json::json!(0));
+    assert_eq!(json["extra"], serde_json::json!(0));
+    assert_eq!(json["mismatched"], serde_json::json!(0));
+}
+
+/// The heal contract: after `rebuild-projection`, verify must clear.
+/// Also asserts idempotence — a second rebuild wipes and rewrites the same
+/// edges, so the projection is bit-identical.
+#[test]
+fn rebuild_projection_heals_and_is_idempotent() {
+    let (ket_dir, _dir) = fresh_ket("rebuild-projection-heals");
+
+    ket_json(&ket_dir, &["dag", "create", "root", "--kind", "memory", "--agent", "human"]);
+
+    if !has_dolt() {
+        return;
+    }
+
+    ket_json(&ket_dir, &["repair"]);
+
+    let r1 = ket_json(&ket_dir, &["rebuild-projection"]);
+    let written1 = r1["edges_written"].as_u64().unwrap();
+
+    // Verify must clear.
+    let (ok, _, _) = ket(&ket_dir, &["verify-projection"]);
+    assert!(ok, "verify-projection non-clean after rebuild");
+
+    // Idempotent — the second rebuild purges what the first wrote and re-writes
+    // the same set. purged and written both equal the same count.
+    let r2 = ket_json(&ket_dir, &["rebuild-projection"]);
+    assert_eq!(r2["edges_written"].as_u64().unwrap(), written1);
+    assert_eq!(r2["edges_purged"].as_u64().unwrap(), written1);
+}
+
 // --- helpers ---
 
 fn has_dolt() -> bool {
