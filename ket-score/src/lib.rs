@@ -201,8 +201,14 @@ impl<'a> ScoringEngine<'a> {
             results.push(result);
 
             // Record it
-            let score =
-                Score::new(node_cid.clone(), agent, "auto:compile", Dimension::Correctness, score_val, &evidence)?;
+            let score = Score::new(
+                node_cid.clone(),
+                agent,
+                "auto:compile",
+                Dimension::Correctness,
+                score_val,
+                &evidence,
+            )?;
             self.record(&score)?;
         }
 
@@ -273,8 +279,14 @@ impl<'a> ScoringEngine<'a> {
             };
             results.push(result);
 
-            let score =
-                Score::new(node_cid.clone(), agent, "auto:clippy", Dimension::Style, score_val, &evidence)?;
+            let score = Score::new(
+                node_cid.clone(),
+                agent,
+                "auto:clippy",
+                Dimension::Style,
+                score_val,
+                &evidence,
+            )?;
             self.record(&score)?;
         }
 

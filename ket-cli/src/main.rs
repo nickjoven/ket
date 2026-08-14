@@ -846,7 +846,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             kind,
             agent,
             schema,
-        } => cmd_merge(&base, &content, &parents, &kind, &agent, schema.as_deref(), cli.json),
+        } => cmd_merge(
+            &base,
+            &content,
+            &parents,
+            &kind,
+            &agent,
+            schema.as_deref(),
+            cli.json,
+        ),
         Commands::CasStats => cmd_cas_stats(&base, cli.json),
         Commands::Dot { root } => cmd_dot(&base, root.as_deref()),
         Commands::Search { query, limit } => cmd_search(&base, &query, limit, cli.json),
@@ -1093,7 +1101,8 @@ fn cmd_dag(
 
             let parents: Vec<ket_cas::Cid> = parent.into_iter().map(ket_cas::Cid::from).collect();
             let content_cid = cas.put(content.as_bytes())?;
-            let mut node = ket_dag::DagNode::new(node_kind, parents.clone(), content_cid.clone(), &agent);
+            let mut node =
+                ket_dag::DagNode::new(node_kind, parents.clone(), content_cid.clone(), &agent);
             if let Some(ref s) = schema {
                 node = node.with_schema(ket_cas::Cid::from(s.as_str()));
             }
@@ -1253,9 +1262,7 @@ fn cmd_task(
             }
         }
         TaskAction::Show { id } => {
-            let result = db.query(&format!(
-                "SELECT * FROM tasks WHERE id = '{id}'"
-            ))?;
+            let result = db.query(&format!("SELECT * FROM tasks WHERE id = '{id}'"))?;
             print!("{result}");
         }
         TaskAction::Assign { id, agent } => {
@@ -1293,7 +1300,9 @@ fn cmd_agent(
                 "codex" => ket_agent::AgentConfig::codex(),
                 "copilot" => ket_agent::AgentConfig::copilot(),
                 _ => {
-                    return Err(format!("Unknown agent preset: {name}. Use claude/codex/copilot").into());
+                    return Err(
+                        format!("Unknown agent preset: {name}. Use claude/codex/copilot").into(),
+                    );
                 }
             };
             orch.register_agent(&config)?;
@@ -1418,7 +1427,9 @@ fn cmd_scan(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std::e
         for snap in &snapshots {
             println!(
                 "{} ({}) — {} symbols",
-                snap.file_path, snap.language, snap.symbols.len()
+                snap.file_path,
+                snap.language,
+                snap.symbols.len()
             );
             for sym in &snap.symbols {
                 let parent = sym.parent.as_deref().unwrap_or("");
@@ -1719,11 +1730,15 @@ fn cmd_calibrate(
                 );
             } else {
                 println!("Calibration stored: {}", node_cid.as_str());
-                println!("  Root:       {}", &result.root_cid[..12.min(result.root_cid.len())]);
+                println!(
+                    "  Root:       {}",
+                    &result.root_cid[..12.min(result.root_cid.len())]
+                );
                 println!("  Gain:       {:.3}", result.total_gain);
                 println!("  Cost:       {:.3}", result.total_cost);
                 println!("  Iterations: {}", result.iterations);
-                println!("  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
+                println!(
+                    "  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
                     result.lambdas.lambda_cost,
                     result.lambdas.lambda_depth,
                     result.lambdas.lambda_tier3,
@@ -1737,11 +1752,15 @@ fn cmd_calibrate(
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("Calibration: {}", &cid[..12.min(cid.len())]);
-                println!("  Root:       {}", &result.root_cid[..12.min(result.root_cid.len())]);
+                println!(
+                    "  Root:       {}",
+                    &result.root_cid[..12.min(result.root_cid.len())]
+                );
                 println!("  Gain:       {:.3}", result.total_gain);
                 println!("  Cost:       {:.3}", result.total_cost);
                 println!("  Iterations: {}", result.iterations);
-                println!("  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
+                println!(
+                    "  Lambdas:    cost={:.4} depth={:.4} tier3={:.4}",
                     result.lambdas.lambda_cost,
                     result.lambdas.lambda_depth,
                     result.lambdas.lambda_tier3,
@@ -1770,11 +1789,7 @@ fn cmd_calibrate(
     Ok(())
 }
 
-fn cmd_repair(
-    base: &PathBuf,
-    dry_run: bool,
-    json: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
     let db = open_db(base)?;
     let dag = ket_dag::Dag::new(&cas);
@@ -1869,9 +1884,7 @@ fn cmd_repair(
         );
     } else {
         let verb = if dry_run { "would sync" } else { "synced" };
-        println!(
-            "\nRepair: {synced} {verb}, {skipped} already in sync, {errors} errors"
-        );
+        println!("\nRepair: {synced} {verb}, {skipped} already in sync, {errors} errors");
     }
 
     // Log the repair
@@ -2160,7 +2173,12 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
         if drifted.is_empty() && missing.is_empty() {
             println!("No drift detected. {} files OK.", ok.len());
         } else {
-            println!("\n{} OK, {} drifted, {} missing", ok.len(), drifted.len(), missing.len());
+            println!(
+                "\n{} OK, {} drifted, {} missing",
+                ok.len(),
+                drifted.len(),
+                missing.len()
+            );
         }
     }
 
@@ -2197,7 +2215,11 @@ fn cmd_gc(base: &PathBuf, delete: bool, json: bool) -> Result<(), Box<dyn std::e
         log::append(
             &log_path,
             "gc",
-            &format!("deleted {} blobs ({} bytes)", unreferenced.len(), unreferenced_bytes),
+            &format!(
+                "deleted {} blobs ({} bytes)",
+                unreferenced.len(),
+                unreferenced_bytes
+            ),
         )?;
     }
 
@@ -2220,11 +2242,7 @@ fn cmd_gc(base: &PathBuf, delete: bool, json: bool) -> Result<(), Box<dyn std::e
             unreferenced.len(),
             unreferenced_bytes
         );
-        println!(
-            "{} referenced / {} total",
-            referenced.len(),
-            all_cids.len()
-        );
+        println!("{} referenced / {} total", referenced.len(), all_cids.len());
         if !delete && !unreferenced.is_empty() {
             println!("\nRun with --delete to actually remove them.");
         }
@@ -2258,11 +2276,7 @@ fn cmd_export(
                 }))?
             );
         } else {
-            println!(
-                "Exported {} nodes to {}",
-                bundle.entries.len(),
-                path
-            );
+            println!("Exported {} nodes to {}", bundle.entries.len(), path);
         }
     } else {
         // Write bundle to stdout
@@ -2271,7 +2285,15 @@ fn cmd_export(
 
     // Log
     let log_path = base.join("log");
-    log::append(&log_path, "export", &format!("{} ({} nodes)", &cid[..12.min(cid.len())], bundle.entries.len()))?;
+    log::append(
+        &log_path,
+        "export",
+        &format!(
+            "{} ({} nodes)",
+            &cid[..12.min(cid.len())],
+            bundle.entries.len()
+        ),
+    )?;
 
     Ok(())
 }
@@ -2370,9 +2392,13 @@ fn cmd_merge(
         _ => return Err(format!("Unknown kind: {kind}").into()),
     };
 
-    let parent_cids: Vec<ket_cas::Cid> = parents.iter().map(|p| ket_cas::Cid::from(p.as_str())).collect();
+    let parent_cids: Vec<ket_cas::Cid> = parents
+        .iter()
+        .map(|p| ket_cas::Cid::from(p.as_str()))
+        .collect();
     let content_cid = cas.put(content.as_bytes())?;
-    let mut node = ket_dag::DagNode::new(node_kind, parent_cids.clone(), content_cid.clone(), agent);
+    let mut node =
+        ket_dag::DagNode::new(node_kind, parent_cids.clone(), content_cid.clone(), agent);
     if let Some(s) = schema {
         node = node.with_schema(ket_cas::Cid::from(s));
     }
@@ -2723,7 +2749,11 @@ fn cmd_snapshot(
                     }))?
                 );
             } else if missing.is_empty() && corrupted.is_empty() {
-                println!("Snapshot '{}' verified: all {} nodes present and intact", name, nodes.len());
+                println!(
+                    "Snapshot '{}' verified: all {} nodes present and intact",
+                    name,
+                    nodes.len()
+                );
             } else {
                 if !missing.is_empty() {
                     println!("MISSING ({}):", missing.len());
@@ -2737,7 +2767,12 @@ fn cmd_snapshot(
                         println!("  {}", &cid[..12]);
                     }
                 }
-                println!("\n{} nodes OK, {} missing, {} corrupted", present, missing.len(), corrupted.len());
+                println!(
+                    "\n{} nodes OK, {} missing, {} corrupted",
+                    present,
+                    missing.len(),
+                    corrupted.len()
+                );
                 std::process::exit(1);
             }
         }

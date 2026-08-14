@@ -7,7 +7,6 @@ use ket_cas::{Cid, Store as CasStore};
 use ket_dag::{Dag, DagNode, NodeKind};
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("SQL error: {0}")]
@@ -156,7 +155,15 @@ impl<'a> Orchestrator<'a> {
 
         // Build the command
         let (program, args) = match agent_name {
-            "claude" => ("claude", vec!["-p".to_string(), "--output-format".to_string(), "json".to_string(), prompt.to_string()]),
+            "claude" => (
+                "claude",
+                vec![
+                    "-p".to_string(),
+                    "--output-format".to_string(),
+                    "json".to_string(),
+                    prompt.to_string(),
+                ],
+            ),
             "codex" => ("codex", vec!["exec".to_string(), prompt.to_string()]),
             _ => {
                 return Err(AgentError::NotFound(agent_name.to_string()));
@@ -191,12 +198,8 @@ impl<'a> Orchestrator<'a> {
 
         // Store result as DAG node
         let dag = Dag::new(self.cas);
-        let (node_cid, _) = dag.store_with_node(
-            result.as_bytes(),
-            NodeKind::Reasoning,
-            vec![],
-            agent_name,
-        )?;
+        let (node_cid, _) =
+            dag.store_with_node(result.as_bytes(), NodeKind::Reasoning, vec![], agent_name)?;
 
         // Update task with result
         self.db
@@ -226,8 +229,12 @@ impl<'a> Orchestrator<'a> {
         parents: Vec<Cid>,
     ) -> Result<Cid, AgentError> {
         let dag = Dag::new(self.cas);
-        let (node_cid, _) =
-            dag.store_with_node(content.as_bytes(), NodeKind::Reasoning, parents.clone(), agent)?;
+        let (node_cid, _) = dag.store_with_node(
+            content.as_bytes(),
+            NodeKind::Reasoning,
+            parents.clone(),
+            agent,
+        )?;
 
         let node = dag.get_node(&node_cid)?;
         let parent_refs: Vec<(&str, i32, &str)> = parents
@@ -250,10 +257,7 @@ impl<'a> Orchestrator<'a> {
     }
 
     /// Get reasoning context — retrieve prior reasoning nodes for injection into prompts.
-    pub fn get_reasoning_context(
-        &self,
-        node_cid: &Cid,
-    ) -> Result<Vec<(Cid, DagNode)>, AgentError> {
+    pub fn get_reasoning_context(&self, node_cid: &Cid) -> Result<Vec<(Cid, DagNode)>, AgentError> {
         let dag = Dag::new(self.cas);
         Ok(dag.lineage(node_cid)?)
     }
