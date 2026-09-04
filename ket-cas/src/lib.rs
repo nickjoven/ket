@@ -4,6 +4,8 @@
 //! Atomic writes (write to `.tmp`, rename).
 //! Dedup on put (skip if CID already exists).
 
+pub mod log;
+
 use std::fmt;
 use std::fs;
 use std::io::Read;

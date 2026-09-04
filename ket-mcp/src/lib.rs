@@ -414,6 +414,11 @@ pub fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("content required".into()))?;
             let cid = cas.put(content.as_bytes())?;
+            ket_cas::log::append(
+                &ket_cas::log::log_path_for(cas),
+                "put",
+                &format!("mcp -> {}", cid.as_str()),
+            )?;
             Ok(serde_json::json!({ "cid": cid.as_str() }))
         }
         "ket_get" => {
@@ -482,6 +487,14 @@ pub fn handle_tool_call(
                 node = node.with_decay(activation, config);
             }
             let node_cid = dag.put_node(&node)?;
+            // Same append-only log the CLI writes: an MCP write is an event
+            // like any other, and a writer that skips the log leaves silent
+            // history.
+            ket_cas::log::append(
+                &ket_cas::log::log_path_for(cas),
+                "dag:create",
+                node_cid.as_str(),
+            )?;
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
@@ -612,6 +625,14 @@ pub fn handle_tool_call(
                 node = node.with_decay(activation, config);
             }
             let node_cid = dag.put_node(&node)?;
+            // Same append-only log the CLI writes: an MCP write is an event
+            // like any other, and a writer that skips the log leaves silent
+            // history.
+            ket_cas::log::append(
+                &ket_cas::log::log_path_for(cas),
+                "dag:create",
+                node_cid.as_str(),
+            )?;
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
@@ -1095,6 +1116,38 @@ pub fn run_stdio_server(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// MCP writes are events: they must land in the same `.ket/log` the CLI
+    /// appends to, or an agent's memory has history the log doesn't show.
+    #[test]
+    fn mcp_writes_append_to_the_shared_mutation_log() {
+        let dir = std::env::temp_dir().join(format!("ket-mcp-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ket_home = dir.join(".ket");
+        let cas = ket_cas::Store::init(&ket_home.join("cas")).unwrap();
+
+        let put = handle_tool_call("ket_put", &json!({ "content": "hello" }), &cas, None).unwrap();
+        let cid = put["cid"].as_str().unwrap().to_string();
+        let link = handle_tool_call(
+            "ket_dag_link",
+            &json!({ "content": "a memory", "kind": "memory", "agent": "claude" }),
+            &cas,
+            None,
+        )
+        .unwrap();
+        let node_cid = link["node_cid"].as_str().unwrap().to_string();
+
+        let log = std::fs::read_to_string(ket_home.join("log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per write: {log:?}");
+        assert!(lines[0].contains(&format!("| put | mcp -> {cid}")), "{log}");
+        assert!(
+            lines[1].contains(&format!("| dag:create | {node_cid}")),
+            "{log}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn saturation_absent_is_none() {

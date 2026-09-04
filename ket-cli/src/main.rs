@@ -1,6 +1,6 @@
 #![allow(clippy::ptr_arg)]
 
-mod log;
+use ket_cas::log;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -515,6 +515,9 @@ Examples:
         /// Agent name
         #[arg(long, default_value = "human")]
         agent: String,
+        /// Epistemic edge kind for every parent link: grounds, derives (default), proposes
+        #[arg(long, default_value = "derives")]
+        edge_kind: String,
         /// Schema CID that the output conforms to
         #[arg(long)]
         schema: Option<String>,
@@ -531,21 +534,34 @@ Example:
   ket cas-stats")]
     CasStats,
 
-    /// Output DAG as Graphviz DOT for visualization
-    #[command(long_about = "\
-Generate Graphviz DOT output for visualizing the DAG structure.
+    /// Output the DAG as a graph: Graphviz DOT, Mermaid, or JSON
+    #[command(
+        alias = "dot",
+        long_about = "\
+Render the DAG for visualization.
 
-Nodes are color-coded by kind. Soft links appear as dashed edges.
-Pipe to 'dot' to render: ket dot | dot -Tpng -o dag.png
+Nodes are labelled with their short CID, kind, agent, and a one-line
+preview of their content. Provenance edges are styled by epistemic kind
+(grounds = bold, derives = plain, proposes = dashed). Soft links, when
+Dolt is available, appear as dashed grey edges labelled with the relation.
+
+Formats:
+  dot       Graphviz — pipe to 'dot': ket graph | dot -Tsvg -o dag.svg
+  mermaid   Renders natively in GitHub Markdown and on GitHub Pages
+  json      {nodes, edges, soft_links} for any custom renderer
 
 Examples:
-  ket dot                          Full DAG
-  ket dot --root <cid>             Subgraph from a specific node
-  ket dot | dot -Tsvg -o dag.svg   Render as SVG")]
-    Dot {
+  ket graph                            Full DAG as DOT ('ket dot' still works)
+  ket graph --format mermaid           Paste into a ```mermaid fence
+  ket graph --root <cid> --format json Subgraph from a node, as JSON"
+    )]
+    Graph {
         /// Scope output to this node and its ancestors
         #[arg(long)]
         root: Option<String>,
+        /// Output format: dot, mermaid, json
+        #[arg(long, default_value = "dot")]
+        format: String,
     },
 
     /// Full-text search across all CAS content
@@ -851,6 +867,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             parents,
             kind,
             agent,
+            edge_kind,
             schema,
         } => cmd_merge(
             &base,
@@ -858,13 +875,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &parents,
             &kind,
             &agent,
+            &edge_kind,
             schema.as_deref(),
             cli.json,
         ),
         Commands::CasStats => cmd_cas_stats(&base, cli.json),
-        Commands::Dot { root } => cmd_dot(&base, root.as_deref()),
+        Commands::Graph { root, format } => cmd_graph(&base, root.as_deref(), &format),
         Commands::Search { query, limit } => cmd_search(&base, &query, limit, cli.json),
         Commands::Snapshot { action } => cmd_snapshot(&base, action, cli.json),
+    }
+}
+
+/// Edge rows for the SQL projection, read from the sealed node — never from a
+/// CLI flag — so the projection can only ever say what CAS says. This is the
+/// single write path for `dag_edges.edge_kind`; verify-projection re-derives
+/// the same rows via `parent_links()` and diffs.
+fn projected_edges(node: &ket_dag::DagNode) -> Vec<(String, i32, &'static str)> {
+    node.parent_links()
+        .enumerate()
+        .map(|(i, (p, k))| (p.as_str().to_string(), i as i32, k.as_str()))
+        .collect()
+}
+
+fn edge_refs<'a>(edges: &'a [(String, i32, &'static str)]) -> Vec<(&'a str, i32, &'a str)> {
+    edges.iter().map(|(p, i, k)| (p.as_str(), *i, *k)).collect()
+}
+
+fn parse_node_kind(kind: &str) -> Result<ket_dag::NodeKind, Box<dyn std::error::Error>> {
+    Ok(match kind {
+        "memory" => ket_dag::NodeKind::Memory,
+        "code" => ket_dag::NodeKind::Code,
+        "reasoning" => ket_dag::NodeKind::Reasoning,
+        "task" => ket_dag::NodeKind::Task,
+        "cdom" => ket_dag::NodeKind::Cdom,
+        "score" => ket_dag::NodeKind::Score,
+        "context" => ket_dag::NodeKind::Context,
+        _ => return Err(format!("Unknown kind: {kind}").into()),
+    })
+}
+
+fn parse_edge_kind(kind: &str) -> Result<ket_dag::EdgeKind, Box<dyn std::error::Error>> {
+    match kind {
+        "grounds" | "derives" | "proposes" => Ok(ket_dag::EdgeKind::parse_or_default(kind)),
+        _ => Err(format!("Unknown edge kind: {kind} (grounds, derives, proposes)").into()),
     }
 }
 
@@ -1094,34 +1147,28 @@ fn cmd_dag(
             edge_kind,
             schema,
         } => {
-            let node_kind = match kind.as_str() {
-                "memory" => ket_dag::NodeKind::Memory,
-                "code" => ket_dag::NodeKind::Code,
-                "reasoning" => ket_dag::NodeKind::Reasoning,
-                "task" => ket_dag::NodeKind::Task,
-                "cdom" => ket_dag::NodeKind::Cdom,
-                "score" => ket_dag::NodeKind::Score,
-                "context" => ket_dag::NodeKind::Context,
-                _ => return Err(format!("Unknown kind: {kind}").into()),
-            };
+            let node_kind = parse_node_kind(&kind)?;
+            let edge = parse_edge_kind(&edge_kind)?;
 
-            let parents: Vec<ket_cas::Cid> = parent.into_iter().map(ket_cas::Cid::from).collect();
+            // The edge kind is part of the node's identity (sealed in CAS),
+            // not a projection-side annotation. `new_typed` canonicalizes:
+            // all-`derives` is byte-identical to the untyped form.
+            let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> = parent
+                .into_iter()
+                .map(|p| (ket_cas::Cid::from(p), edge))
+                .collect();
             let content_cid = cas.put(content.as_bytes())?;
             let mut node =
-                ket_dag::DagNode::new(node_kind, parents.clone(), content_cid.clone(), &agent);
+                ket_dag::DagNode::new_typed(node_kind, parent_links, content_cid.clone(), &agent);
             if let Some(ref s) = schema {
                 node = node.with_schema(ket_cas::Cid::from(s.as_str()));
             }
             let node_cid = dag.put_node(&node)?;
 
-            // Dual-write to SQL if Dolt is available (single transaction)
+            // Project to SQL if Dolt is available — from the sealed node.
             if let Ok(db) = open_db(base) {
                 let node = dag.get_node(&node_cid)?;
-                let parent_refs: Vec<(&str, i32, &str)> = parents
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32, edge_kind.as_str()))
-                    .collect();
+                let edges = projected_edges(&node);
                 let _ = db.sync_dag_node(
                     node_cid.as_str(),
                     &kind,
@@ -1129,7 +1176,7 @@ fn cmd_dag(
                     &node.timestamp,
                     content_cid.as_str(),
                     "",
-                    &parent_refs,
+                    &edge_refs(&edges),
                     schema.as_deref(),
                 );
             }
@@ -1839,14 +1886,10 @@ fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn s
             continue;
         }
 
-        // Sync node + edges in one transaction
-        // Repair from CAS has no edge_kind info; default to "derives"
-        let parent_refs: Vec<(&str, i32, &str)> = node
-            .parents
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.as_str(), i as i32, "derives"))
-            .collect();
+        // Sync node + edges in one transaction; edge kinds come from the
+        // sealed node, so repair reproduces exactly what verify expects.
+        let edges = projected_edges(&node);
+        let parent_refs = edge_refs(&edges);
 
         match db.sync_dag_node(
             cid.as_str(),
@@ -2393,49 +2436,38 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_merge(
     base: &PathBuf,
     content: &str,
     parents: &[String],
     kind: &str,
     agent: &str,
+    edge_kind: &str,
     schema: Option<&str>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
     let dag = ket_dag::Dag::new(&cas);
 
-    let node_kind = match kind {
-        "memory" => ket_dag::NodeKind::Memory,
-        "code" => ket_dag::NodeKind::Code,
-        "reasoning" => ket_dag::NodeKind::Reasoning,
-        "task" => ket_dag::NodeKind::Task,
-        "cdom" => ket_dag::NodeKind::Cdom,
-        "score" => ket_dag::NodeKind::Score,
-        "context" => ket_dag::NodeKind::Context,
-        _ => return Err(format!("Unknown kind: {kind}").into()),
-    };
+    let node_kind = parse_node_kind(kind)?;
+    let edge = parse_edge_kind(edge_kind)?;
 
-    let parent_cids: Vec<ket_cas::Cid> = parents
+    let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> = parents
         .iter()
-        .map(|p| ket_cas::Cid::from(p.as_str()))
+        .map(|p| (ket_cas::Cid::from(p.as_str()), edge))
         .collect();
     let content_cid = cas.put(content.as_bytes())?;
-    let mut node =
-        ket_dag::DagNode::new(node_kind, parent_cids.clone(), content_cid.clone(), agent);
+    let mut node = ket_dag::DagNode::new_typed(node_kind, parent_links, content_cid.clone(), agent);
     if let Some(s) = schema {
         node = node.with_schema(ket_cas::Cid::from(s));
     }
     let node_cid = dag.put_node(&node)?;
 
-    // Dual-write to SQL
+    // Project to SQL — from the sealed node.
     if let Ok(db) = open_db(base) {
         let node = dag.get_node(&node_cid)?;
-        let parent_refs: Vec<(&str, i32, &str)> = parent_cids
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.as_str(), i as i32, "derives"))
-            .collect();
+        let edges = projected_edges(&node);
         let _ = db.sync_dag_node(
             node_cid.as_str(),
             kind,
@@ -2443,7 +2475,7 @@ fn cmd_merge(
             &node.timestamp,
             content_cid.as_str(),
             "",
-            &parent_refs,
+            &edge_refs(&edges),
             schema,
         );
     }
@@ -2483,75 +2515,258 @@ fn cmd_merge(
     Ok(())
 }
 
-fn cmd_dot(base: &PathBuf, root: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+/// One node of the rendered graph. `label` is a short, human-readable preview
+/// of the node's content (a catbus packet's title/summary, or the first line
+/// of a text blob) — the thing that makes a provenance graph legible.
+#[derive(serde::Serialize)]
+struct GraphNode {
+    cid: String,
+    kind: String,
+    agent: String,
+    timestamp: String,
+    label: String,
+}
+
+#[derive(serde::Serialize)]
+struct GraphEdge {
+    child: String,
+    parent: String,
+    ordinal: usize,
+    kind: String,
+}
+
+#[derive(serde::Serialize)]
+struct GraphSoftLink {
+    from: String,
+    to: String,
+    relation: String,
+}
+
+#[derive(serde::Serialize)]
+struct GraphOut {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    soft_links: Vec<GraphSoftLink>,
+}
+
+/// A one-line preview of a blob, for graph labels. JSON objects with a
+/// `title` or `summary` (catbus packets) use that; text uses its first
+/// non-empty line; anything else is described, not shown.
+fn content_preview(bytes: &[u8], max: usize) -> String {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return format!("({} bytes, binary)", bytes.len()),
+    };
+    let line = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| {
+            ["title", "summary"]
+                .iter()
+                .find_map(|k| v.get(k).and_then(|x| x.as_str()).map(str::to_string))
+        })
+        .or_else(|| {
+            text.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let mut out: String = line.chars().take(max).collect();
+    if line.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+fn collect_graph(
+    base: &PathBuf,
+    root: Option<&str>,
+) -> Result<GraphOut, Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
     let dag = ket_dag::Dag::new(&cas);
 
-    let nodes: Vec<(ket_cas::Cid, ket_dag::DagNode)> = if let Some(root_cid) = root {
+    let mut nodes: Vec<(ket_cas::Cid, ket_dag::DagNode)> = if let Some(root_cid) = root {
         dag.lineage(&ket_cas::Cid::from(root_cid))?
     } else {
-        // All DAG nodes
         let cids = cas.list()?;
         cids.iter()
             .filter_map(|cid| dag.get_node(cid).ok().map(|n| (cid.clone(), n)))
             .collect()
     };
+    // Deterministic order: by timestamp, then CID — so the same substrate
+    // always renders the same graph.
+    nodes.sort_by(|a, b| {
+        a.1.timestamp
+            .cmp(&b.1.timestamp)
+            .then(a.0.as_str().cmp(b.0.as_str()))
+    });
 
-    println!("digraph ket {{");
-    println!("  rankdir=BT;");
-    println!("  node [shape=box, style=filled, fontname=\"monospace\"];");
-    println!();
-
-    // Node kind -> color mapping
+    let mut out = GraphOut {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        soft_links: Vec::new(),
+    };
     for (cid, node) in &nodes {
-        let short = &cid.as_str()[..12];
-        let color = match node.kind {
-            ket_dag::NodeKind::Memory => "#E8F5E9",
-            ket_dag::NodeKind::Code => "#E3F2FD",
-            ket_dag::NodeKind::Reasoning => "#FFF3E0",
-            ket_dag::NodeKind::Task => "#F3E5F5",
-            ket_dag::NodeKind::Cdom => "#E0F7FA",
-            ket_dag::NodeKind::Score => "#FBE9E7",
-            ket_dag::NodeKind::Context => "#F1F8E9",
-        };
-        println!(
-            "  \"{}\" [label=\"{}\\n{}\\n{}\", fillcolor=\"{}\"];",
-            short, short, node.kind, node.agent, color
-        );
-    }
-
-    println!();
-
-    // Edges
-    for (cid, node) in &nodes {
-        let child_short = &cid.as_str()[..12];
-        for parent in &node.parents {
-            let parent_short = &parent.as_str()[..12];
-            println!("  \"{}\" -> \"{}\";", child_short, parent_short);
+        let label = cas
+            .get(&node.output_cid)
+            .map(|b| content_preview(&b, 48))
+            .unwrap_or_default();
+        out.nodes.push(GraphNode {
+            cid: cid.as_str().to_string(),
+            kind: node.kind.to_string(),
+            agent: node.agent.clone(),
+            timestamp: node.timestamp.clone(),
+            label,
+        });
+        for (i, (parent, kind)) in node.parent_links().enumerate() {
+            out.edges.push(GraphEdge {
+                child: cid.as_str().to_string(),
+                parent: parent.as_str().to_string(),
+                ordinal: i,
+                kind: kind.as_str().to_string(),
+            });
         }
     }
-
-    // Soft links (dashed)
     if let Ok(db) = open_db(base) {
         for (cid, _) in &nodes {
             if let Ok(links) = db.soft_links_from(cid.as_str()) {
                 for line in links.lines().skip(1) {
                     let parts: Vec<&str> = line.splitn(3, ',').collect();
                     if parts.len() >= 2 {
-                        let to_short = &parts[0][..12.min(parts[0].len())];
-                        let relation = if parts.len() >= 3 { parts[1] } else { "" };
-                        let from_short = &cid.as_str()[..12];
-                        println!(
-                            "  \"{}\" -> \"{}\" [style=dashed, label=\"{}\", color=\"gray\"];",
-                            from_short, to_short, relation
-                        );
+                        out.soft_links.push(GraphSoftLink {
+                            from: cid.as_str().to_string(),
+                            to: parts[0].to_string(),
+                            relation: parts[1].to_string(),
+                        });
                     }
                 }
             }
         }
     }
+    Ok(out)
+}
 
-    println!("}}");
+fn short(cid: &str) -> &str {
+    &cid[..12.min(cid.len())]
+}
+
+fn kind_color(kind: &str) -> &'static str {
+    match kind {
+        "memory" => "#E8F5E9",
+        "code" => "#E3F2FD",
+        "reasoning" => "#FFF3E0",
+        "task" => "#F3E5F5",
+        "cdom" => "#E0F7FA",
+        "score" => "#FBE9E7",
+        "context" => "#F1F8E9",
+        _ => "#FFFFFF",
+    }
+}
+
+fn render_dot(g: &GraphOut) -> String {
+    let mut s = String::new();
+    s.push_str("digraph ket {\n  rankdir=BT;\n");
+    s.push_str("  node [shape=box, style=filled, fontname=\"monospace\"];\n\n");
+    for n in &g.nodes {
+        let label = n.label.replace('\\', "\\\\").replace('"', "\\\"");
+        s.push_str(&format!(
+            "  \"{}\" [label=\"{}\\n{} · {}\\n{}\", fillcolor=\"{}\"];\n",
+            short(&n.cid),
+            short(&n.cid),
+            n.kind,
+            n.agent,
+            label,
+            kind_color(&n.kind)
+        ));
+    }
+    s.push('\n');
+    for e in &g.edges {
+        let style = match e.kind.as_str() {
+            "grounds" => ", style=bold",
+            "proposes" => ", style=dashed",
+            _ => "",
+        };
+        s.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
+            short(&e.child),
+            short(&e.parent),
+            e.kind,
+            style
+        ));
+    }
+    for l in &g.soft_links {
+        s.push_str(&format!(
+            "  \"{}\" -> \"{}\" [style=dashed, label=\"{}\", color=\"gray\"];\n",
+            short(&l.from),
+            short(&l.to),
+            l.relation
+        ));
+    }
+    s.push_str("}\n");
+    s
+}
+
+fn render_mermaid(g: &GraphOut) -> String {
+    let id = |cid: &str| format!("n{}", short(cid));
+    let mut s = String::from("graph BT\n");
+    for n in &g.nodes {
+        let label = n.label.replace('"', "#quot;");
+        s.push_str(&format!(
+            "  {}[\"{}<br/>{} · {}<br/>{}\"]\n",
+            id(&n.cid),
+            short(&n.cid),
+            n.kind,
+            n.agent,
+            label
+        ));
+        s.push_str(&format!("  class {} {}\n", id(&n.cid), n.kind));
+    }
+    for e in &g.edges {
+        let arrow = match e.kind.as_str() {
+            "grounds" => format!("==>|{}|", e.kind),
+            "proposes" => format!("-.->|{}|", e.kind),
+            _ => "-->".to_string(),
+        };
+        s.push_str(&format!("  {} {} {}\n", id(&e.child), arrow, id(&e.parent)));
+    }
+    for l in &g.soft_links {
+        s.push_str(&format!(
+            "  {} -. {} .-> {}\n",
+            id(&l.from),
+            l.relation,
+            id(&l.to)
+        ));
+    }
+    for kind in [
+        "memory",
+        "code",
+        "reasoning",
+        "task",
+        "cdom",
+        "score",
+        "context",
+    ] {
+        s.push_str(&format!(
+            "  classDef {} fill:{},stroke:#555,color:#111\n",
+            kind,
+            kind_color(kind)
+        ));
+    }
+    s
+}
+
+fn cmd_graph(
+    base: &PathBuf,
+    root: Option<&str>,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let g = collect_graph(base, root)?;
+    match format {
+        "dot" => print!("{}", render_dot(&g)),
+        "mermaid" => print!("{}", render_mermaid(&g)),
+        "json" => println!("{}", serde_json::to_string_pretty(&g)?),
+        other => return Err(format!("Unknown format: {other} (dot, mermaid, json)").into()),
+    }
     Ok(())
 }
 

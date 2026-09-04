@@ -391,6 +391,7 @@ name = "ket-cas"
 version = "0.3.0"
 dependencies = [
  "blake3",
+ "chrono",
  "serde",
  "thiserror",
 ]

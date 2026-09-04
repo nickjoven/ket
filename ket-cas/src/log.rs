@@ -1,9 +1,14 @@
 //! Append-only mutation log for ket operations.
+//!
+//! Lives in ket-cas so every writer — the CLI, the MCP server, catbus, any
+//! library consumer — appends to the same `.ket/log`. The log is the source
+//! of truth for *events*; a writer that bypasses it leaves silent history.
+//! `log_path_for(store)` derives the conventional location from a CAS root.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogEntry {
@@ -15,6 +20,15 @@ pub struct LogEntry {
 impl fmt::Display for LogEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} | {} | {}", self.timestamp, self.event, self.detail)
+    }
+}
+
+/// Conventional log location for a CAS store: the sibling of its `cas/` dir
+/// (`.ket/cas` → `.ket/log`). Falls back to `<root>/log` for a bare store.
+pub fn log_path_for(store: &super::Store) -> PathBuf {
+    match store.root().parent() {
+        Some(parent) => parent.join("log"),
+        None => store.root().join("log"),
     }
 }
 
@@ -47,6 +61,34 @@ pub fn append(log_path: &Path, event: &str, detail: &str) -> Result<(), std::io:
     writeln!(file, "{guard}{timestamp} | {event} | {detail}")?;
     file.sync_data()?;
     Ok(())
+}
+
+/// Read the last N log entries.
+pub fn read(log_path: &Path, n: usize) -> Result<Vec<LogEntry>, std::io::Error> {
+    if !log_path.exists() {
+        return Ok(vec![]);
+    }
+    let contents = fs::read_to_string(log_path)?;
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+
+    let start = lines.len().saturating_sub(n);
+    let entries = lines[start..]
+        .iter()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(3, " | ").collect();
+            if parts.len() == 3 {
+                Some(LogEntry {
+                    timestamp: parts[0].to_string(),
+                    event: parts[1].to_string(),
+                    detail: parts[2].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -83,32 +125,4 @@ mod tests {
 
         fs::remove_dir_all(&dir).unwrap();
     }
-}
-
-/// Read the last N log entries.
-pub fn read(log_path: &Path, n: usize) -> Result<Vec<LogEntry>, std::io::Error> {
-    if !log_path.exists() {
-        return Ok(vec![]);
-    }
-    let contents = fs::read_to_string(log_path)?;
-    let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
-
-    let start = lines.len().saturating_sub(n);
-    let entries = lines[start..]
-        .iter()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, " | ").collect();
-            if parts.len() == 3 {
-                Some(LogEntry {
-                    timestamp: parts[0].to_string(),
-                    event: parts[1].to_string(),
-                    detail: parts[2].to_string(),
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    Ok(entries)
 }

@@ -203,6 +203,124 @@ fn drift_exit_code_follows_drift_check_contract() {
     );
 }
 
+/// A typed edge created from the CLI must be sealed in the node, not just
+/// written to the projection. Before this test, `--edge-kind grounds` went
+/// to `dag_edges` only, so verify-projection diverged on the very next call
+/// — the bottom-left cell of DESIGN.md's partition.
+#[test]
+fn typed_edge_is_sealed_in_node_and_projection_agrees() {
+    let (ket_dir, _dir) = fresh_ket("typed-edge-sealed");
+    let a = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "measurement",
+            "--kind",
+            "memory",
+            "--agent",
+            "human",
+        ],
+    );
+    let a = a["node_cid"].as_str().unwrap();
+    let b = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "hypothesis",
+            "--kind",
+            "reasoning",
+            "--agent",
+            "claude",
+            "--parent",
+            a,
+            "--edge-kind",
+            "proposes",
+        ],
+    );
+    let b = b["node_cid"].as_str().unwrap();
+
+    // Sealed in CAS: the node itself carries the kind.
+    let node = ket_json(&ket_dir, &["dag", "show", b]);
+    assert_eq!(
+        node["parent_kinds"][0], "proposes",
+        "node bytes carry the edge kind"
+    );
+
+    // Rendered from the node: every format names the kind.
+    let (ok, mermaid, _) = ket(&ket_dir, &["graph", "--format", "mermaid"]);
+    assert!(ok);
+    assert!(
+        mermaid.contains("-.->|proposes|"),
+        "mermaid styles proposes: {mermaid}"
+    );
+    assert!(
+        mermaid.contains("<br/>reasoning · claude<br/>hypothesis"),
+        "label has kind, agent, preview: {mermaid}"
+    );
+    let (ok, dot, _) = ket(&ket_dir, &["dot"]);
+    assert!(ok, "'ket dot' alias still works");
+    assert!(
+        dot.contains("[label=\"proposes\", style=dashed]"),
+        "dot styles proposes: {dot}"
+    );
+    let graph = ket_json(&ket_dir, &["graph", "--format", "json"]);
+    assert_eq!(graph["edges"][0]["kind"], "proposes");
+    assert_eq!(graph["nodes"][0]["label"], "measurement");
+
+    if !has_dolt() {
+        return;
+    }
+    // Projected from the node: the SQL row agrees, so verify is clean —
+    // and stays clean after a rebuild (idempotent replay).
+    let (ok, out, _) = ket(&ket_dir, &["verify-projection"]);
+    assert!(
+        ok,
+        "verify-projection must be clean right after a typed create: {out}"
+    );
+    ket_json(&ket_dir, &["rebuild-projection"]);
+    let (ok, out, _) = ket(&ket_dir, &["verify-projection"]);
+    assert!(ok, "still clean after rebuild: {out}");
+}
+
+/// Merge nodes go through the same sealed path, with the same flag.
+#[test]
+fn merge_typed_edges_projection_agrees() {
+    let (ket_dir, _dir) = fresh_ket("merge-typed");
+    let mk = |content: &str| -> String {
+        ket_json(&ket_dir, &["dag", "create", content, "--kind", "memory"])["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (a, b) = (mk("A"), mk("B"));
+    let m = ket_json(
+        &ket_dir,
+        &[
+            "merge",
+            "synthesis",
+            "--parents",
+            &a,
+            &b,
+            "--edge-kind",
+            "grounds",
+        ],
+    );
+    let m = m["node_cid"].as_str().unwrap();
+    let node = ket_json(&ket_dir, &["dag", "show", m]);
+    assert_eq!(
+        node["parent_kinds"],
+        serde_json::json!(["grounds", "grounds"])
+    );
+
+    if !has_dolt() {
+        return;
+    }
+    let (ok, out, _) = ket(&ket_dir, &["verify-projection"]);
+    assert!(ok, "merge with typed edges must project cleanly: {out}");
+}
+
 // --- MCP JSON-RPC tests ---
 
 #[test]

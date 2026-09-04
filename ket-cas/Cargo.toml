@@ -10,3 +10,4 @@ repository.workspace = true
 blake3.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+chrono.workspace = true
