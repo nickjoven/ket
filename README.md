@@ -6,6 +6,10 @@ Every artifact (code, reasoning, scores) is BLAKE3-hashed, deduplicated, and sto
 
 Ket implements the substrate architecture described in [*A Content-Addressed Adaptive Knowledge Substrate for Distributed Epistemic Coordination*](https://github.com/nickjoven/jfk-dsa/blob/main/joven_knowledge_substrate.md#a-content-addressed-adaptive-knowledge-substrate-for-distributed-epistemic-coordination) (Joven, 2026) — a systems-layer approach to LLM reasoning failures that externalizes memory persistence, provenance, and traversal control into a deterministic, content-addressed infrastructure. The paper's core primitives (Merkle DAG nodes, depth scoring, tiered operations, delta chains, and fixed-point convergence) map directly to ket's crate architecture; see the paper's §9.2 for the full mapping.
 
+**New here?** Read [the five-second demo](docs/DEMO.md) — context, tokens,
+retrieval and generation, and what changes about each when the substrate is
+content-addressed. Or run it: `./docs/demo.sh`.
+
 ## Architecture
 
 ```
@@ -173,7 +177,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket status` — Health dashboard
 - `ket history` / `ket diff` — Dolt version history
 - `ket repair [--dry-run]` — Rebuild SQL from CAS
-- `ket track add/ls/rm` — File drift tracking
+- `ket track add/ls/rm` — File drift tracking (`ket drift` exits 1 on drift, so it gates: `ket drift && agent`)
 
 ### Global Flags
 - `--home <path>` — Override `.ket` directory (env: `KET_HOME`)

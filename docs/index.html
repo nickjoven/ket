@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ket + catbus · context, tokens, retrieval, generation</title>
+<meta name="description" content="What changes about context, tokens, retrieval and generation when the substrate under your models is content-addressed. Real output from docs/demo.sh.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1c1b18; --muted: #6b675e; --line: #e4e0d6;
+    --card: #ffffff; --code-bg: #15171c; --code-fg: #e6e4dd; --code-dim: #8a8f9a;
+    --accent: #b8860b; --accent-ink: #7a5a06;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e7e7ea; --muted: #a7acb8; --line: #262b35;
+      --card: #171a21; --code-bg: #0b0d11; --code-fg: #e8eaf0; --code-dim: #7d8391;
+      --accent: #f5b700; --accent-ink: #f5b700;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: light dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 56px 20px 96px; }
+  header { margin-bottom: 40px; }
+  .kicker { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); font-weight: 600; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.1; letter-spacing: -.02em; margin: 8px 0 14px; }
+  .lede { font-size: 19px; color: var(--muted); margin: 0; max-width: 60ch; }
+  h2 { font-size: 22px; margin: 48px 0 10px; letter-spacing: -.01em; }
+  h2 .n { color: var(--accent-ink); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  p { max-width: 68ch; }
+  a { color: var(--accent-ink); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0 8px; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-top: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; border-top: 0; }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  .wrap table { margin: 0; }
+  pre {
+    background: var(--code-bg); color: var(--code-fg); border-radius: 12px;
+    padding: 16px 18px; overflow-x: auto; margin: 14px 0 0;
+    font: 13px/1.55 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre .c { color: var(--code-dim); }
+  pre .p { color: var(--accent); }
+  .note { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--muted); margin: 18px 0; }
+  .four { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin: 24px 0 0; }
+  .four div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .four b { display: block; color: var(--accent-ink); margin-bottom: 4px; }
+  footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  code { font: 0.92em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: color-mix(in srgb, var(--fg) 7%, transparent); padding: 1px 5px; border-radius: 5px; }
+  pre code { background: none; padding: 0; font: inherit; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="kicker">ket + catbus</div>
+  <h1>Context, tokens, retrieval, generation.</h1>
+  <p class="lede">What changes about each of them when the substrate under your models is content-addressed. Real output, five seconds to reproduce.</p>
+</header>
+
+<p>You already know the four words. <b>Context</b> is what the model sees this turn. <b>Tokens</b> are what that costs. <b>Retrieval</b> is how something gets back into context later. <b>Generation</b> is what comes out. ket and catbus never touch generation itself. They sit underneath it and change one thing about each of the other three.</p>
+
+<div class="wrap"><table>
+  <tr><th></th><th>Usually</th><th>With ket + catbus</th></tr>
+  <tr><td>Context</td><td>a pile of text you re-paste</td><td>bytes with a 64-hex ID. Same bytes, same ID, forever.</td></tr>
+  <tr><td>Retrieval</td><td>"find something similar"</td><td>"give me exactly this ID" — and tell me if the file moved on since.</td></tr>
+  <tr><td>Generation</td><td>output, then it's gone</td><td>a node in a graph: who made it, from what, when. Lineage is a query.</td></tr>
+  <tr><td>Tokens</td><td>re-explain the project to every model</td><td>hand the next model a ~150-token receipt that points at everything by ID.</td></tr>
+</table></div>
+
+<p>Everything below is the output of <a href="https://github.com/nickjoven/ket/blob/main/docs/demo.sh"><code>docs/demo.sh</code></a>. Run it yourself:</p>
+<pre><code>cargo install --git https://github.com/nickjoven/ket ket-cli      <span class="c"># ket</span>
+cargo install --git https://github.com/nickjoven/catbus            <span class="c"># catbus</span>
+./docs/demo.sh            <span class="c"># packs ket-dag/src/lib.rs, ~32 KB of Rust</span></code></pre>
+<p class="note">Dolt is optional. Without it the drift gate and the SQL projection steps are skipped; everything else runs the same.</p>
+
+<h2><span class="n">1</span>Context is content-addressed</h2>
+<p>Store a file twice. You get the same ID twice, because the ID <em>is</em> the content (a BLAKE3 hash). <code>verify</code> re-hashes the stored bytes and compares. No oracle, no trust.</p>
+<pre><code><span class="p">$ ket put src/dag.rs</span>
+a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649
+<span class="p">$ ket put src/dag.rs</span>
+a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649
+<span class="p">$ ket verify a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649</span>
+OK: a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649</code></pre>
+<p>This is the whole trick. Once identity is a function of bytes, "which version did the model see?" stops being a question anyone has to remember the answer to.</p>
+
+<h2><span class="n">2</span>Generation leaves a trail</h2>
+<p>Two models work in sequence. Claude reviews, Codex fixes. Each output becomes a DAG node that names its agent and its parents, so the fix <em>points at</em> the review it came from.</p>
+<pre><code><span class="p">$ ket dag create "reviewed dag.rs: lineage() walks parents depth-first; no cycle guard" \
+    --kind reasoning --agent claude
+$ ket dag create "added visited-set to lineage(); cycle now terminates" \
+    --kind code --agent codex --parent &lt;that-cid&gt;</span>
+
+<span class="p">$ ket dag lineage 9bbee38be66a551caa60a9336b934d02d083f1db39fe4e3b40df728a2cdc31f2</span>
+9bbee38be66a  code  codex
+  7df1d9beabcc  reasoning  claude</code></pre>
+<p>And every mutation lands in one append-only log. Read the log, and you have the history. There is no other history.</p>
+<pre><code><span class="p">$ ket log</span>
+2026-09-04T18:28:20Z | init | /tmp/tmp.PuvByQ5O4Q/.ket
+2026-09-04T18:28:20Z | put | src/dag.rs -> a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649
+2026-09-04T18:28:20Z | put | src/dag.rs -> a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649
+2026-09-04T18:28:20Z | put | src/dag.rs -> a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649
+2026-09-04T18:28:20Z | dag:create | 7df1d9beabcce70b018637aff5527c7f253b8e64065bed88ea04bea1562a5ed8
+2026-09-04T18:28:20Z | dag:create | 9bbee38be66a551caa60a9336b934d02d083f1db39fe4e3b40df728a2cdc31f2</code></pre>
+
+<h2><span class="n">3</span>Retrieval is by hash, and it knows when it is stale</h2>
+<p>Retrieval here is not similarity search. You ask for an ID and get those bytes back, exactly. The interesting part is the other direction: a model reasoning about <code>src/dag.rs</code> should know whether the file it was told about is still the file on disk.</p>
+<pre><code><span class="p">$ ket get a8346e4bb9845321b0aa76528de7a3d72501333c735dea9cccfe5adfcbfc5649 | head -3</span>
+//! Merkle DAG layer built on top of ket-cas.
+//!
+//! Each DagNode is serialized to JSON, stored in CAS, and addressable by CID.
+
+<span class="p">$ ket track add src/dag.rs --agent claude</span>
+Tracking src/dag.rs (CID: a8346e4bb984)
+<span class="p">$ ket drift</span>
+No drift detected. 1 files OK.
+
+<span class="p">$ echo "// a later edit nobody told the model about" >> src/dag.rs
+$ ket drift</span>
+DRIFTED (1):
+  src/dag.rs expected:a8346e4bb984 actual:c22a348162cb
+
+0 OK, 1 drifted, 0 missing
+<span class="c">exit=1</span></code></pre>
+<p>The exit code is the point. <code>ket drift &amp;&amp; run-agent</code> is a gate: the agent does not start on stale context. Stale and fabricated context are both silent failures; this makes one of them loud.</p>
+
+<h2><span class="n">4</span>Tokens: hand the next model a receipt, not the transcript</h2>
+<p>This is catbus. Instead of re-sending the file, the review, and the fix to the next model, pack a <b>handoff</b>: a summary, the artifact IDs, an optional symbol index, and a parent link into the DAG above.</p>
+<pre><code><span class="p">$ catbus pack --title "dag.rs review" \
+    --summary "lineage() cycle fix landed (see parent). Next: test lineage_bounded with a cycle." \
+    --agent claude --file src/dag.rs --cdom --parent 9bbee38be66a…
+
+$ catbus handoff 134f356b7acce432a54be2e42463abad951a76986436a64b37216c7d4da01219</span>
+--- CATBUS HANDOFF ---
+node: 134f356b7acce432a54be2e42463abad951a76986436a64b37216c7d4da01219
+agent: claude
+timestamp: 2026-09-04T18:28:21.388672203+00:00
+parents:
+- 9bbee38be66a551caa60a9336b934d02d083f1db39fe4e3b40df728a2cdc31f2
+summary:
+lineage() cycle fix landed (see parent). Next: test lineage_bounded with a cycle.
+cdom: 7a9476ccae91e9b09c5f2cec4acb21e6b7843c66e9f7049dcc556b082a0a4fd3 (1 files, 61 symbols)
+artifacts:
+- dag.rs c22a348162cbf28cfbae5d906e71f7b546cb7b914a87f92f0b32cbb6b0e4debc
+rules:
+- do not recompute context already in this handoff
+- if something is missing, request an updated handoff packet</code></pre>
+<p>That block is the entire context transfer. Everything else is one <code>ket get</code> away, by ID, only if the next model actually needs it.</p>
+<pre><code><span class="p">$ catbus stats 134f356b7acce432a54be2e42463abad951a76986436a64b37216c7d4da01219</span>
+                              bytes  est. tokens
+handoff block                   619          155
+packet json                     554          139
+cdom bundle                   10801         2701
+  artifact dag.rs             31675         7919
+artifacts total               31675         7919
+handoff is 51.2x smaller than re-sending the artifacts (~4 bytes/token)</code></pre>
+<p>Token counts are an estimate (tokenizers differ). The ratio is what matters: the receipt costs about 150 tokens; the file it stands for costs about 8,000. The symbol index is a middle tier, roughly a third of the file, for a model that needs to know <em>what is in there</em> without reading it.</p>
+
+<h2><span class="n">5</span>The second model picks up exactly there</h2>
+<p><code>guard</code> validates the packet, prints the block, then runs the agent. <code>unpack</code> materialises the artifacts byte-for-byte. The second model does its work and packs its own receipt with the first as parent.</p>
+<pre><code><span class="p">$ catbus guard --cid 134f356b7acc… -- your-agent-command</span>
+valid: 134f356b7acce432a54be2e42463abad951a76986436a64b37216c7d4da01219
+--- CATBUS HANDOFF ---
+…
+
+<span class="p">$ catbus unpack 134f356b7acc… --out-dir ./handoff
+$ cmp src/dag.rs handoff/dag.rs &amp;&amp; echo 'unpacked bytes == packed bytes'</span>
+unpacked bytes == packed bytes
+
+<span class="p">$ catbus pack --title "dag.rs tests" \
+    --summary "lineage_bounded cycle test added; all green." \
+    --agent codex --file src/dag.rs --cdom --parent 134f356b7acc…
+
+$ catbus diff 134f356b7acc… 2f695b436e4f…</span>
+Summary changed: true
+CDOM changed: true
+Title: Some("dag.rs review") -> Some("dag.rs tests")
+Changed artifacts:
+  * dag.rs</code></pre>
+<p>Now walk the lineage from the newest receipt. It crosses both tools and both models without either of them having been told about the other:</p>
+<pre><code><span class="p">$ ket dag lineage 2f695b436e4ff4683133a1cb6e66236edc19a5e771a47a83223feeeeca7a0ac0</span>
+2f695b436e4f  context  codex
+  134f356b7acc  context  claude
+    9bbee38be66a  code  codex
+      7df1d9beabcc  reasoning  claude</code></pre>
+
+<h2><span class="n">6</span>SQL is a projection, not a second truth</h2>
+<p>catbus wrote blobs only; it never touched the SQL side. <code>repair</code> replays the sealed nodes into Dolt, and <code>verify-projection</code> re-derives every edge and diffs it against the table. Throw the database away and this rebuilds it bit-identically. That is the design test the whole substrate is held to (<a href="https://github.com/nickjoven/ket/blob/main/DESIGN.md">DESIGN.md</a>).</p>
+<pre><code><span class="p">$ ket repair</span>
+  synced: 69206df074c2  context  claude
+  synced: 69ceca8ae83a  context  codex
+
+Repair: 2 synced, 2 already in sync, 0 errors
+<span class="p">$ ket verify-projection</span>
+verify-projection: clean (projection agrees with substrate)</code></pre>
+
+<h2>What you just saw, in the four words</h2>
+<div class="four">
+  <div><b>Context</b> became bytes with an identity you can verify, instead of text you re-paste.</div>
+  <div><b>Retrieval</b> became exact, with a gate that refuses stale input.</div>
+  <div><b>Generation</b> became a graph you can walk backwards, across models.</div>
+  <div><b>Tokens</b> dropped from the size of the project to the size of a receipt.</div>
+</div>
+
+<footer>
+  <a href="https://github.com/nickjoven/ket">ket</a> · <a href="https://github.com/nickjoven/catbus">catbus</a> · the README-flavoured version of this page is <a href="https://github.com/nickjoven/ket/blob/main/docs/DEMO.md">docs/DEMO.md</a>. MIT.
+</footer>
+</main>
+</body>
+</html>
