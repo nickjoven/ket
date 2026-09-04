@@ -8,7 +8,11 @@ Ket implements the substrate architecture described in [*A Content-Addressed Ada
 
 **New here?** Read [the five-second demo](docs/DEMO.md) — context, tokens,
 retrieval and generation, and what changes about each when the substrate is
-content-addressed. Or run it: `./docs/demo.sh`.
+content-addressed. Or run it: `./docs/demo.sh`. Two more domains live in
+[`docs/demos/`](docs/demos/): research claims with typed edges and
+supersession, and a parallel multi-agent review that fans out and back in
+with nothing to lock. Each ends with a graph (`ket graph --format mermaid`).
+The same pages are published at <https://nickjoven.github.io/ket/>.
 
 ## Architecture
 
@@ -140,13 +144,13 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket gc [--delete]` — Garbage collect orphan blobs
 
 ### DAG & Lineage
-- `ket dag create <content>` — Create node (`--kind`, `--parent`, `--agent`)
+- `ket dag create <content>` — Create node (`--kind`, `--parent`, `--agent`, `--edge-kind grounds|derives|proposes`)
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag drift <path> <cid>` — Detect file drift
 - `ket link create <from> <to> <rel>` — Soft links (supersedes, contradicts, etc.)
-- `ket merge <content> --parents <cid>...` — Multi-parent merge node
-- `ket dot [--root <cid>]` — Graphviz DOT visualization
+- `ket merge <content> --parents <cid>...` — Multi-parent merge node (`--edge-kind`)
+- `ket graph [--root <cid>] [--format dot|mermaid|json]` — Render the DAG (`ket dot` is an alias). Edges styled by epistemic kind; labels carry a content preview.
 - `ket export <cid>` / `ket import <file>` — Portable DAG bundles
 
 ### Tasks & Agents

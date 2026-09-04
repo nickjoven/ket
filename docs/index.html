@@ -50,6 +50,11 @@
   .four { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin: 24px 0 0; }
   .four div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .four b { display: block; color: var(--accent-ink); margin-bottom: 4px; }
+  .graph { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 14px 0 0; overflow-x: auto; }
+  .graph pre.mermaid { background: none; color: var(--fg); padding: 0; margin: 0; font-size: 12px; }
+  .graph svg { max-width: 100%; height: auto; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 56px 0; }
+  .demo-intro { color: var(--muted); }
   footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
   code { font: 0.92em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: color-mix(in srgb, var(--fg) 7%, transparent); padding: 1px 5px; border-radius: 5px; }
   pre code { background: none; padding: 0; font: inherit; }
@@ -199,17 +204,141 @@ Repair: 2 synced, 2 already in sync, 0 errors
 <span class="p">$ ket verify-projection</span>
 verify-projection: clean (projection agrees with substrate)</code></pre>
 
+<h2><span class="n">7</span>The whole thing as a graph</h2>
+<p><code>ket graph --format mermaid</code> renders the DAG in a form GitHub draws natively. Bottom to top: Claude's review, Codex's fix, the first handoff, the second. Every arrow is a sealed parent link; the labels come from the content itself. <code>--format dot</code> gives Graphviz, <code>--format json</code> gives nodes, edges and soft links for anything else.</p>
+<div class="graph"><pre class="mermaid">
+graph BT
+  n41a4c1ae426f["41a4c1ae426f&lt;br/&gt;reasoning · claude&lt;br/&gt;reviewed dag.rs: lineage() walks parents depth-f…"]
+  class n41a4c1ae426f reasoning
+  ned7288be9bc0["ed7288be9bc0&lt;br/&gt;code · codex&lt;br/&gt;added visited-set to lineage(); cycle now termin…"]
+  class ned7288be9bc0 code
+  n217e5d9636a6["217e5d9636a6&lt;br/&gt;context · claude&lt;br/&gt;dag.rs review"]
+  class n217e5d9636a6 context
+  n574bf749b026["574bf749b026&lt;br/&gt;context · codex&lt;br/&gt;dag.rs tests"]
+  class n574bf749b026 context
+  ned7288be9bc0 --&gt; n41a4c1ae426f
+  n217e5d9636a6 --&gt; ned7288be9bc0
+  n574bf749b026 --&gt; n217e5d9636a6
+  classDef memory fill:#E8F5E9,stroke:#555,color:#111
+  classDef code fill:#E3F2FD,stroke:#555,color:#111
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+  classDef context fill:#F1F8E9,stroke:#555,color:#111
+</pre></div>
+
+<hr>
+
+<h2>Domain demos</h2>
+<p class="demo-intro">The walkthrough above is one domain: a code handoff. Two more, each a single script in <a href="https://github.com/nickjoven/ket/tree/main/docs/demos"><code>docs/demos/</code></a>, show what the same substrate does when the artifacts are claims instead of files, and when the agents run at once instead of in turn.</p>
+
+<h2>Research claims: typed edges and supersession</h2>
+<p><a href="https://github.com/nickjoven/ket/blob/main/docs/demos/research-claims.sh"><code>research-claims.sh</code></a>. A measurement is an irreducible input. One agent <em>derives</em> from it (the edge is <code>grounds</code>); another merely <em>proposes</em> a hypothesis. A synthesis merges both. Then the hypothesis is retracted, and the retraction is a new node that points at the old one, with a <code>supersedes</code> link. The old claim is still there, byte for byte.</p>
+<pre><code><span class="p">$ ket dag create "derived: g = 4π²L/T² = 9.81 m/s²" \
+    --kind reasoning --agent codex --parent &lt;measurement&gt; --edge-kind grounds
+$ ket dag create "hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob" \
+    --kind reasoning --agent claude --parent &lt;measurement&gt; --edge-kind proposes
+$ ket merge "g = 9.81 ± 0.02; drag hypothesis untested" --parents &lt;derived&gt; &lt;hypothesis&gt;
+$ ket dag create "retracted: shortfall was a timing offset (stopwatch latency), not drag" \
+    --kind reasoning --agent claude --parent &lt;hypothesis&gt;
+$ ket link create &lt;retraction&gt; &lt;hypothesis&gt; supersedes</span>
+Linked 86130e766636 --[supersedes]--> e7e13448a19b
+
+<span class="p">$ ket get &lt;hypothesis-output-cid&gt;</span>
+hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob</code></pre>
+<p>Resolution is an event in the log, never an overwrite. Bold edges are <code>grounds</code>, dashed are <code>proposes</code>, plain are <code>derives</code>, and the grey dashed edge is the soft link.</p>
+<div class="graph"><pre class="mermaid">
+graph BT
+  nf7011fbb6dc8["f7011fbb6dc8&lt;br/&gt;memory · human&lt;br/&gt;pendulum: T = 2.006 s at L = 1.000 m (lab B, 202…"]
+  class nf7011fbb6dc8 memory
+  n3458ec19af64["3458ec19af64&lt;br/&gt;reasoning · codex&lt;br/&gt;derived: g = 4π²L/T² = 9.81 m/s²"]
+  class n3458ec19af64 reasoning
+  nb46426f822eb["b46426f822eb&lt;br/&gt;reasoning · claude&lt;br/&gt;hypothesis: the 0.3% shortfall vs. 9.84 is air d…"]
+  class nb46426f822eb reasoning
+  n64b22595a6dc["64b22595a6dc&lt;br/&gt;reasoning · human&lt;br/&gt;g = 9.81 ± 0.02; drag hypothesis untested"]
+  class n64b22595a6dc reasoning
+  n54f2f28c9f53["54f2f28c9f53&lt;br/&gt;reasoning · claude&lt;br/&gt;retracted: shortfall was a timing offset (stopwa…"]
+  class n54f2f28c9f53 reasoning
+  n3458ec19af64 ==&gt;|grounds| nf7011fbb6dc8
+  nb46426f822eb -.-&gt;|proposes| nf7011fbb6dc8
+  n64b22595a6dc --&gt; n3458ec19af64
+  n64b22595a6dc --&gt; nb46426f822eb
+  n54f2f28c9f53 --&gt; nb46426f822eb
+  n54f2f28c9f53 -. supersedes .-&gt; nb46426f822eb
+  classDef memory fill:#E8F5E9,stroke:#555,color:#111
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+</pre></div>
+<p>Why it matters: the edge kind is part of the node's bytes, so it is part of its CID. "This was proposed, not derived" cannot drift out of sync with the graph, because it <em>is</em> the graph.</p>
+
+<h2>Parallel review: fan out, fan in, nothing to lock</h2>
+<p><a href="https://github.com/nickjoven/ket/blob/main/docs/demos/parallel-review.sh"><code>parallel-review.sh</code></a>. One handoff. Three reviewers start from it <b>at the same time</b>, as separate processes writing to the same store. Then a merge node fans them back in and the orchestrator hands off again.</p>
+<pre><code><span class="p">$ catbus pack --title "review cas.rs" --summary "Review src/cas.rs for security, performance, and style." \
+    --agent orchestrator --file src/cas.rs --cdom</span>
+<span class="c"># three background processes, each: ket dag create &lt;finding&gt; --parent &lt;handoff&gt;</span>
+security -> d877f2f5b00b…
+perf     -> 19ccfd0c37fd…
+style    -> 67871dea413e…
+
+security output_cid: cf7f3adbfd0f…
+style    output_cid: cf7f3adbfd0f…
+same bytes, same CID: stored once.
+
+<span class="p">$ ket merge "3 reviews in; 2 agree on traversal safety; perf: dedup-before-write confirmed. Ship." \
+    --parents &lt;security&gt; &lt;perf&gt; &lt;style&gt; --agent orchestrator
+$ ket log</span>
+2026-09-04T18:56:13Z | init | /tmp/tmp.mSxllOR7tN/.ket
+2026-09-04T18:56:13Z | dag:create | 38672623703f… (catbus pack)
+2026-09-04T18:56:13Z | dag:create | d877f2f5b00b…
+2026-09-04T18:56:13Z | dag:create | 19ccfd0c37fd…
+2026-09-04T18:56:13Z | dag:create | 67871dea413e…
+2026-09-04T18:56:13Z | merge | a49c3fe816c9… (3 parents)
+2026-09-04T18:56:13Z | dag:create | b989996dfa36… (catbus pack)
+<span class="p">$ ket verify-projection</span>
+verify-projection: clean (projection agrees with substrate)</code></pre>
+<p>There is no lock and no merge conflict, because nothing is ever overwritten: every write is a new blob named by its own hash. Two reviewers who reach the identical finding produce one blob, and the graph shows two nodes pointing at it. The log is append-only with a trailing-newline guard, so interleaved writers land one line each.</p>
+<div class="graph"><pre class="mermaid">
+graph BT
+  n38672623703f["38672623703f&lt;br/&gt;context · orchestrator&lt;br/&gt;review cas.rs"]
+  class n38672623703f context
+  nd877f2f5b00b["d877f2f5b00b&lt;br/&gt;reasoning · security&lt;br/&gt;no path traversal: blob path is root.join(hex); …"]
+  class nd877f2f5b00b reasoning
+  n67871dea413e["67871dea413e&lt;br/&gt;reasoning · style&lt;br/&gt;no path traversal: blob path is root.join(hex); …"]
+  class n67871dea413e reasoning
+  n19ccfd0c37fd["19ccfd0c37fd&lt;br/&gt;reasoning · perf&lt;br/&gt;put() hashes then writes; dedup check happens be…"]
+  class n19ccfd0c37fd reasoning
+  na49c3fe816c9["a49c3fe816c9&lt;br/&gt;reasoning · orchestrator&lt;br/&gt;3 reviews in; 2 agree on traversal safety; perf:…"]
+  class na49c3fe816c9 reasoning
+  nb989996dfa36["b989996dfa36&lt;br/&gt;context · orchestrator&lt;br/&gt;review complete"]
+  class nb989996dfa36 context
+  nd877f2f5b00b --&gt; n38672623703f
+  n67871dea413e --&gt; n38672623703f
+  n19ccfd0c37fd --&gt; n38672623703f
+  na49c3fe816c9 --&gt; nd877f2f5b00b
+  na49c3fe816c9 --&gt; n19ccfd0c37fd
+  na49c3fe816c9 --&gt; n67871dea413e
+  nb989996dfa36 --&gt; na49c3fe816c9
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+  classDef context fill:#F1F8E9,stroke:#555,color:#111
+</pre></div>
+<p class="note"><b>This demo is also a test.</b> The first time it ran, two reviewers writing the same bytes at the same instant collided on a shared temp file inside the store and one of them failed. That was a real race in ket-cas, fixed the same day, with a concurrent test to keep it fixed. A demo that exercises the substrate the way agents actually use it is worth more than one that only shows the happy path.</p>
+
+<hr>
+
 <h2>What you just saw, in the four words</h2>
 <div class="four">
   <div><b>Context</b> became bytes with an identity you can verify, instead of text you re-paste.</div>
   <div><b>Retrieval</b> became exact, with a gate that refuses stale input.</div>
   <div><b>Generation</b> became a graph you can walk backwards, across models.</div>
   <div><b>Tokens</b> dropped from the size of the project to the size of a receipt.</div>
+  <div><b>Agents in parallel</b> write to one store with no locks and no conflicts, and the graph shows who did what.</div>
 </div>
 
 <footer>
   <a href="https://github.com/nickjoven/ket">ket</a> · <a href="https://github.com/nickjoven/catbus">catbus</a> · the README-flavoured version of this page is <a href="https://github.com/nickjoven/ket/blob/main/docs/DEMO.md">docs/DEMO.md</a>. MIT.
 </footer>
 </main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral", securityLevel: "loose" });
+</script>
 </body>
 </html>

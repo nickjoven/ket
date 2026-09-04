@@ -212,6 +212,167 @@ $ ket verify-projection
 verify-projection: clean (projection agrees with substrate)
 ```
 
+## 7. The whole thing as a graph
+
+`ket graph --format mermaid` renders the DAG in a form GitHub draws natively.
+Bottom to top: Claude's review, Codex's fix, the first handoff, the second.
+Every arrow is a sealed parent link; the labels come from the content itself.
+
+```mermaid
+graph BT
+  n41a4c1ae426f["41a4c1ae426f<br/>reasoning · claude<br/>reviewed dag.rs: lineage() walks parents depth-f…"]
+  class n41a4c1ae426f reasoning
+  ned7288be9bc0["ed7288be9bc0<br/>code · codex<br/>added visited-set to lineage(); cycle now termin…"]
+  class ned7288be9bc0 code
+  n217e5d9636a6["217e5d9636a6<br/>context · claude<br/>dag.rs review"]
+  class n217e5d9636a6 context
+  n574bf749b026["574bf749b026<br/>context · codex<br/>dag.rs tests"]
+  class n574bf749b026 context
+  ned7288be9bc0 --> n41a4c1ae426f
+  n217e5d9636a6 --> ned7288be9bc0
+  n574bf749b026 --> n217e5d9636a6
+  classDef memory fill:#E8F5E9,stroke:#555,color:#111
+  classDef code fill:#E3F2FD,stroke:#555,color:#111
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+  classDef context fill:#F1F8E9,stroke:#555,color:#111
+```
+
+`--format dot` gives Graphviz, `--format json` gives `{nodes, edges, soft_links}`
+for anything else.
+
+---
+
+## Domain demos
+
+The walkthrough above is one domain: a code handoff. Two more, each a single
+script in [`docs/demos/`](demos/), show what the same substrate does when the
+artifacts are claims instead of files, and when the agents run at once instead
+of in turn.
+
+### Research claims: typed edges and supersession
+
+[`demos/research-claims.sh`](demos/research-claims.sh). A measurement is an
+irreducible input. One agent *derives* from it (the edge is `grounds`); another
+merely *proposes* a hypothesis. A synthesis merges both. Then the hypothesis is
+retracted, and the retraction is a new node that points at the old one, with a
+`supersedes` link. The old claim is still there, byte for byte:
+
+```
+$ ket dag create "derived: g = 4π²L/T² = 9.81 m/s²" \
+    --kind reasoning --agent codex --parent <measurement> --edge-kind grounds
+$ ket dag create "hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob" \
+    --kind reasoning --agent claude --parent <measurement> --edge-kind proposes
+$ ket merge "g = 9.81 ± 0.02; drag hypothesis untested" --parents <derived> <hypothesis>
+$ ket dag create "retracted: shortfall was a timing offset (stopwatch latency), not drag" \
+    --kind reasoning --agent claude --parent <hypothesis>
+$ ket link create <retraction> <hypothesis> supersedes
+Linked 86130e766636 --[supersedes]--> e7e13448a19b
+
+$ ket get <hypothesis-output-cid>
+hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob
+```
+
+Resolution is an event in the log, never an overwrite. Bold edges are `grounds`,
+dashed are `proposes`, plain are `derives`, and the grey dashed edge is the
+soft link:
+
+```mermaid
+graph BT
+  nf7011fbb6dc8["f7011fbb6dc8<br/>memory · human<br/>pendulum: T = 2.006 s at L = 1.000 m (lab B, 202…"]
+  class nf7011fbb6dc8 memory
+  n3458ec19af64["3458ec19af64<br/>reasoning · codex<br/>derived: g = 4π²L/T² = 9.81 m/s²"]
+  class n3458ec19af64 reasoning
+  nb46426f822eb["b46426f822eb<br/>reasoning · claude<br/>hypothesis: the 0.3% shortfall vs. 9.84 is air d…"]
+  class nb46426f822eb reasoning
+  n64b22595a6dc["64b22595a6dc<br/>reasoning · human<br/>g = 9.81 ± 0.02; drag hypothesis untested"]
+  class n64b22595a6dc reasoning
+  n54f2f28c9f53["54f2f28c9f53<br/>reasoning · claude<br/>retracted: shortfall was a timing offset (stopwa…"]
+  class n54f2f28c9f53 reasoning
+  n3458ec19af64 ==>|grounds| nf7011fbb6dc8
+  nb46426f822eb -.->|proposes| nf7011fbb6dc8
+  n64b22595a6dc --> n3458ec19af64
+  n64b22595a6dc --> nb46426f822eb
+  n54f2f28c9f53 --> nb46426f822eb
+  n54f2f28c9f53 -. supersedes .-> nb46426f822eb
+  classDef memory fill:#E8F5E9,stroke:#555,color:#111
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+```
+
+Why it matters: the edge kind is part of the node's bytes, so it is part of its
+CID. "This was proposed, not derived" cannot drift out of sync with the graph,
+because it *is* the graph.
+
+### Parallel review: fan out, fan in, nothing to lock
+
+[`demos/parallel-review.sh`](demos/parallel-review.sh). One handoff. Three
+reviewers start from it **at the same time**, as separate processes writing to
+the same store. Then a merge node fans them back in and the orchestrator hands
+off again.
+
+```
+$ catbus pack --title "review cas.rs" --summary "Review src/cas.rs for security, performance, and style." \
+    --agent orchestrator --file src/cas.rs --cdom
+# three background processes, each: ket dag create <finding> --parent <handoff>
+security -> d877f2f5b00b…
+perf     -> 19ccfd0c37fd…
+style    -> 67871dea413e…
+
+security output_cid: cf7f3adbfd0f…
+style    output_cid: cf7f3adbfd0f…
+same bytes, same CID: stored once.
+
+$ ket merge "3 reviews in; 2 agree on traversal safety; perf: dedup-before-write confirmed. Ship." \
+    --parents <security> <perf> <style> --agent orchestrator
+$ ket log
+2026-09-04T18:56:13Z | init | /tmp/tmp.mSxllOR7tN/.ket
+2026-09-04T18:56:13Z | dag:create | 38672623703f… (catbus pack)
+2026-09-04T18:56:13Z | dag:create | d877f2f5b00b…
+2026-09-04T18:56:13Z | dag:create | 19ccfd0c37fd…
+2026-09-04T18:56:13Z | dag:create | 67871dea413e…
+2026-09-04T18:56:13Z | merge | a49c3fe816c9… (3 parents)
+2026-09-04T18:56:13Z | dag:create | b989996dfa36… (catbus pack)
+$ ket verify-projection
+verify-projection: clean (projection agrees with substrate)
+```
+
+There is no lock and no merge conflict, because nothing is ever overwritten:
+every write is a new blob named by its own hash. Two reviewers who reach the
+identical finding produce one blob, and the graph shows two nodes pointing at
+it. The log is append-only with a trailing-newline guard, so interleaved
+writers land one line each.
+
+```mermaid
+graph BT
+  n38672623703f["38672623703f<br/>context · orchestrator<br/>review cas.rs"]
+  class n38672623703f context
+  nd877f2f5b00b["d877f2f5b00b<br/>reasoning · security<br/>no path traversal: blob path is root.join(hex); …"]
+  class nd877f2f5b00b reasoning
+  n67871dea413e["67871dea413e<br/>reasoning · style<br/>no path traversal: blob path is root.join(hex); …"]
+  class n67871dea413e reasoning
+  n19ccfd0c37fd["19ccfd0c37fd<br/>reasoning · perf<br/>put() hashes then writes; dedup check happens be…"]
+  class n19ccfd0c37fd reasoning
+  na49c3fe816c9["a49c3fe816c9<br/>reasoning · orchestrator<br/>3 reviews in; 2 agree on traversal safety; perf:…"]
+  class na49c3fe816c9 reasoning
+  nb989996dfa36["b989996dfa36<br/>context · orchestrator<br/>review complete"]
+  class nb989996dfa36 context
+  nd877f2f5b00b --> n38672623703f
+  n67871dea413e --> n38672623703f
+  n19ccfd0c37fd --> n38672623703f
+  na49c3fe816c9 --> nd877f2f5b00b
+  na49c3fe816c9 --> n19ccfd0c37fd
+  na49c3fe816c9 --> n67871dea413e
+  nb989996dfa36 --> na49c3fe816c9
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+  classDef context fill:#F1F8E9,stroke:#555,color:#111
+```
+
+**This demo is also a test.** The first time it ran, two reviewers writing the
+same bytes at the same instant collided on a shared temp file inside the store
+and one of them failed. That was a real race in `ket-cas`, fixed the same day,
+with a concurrent test to keep it fixed. A demo that exercises the substrate
+the way agents actually use it is worth more than one that only shows the
+happy path.
+
 ---
 
 ## What you just saw, in the four words
@@ -220,6 +381,7 @@ verify-projection: clean (projection agrees with substrate)
 - **Retrieval** became exact, with a gate that refuses stale input.
 - **Generation** became a graph you can walk backwards, across models.
 - **Tokens** dropped from the size of the project to the size of a receipt.
+- **Agents in parallel** write to one store with no locks and no conflicts, and the graph shows who did what.
 
 Next steps: [README](../README.md) for the full command surface and the MCP
 tools that expose all of this to Claude directly. [catbus](https://github.com/nickjoven/catbus)
