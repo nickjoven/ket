@@ -582,10 +582,7 @@ impl DoltDb {
     /// the rebuild is the *audit's heal partner*, not the high-throughput path.
     /// Closes the second DESIGN.md L3 target (`verify` had no `rebuild`, so a
     /// surfaced divergence had no mechanical fix).
-    pub fn rebuild_projection(
-        &self,
-        cas: &ket_cas::Store,
-    ) -> Result<RebuildReport, SqlError> {
+    pub fn rebuild_projection(&self, cas: &ket_cas::Store) -> Result<RebuildReport, SqlError> {
         let expected = expected_edges_from_cas(cas)?;
 
         // One transaction: wipe + replay. exec_batch wraps in BEGIN/COMMIT, so
@@ -1129,7 +1126,10 @@ mod tests {
         let out = cas.put(b"derived-output").unwrap();
         let child = DagNode::new_typed(
             NodeKind::Reasoning,
-            vec![(a.clone(), EdgeKind::Grounds), (b.clone(), EdgeKind::Derives)],
+            vec![
+                (a.clone(), EdgeKind::Grounds),
+                (b.clone(), EdgeKind::Derives),
+            ],
             out,
             "claude",
         );
