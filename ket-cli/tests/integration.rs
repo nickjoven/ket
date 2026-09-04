@@ -170,6 +170,39 @@ fn dag_drift_detection() {
     assert!(drift["drifted"].as_bool().unwrap());
 }
 
+#[test]
+fn drift_exit_code_follows_drift_check_contract() {
+    // `ket drift` is the shell gate agents run before reasoning on tracked
+    // context (`ket drift && agent ...`), so its exit status must carry the
+    // verdict: 0 clean, 1 drifted or missing. Tracking needs Dolt.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, dir) = fresh_ket("drift-exit-code");
+    let test_file = dir.path().join("tracked.txt");
+    std::fs::write(&test_file, b"original").unwrap();
+    let path = test_file.to_str().unwrap();
+
+    let (ok, _, err) = ket(&ket_dir, &["track", "add", path, "--agent", "test"]);
+    assert!(ok, "track add failed: {err}");
+
+    let (ok, out, _) = ket(&ket_dir, &["drift"]);
+    assert!(ok, "clean tracked file must exit 0: {out}");
+
+    std::fs::write(&test_file, b"modified").unwrap();
+    let (ok, out, _) = ket(&ket_dir, &["drift"]);
+    assert!(!ok, "drifted tracked file must exit non-zero: {out}");
+    assert!(out.contains("DRIFTED"), "report names the drift: {out}");
+
+    std::fs::remove_file(&test_file).unwrap();
+    let (ok, out, _) = ket(&ket_dir, &["drift"]);
+    assert!(!ok, "missing tracked file must exit non-zero: {out}");
+    assert!(
+        out.contains("MISSING"),
+        "report names the missing file: {out}"
+    );
+}
+
 // --- MCP JSON-RPC tests ---
 
 #[test]
@@ -632,8 +665,18 @@ fn verify_projection_after_repair_is_clean() {
     // Seed the substrate with a small mixed-kind DAG. `repair` gives us a
     // populated projection to audit against; without it, verify would be a
     // trivial "empty vs empty" tautology.
-    ket_json(&ket_dir, &["dag", "create", "root A", "--kind", "memory", "--agent", "human"]);
-    ket_json(&ket_dir, &["dag", "create", "root B", "--kind", "memory", "--agent", "human"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "root A", "--kind", "memory", "--agent", "human",
+        ],
+    );
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "root B", "--kind", "memory", "--agent", "human",
+        ],
+    );
 
     if !has_dolt() {
         return;
@@ -662,7 +705,12 @@ fn verify_projection_after_repair_is_clean() {
 fn rebuild_projection_heals_and_is_idempotent() {
     let (ket_dir, _dir) = fresh_ket("rebuild-projection-heals");
 
-    ket_json(&ket_dir, &["dag", "create", "root", "--kind", "memory", "--agent", "human"]);
+    ket_json(
+        &ket_dir,
+        &[
+            "dag", "create", "root", "--kind", "memory", "--agent", "human",
+        ],
+    );
 
     if !has_dolt() {
         return;

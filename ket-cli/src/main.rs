@@ -431,8 +431,14 @@ Re-hash all tracked files and compare against stored CIDs.
 Reports: OK (unchanged), DRIFTED (content changed), MISSING (file deleted).
 Agents should run this before reasoning on context to detect stale state.
 
-Example:
-  ket drift")]
+Exit codes follow the drift-check contract (same as verify-projection):
+  0  clean — every tracked file matches its stored CID
+  1  drift — at least one file drifted or is missing
+  2  environment error — no .ket / no Dolt / cannot read
+
+Examples:
+  ket drift                Human-readable report
+  ket drift && run-agent   Gate an agent on fresh context")]
     Drift,
 
     /// Garbage collect unreferenced CAS blobs
@@ -2105,8 +2111,20 @@ fn cmd_track(
 }
 
 fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let db = open_db(base)?;
-    let tracked = db.list_context_files()?;
+    let db = match open_db(base) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let tracked = match db.list_context_files() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(2);
+        }
+    };
 
     let mut drifted = Vec::new();
     let mut ok = Vec::new();
@@ -2180,6 +2198,12 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
                 missing.len()
             );
         }
+    }
+
+    // Drift-check contract: a stale tracked file is exit 1, so a shell gate
+    // (`ket drift && agent ...`) refuses to reason on stale context.
+    if !drifted.is_empty() || !missing.is_empty() {
+        std::process::exit(1);
     }
 
     Ok(())
