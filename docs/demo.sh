@@ -78,4 +78,7 @@ if command -v dolt >/dev/null 2>&1; then
 fi
 run ket status
 
+say "7. The whole thing as a graph. Paste this into a \`\`\`mermaid fence and GitHub draws it."
+run ket graph --format mermaid
+
 say "Done. Everything above lives in $KET_HOME: blobs by hash, one append-only log."

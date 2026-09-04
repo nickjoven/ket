@@ -31,6 +31,15 @@ impl Cid {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// 64 lowercase hex chars — the only shape a BLAKE3-256 CID can have.
+    pub fn is_well_formed(&self) -> bool {
+        self.0.len() == 64
+            && self
+                .0
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    }
 }
 
 impl fmt::Display for Cid {
@@ -94,6 +103,13 @@ impl Store {
     }
 
     /// Store content, return its CID. Deduplicates: skips write if CID exists.
+    ///
+    /// Safe under concurrent writers — processes or threads — putting the
+    /// same bytes at once: each writer uses its own temp file, and the rename
+    /// is atomic, so the last one to land simply replaces identical bytes.
+    /// (Before this, the temp name was derived from the CID alone, so two
+    /// concurrent puts of the same content raced on one file and one of
+    /// them failed with ENOENT — found by the parallel-review demo.)
     pub fn put(&self, data: &[u8]) -> Result<Cid, CasError> {
         let cid = hash_bytes(data);
         let target = self.blob_path(&cid);
@@ -102,10 +118,25 @@ impl Store {
             return Ok(cid); // dedup
         }
 
-        // Atomic write: write to tmp, then rename
-        let tmp = self.root.join(format!(".tmp.{}", &cid.0[..16]));
+        // Atomic write: write to a per-writer tmp, then rename onto the CID.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self.root.join(format!(
+            ".tmp.{}.{}.{}",
+            &cid.0[..16],
+            std::process::id(),
+            seq
+        ));
         fs::write(&tmp, data)?;
-        fs::rename(&tmp, &target)?;
+        if let Err(e) = fs::rename(&tmp, &target) {
+            let _ = fs::remove_file(&tmp);
+            // A concurrent writer may have landed the same content first;
+            // that is a successful dedup, not an error.
+            if target.exists() {
+                return Ok(cid);
+            }
+            return Err(e.into());
+        }
 
         Ok(cid)
     }
@@ -117,7 +148,14 @@ impl Store {
     }
 
     /// Retrieve content by CID.
+    ///
+    /// A malformed CID (empty, non-hex, wrong length) is `NotFound`, never a
+    /// filesystem probe: `Cid::from("")` must not read the store directory,
+    /// and `Cid::from("../x")` must not escape it.
     pub fn get(&self, cid: &Cid) -> Result<Vec<u8>, CasError> {
+        if !cid.is_well_formed() {
+            return Err(CasError::NotFound(cid.0.clone()));
+        }
         let path = self.blob_path(cid);
         if !path.exists() {
             return Err(CasError::NotFound(cid.0.clone()));
@@ -134,7 +172,7 @@ impl Store {
 
     /// Check if a CID exists in the store.
     pub fn exists(&self, cid: &Cid) -> bool {
-        self.blob_path(cid).exists()
+        cid.is_well_formed() && self.blob_path(cid).is_file()
     }
 
     /// List all CIDs in the store.
@@ -198,6 +236,54 @@ impl Store {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn concurrent_puts_of_same_content_all_succeed() {
+        let dir = std::env::temp_dir().join("ket-cas-test-concurrent");
+        let _ = fs::remove_dir_all(&dir);
+        let store = std::sync::Arc::new(Store::init(&dir).unwrap());
+        let data = b"the same finding, written by eight reviewers at once".to_vec();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let data = data.clone();
+                std::thread::spawn(move || store.put(&data))
+            })
+            .collect();
+        let cids: Vec<Cid> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("every concurrent put succeeds"))
+            .collect();
+
+        assert!(cids.iter().all(|c| *c == cids[0]), "one content, one CID");
+        assert!(store.verify(&cids[0]).unwrap());
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp files left behind: {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_cid_is_not_found_not_a_filesystem_probe() {
+        let dir = std::env::temp_dir().join("ket-cas-test-malformed");
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::init(&dir).unwrap();
+        for bad in ["", "abc", "../../etc/passwd", &"Z".repeat(64)] {
+            assert!(
+                matches!(store.get(&Cid::from(bad)), Err(CasError::NotFound(_))),
+                "{bad:?}"
+            );
+            assert!(!store.exists(&Cid::from(bad)));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn put_get_roundtrip() {

@@ -14,6 +14,15 @@ ket adheres to semantic versioning.
   `repair` reads kinds from the node instead of defaulting to `derives`.
 - `ket drift` exits 1 on drifted/missing files and 2 on environment
   error, so `ket drift && agent` actually gates.
+- **Concurrent puts of identical content no longer race.** `Store::put`
+  derived its temp file name from the CID alone, so two writers landing
+  the same bytes at once collided and one failed with ENOENT. Each
+  writer now uses its own temp name and a lost rename against an
+  existing blob is a successful dedup. Found by the parallel-review
+  demo; covered by an 8-thread test.
+- A malformed CID (empty, non-hex, wrong length) is `NotFound` from
+  `Store::get`/`exists` instead of a filesystem probe (`Cid::from("")`
+  used to read the store directory).
 
 ### Added
 - `ket graph --format dot|mermaid|json` (alias `ket dot`). Nodes carry

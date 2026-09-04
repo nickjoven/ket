@@ -265,9 +265,21 @@ fn typed_edge_is_sealed_in_node_and_projection_agrees() {
         dot.contains("[label=\"proposes\", style=dashed]"),
         "dot styles proposes: {dot}"
     );
+    // Look nodes up by content, not position: the graph orders by timestamp
+    // and a clock step between two process launches must not fail this.
     let graph = ket_json(&ket_dir, &["graph", "--format", "json"]);
+    assert_eq!(graph["edges"].as_array().unwrap().len(), 1);
     assert_eq!(graph["edges"][0]["kind"], "proposes");
-    assert_eq!(graph["nodes"][0]["label"], "measurement");
+    assert_eq!(graph["edges"][0]["child"], b);
+    assert_eq!(graph["edges"][0]["parent"], a);
+    let labels: Vec<&str> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["label"].as_str().unwrap())
+        .collect();
+    assert!(labels.contains(&"measurement"), "{labels:?}");
+    assert!(labels.contains(&"hypothesis"), "{labels:?}");
 
     if !has_dolt() {
         return;
