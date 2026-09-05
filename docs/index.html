@@ -231,38 +231,36 @@ graph BT
 <p class="demo-intro">The walkthrough above is one domain: a code handoff. Two more, each a single script in <a href="https://github.com/nickjoven/ket/tree/main/docs/demos"><code>docs/demos/</code></a>, show what the same substrate does when the artifacts are claims instead of files, and when the agents run at once instead of in turn.</p>
 
 <h2>Research claims: typed edges and supersession</h2>
-<p><a href="https://github.com/nickjoven/ket/blob/main/docs/demos/research-claims.sh"><code>research-claims.sh</code></a>. A measurement is an irreducible input. One agent <em>derives</em> from it (the edge is <code>grounds</code>); another merely <em>proposes</em> a hypothesis. A synthesis merges both. Then the hypothesis is retracted, and the retraction is a new node that points at the old one, with a <code>supersedes</code> link. The old claim is still there, byte for byte.</p>
+<p><a href="https://github.com/nickjoven/ket/blob/main/docs/demos/research-claims.sh"><code>research-claims.sh</code></a>. A measurement is an irreducible input. One agent <em>derives</em> from it (the edge is <code>grounds</code>); another merely <em>proposes</em> a hypothesis. A synthesis merges both. Then the hypothesis is retracted, and the retraction is a new node whose edge to the old one is <code>supersedes</code>. The old claim is still there, byte for byte.</p>
 <pre><code><span class="p">$ ket dag create "derived: g = 4π²L/T² = 9.81 m/s²" \
     --kind reasoning --agent codex --parent &lt;measurement&gt; --edge-kind grounds
 $ ket dag create "hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob" \
     --kind reasoning --agent claude --parent &lt;measurement&gt; --edge-kind proposes
 $ ket merge "g = 9.81 ± 0.02; drag hypothesis untested" --parents &lt;derived&gt; &lt;hypothesis&gt;
 $ ket dag create "retracted: shortfall was a timing offset (stopwatch latency), not drag" \
-    --kind reasoning --agent claude --parent &lt;hypothesis&gt;
-$ ket link create &lt;retraction&gt; &lt;hypothesis&gt; supersedes</span>
-Linked 86130e766636 --[supersedes]--> e7e13448a19b
+    --kind reasoning --agent claude --parent &lt;hypothesis&gt;:supersedes --parent &lt;measurement&gt;:grounds</span>
 
 <span class="p">$ ket get &lt;hypothesis-output-cid&gt;</span>
 hypothesis: the 0.3% shortfall vs. 9.84 is air drag on the bob</code></pre>
-<p>Resolution is an event in the log, never an overwrite. Bold edges are <code>grounds</code>, dashed are <code>proposes</code>, plain are <code>derives</code>, and the grey dashed edge is the soft link.</p>
+<p>Resolution is an event in the log, never an overwrite. The <code>supersedes</code> edge is part of the retraction node's own bytes, so "this replaces that" has a CID and rebuilds with everything else. Bold edges are <code>grounds</code>, dashed are <code>proposes</code>, plain are <code>derives</code>, circle-headed is <code>supersedes</code>.</p>
 <div class="graph"><pre class="mermaid">
 graph BT
-  nf7011fbb6dc8["f7011fbb6dc8&lt;br/&gt;memory · human&lt;br/&gt;pendulum: T = 2.006 s at L = 1.000 m (lab B, 202…"]
-  class nf7011fbb6dc8 memory
-  n3458ec19af64["3458ec19af64&lt;br/&gt;reasoning · codex&lt;br/&gt;derived: g = 4π²L/T² = 9.81 m/s²"]
-  class n3458ec19af64 reasoning
-  nb46426f822eb["b46426f822eb&lt;br/&gt;reasoning · claude&lt;br/&gt;hypothesis: the 0.3% shortfall vs. 9.84 is air d…"]
-  class nb46426f822eb reasoning
-  n64b22595a6dc["64b22595a6dc&lt;br/&gt;reasoning · human&lt;br/&gt;g = 9.81 ± 0.02; drag hypothesis untested"]
-  class n64b22595a6dc reasoning
-  n54f2f28c9f53["54f2f28c9f53&lt;br/&gt;reasoning · claude&lt;br/&gt;retracted: shortfall was a timing offset (stopwa…"]
-  class n54f2f28c9f53 reasoning
-  n3458ec19af64 ==&gt;|grounds| nf7011fbb6dc8
-  nb46426f822eb -.-&gt;|proposes| nf7011fbb6dc8
-  n64b22595a6dc --&gt; n3458ec19af64
-  n64b22595a6dc --&gt; nb46426f822eb
-  n54f2f28c9f53 --&gt; nb46426f822eb
-  n54f2f28c9f53 -. supersedes .-&gt; nb46426f822eb
+  nb840b35d7b8f["b840b35d7b8f&lt;br/&gt;memory · human&lt;br/&gt;pendulum: T = 2.006 s at L = 1.000 m (lab B, 202…"]
+  class nb840b35d7b8f memory
+  n55b200c28f6d["55b200c28f6d&lt;br/&gt;reasoning · codex&lt;br/&gt;derived: g = 4π²L/T² = 9.81 m/s²"]
+  class n55b200c28f6d reasoning
+  nad807f2a7e9e["ad807f2a7e9e&lt;br/&gt;reasoning · claude&lt;br/&gt;hypothesis: the 0.3% shortfall vs. 9.84 is air d…"]
+  class nad807f2a7e9e reasoning
+  n8eee67665470["8eee67665470&lt;br/&gt;reasoning · human&lt;br/&gt;g = 9.81 ± 0.02; drag hypothesis untested"]
+  class n8eee67665470 reasoning
+  n43a2dc8993ba["43a2dc8993ba&lt;br/&gt;reasoning · claude&lt;br/&gt;retracted: shortfall was a timing offset (stopwa…"]
+  class n43a2dc8993ba reasoning
+  n55b200c28f6d ==&gt;|grounds| nb840b35d7b8f
+  nad807f2a7e9e -.-&gt;|proposes| nb840b35d7b8f
+  n8eee67665470 --&gt; n55b200c28f6d
+  n8eee67665470 --&gt; nad807f2a7e9e
+  n43a2dc8993ba --o|supersedes| nad807f2a7e9e
+  n43a2dc8993ba ==&gt;|grounds| nb840b35d7b8f
   classDef memory fill:#E8F5E9,stroke:#555,color:#111
   classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
 </pre></div>
