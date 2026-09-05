@@ -6,7 +6,7 @@
 # a new node that supersedes the old one, never as an overwrite. The graph
 # at the end shows the epistemic edge kinds; the log shows every event.
 #
-# Needs `ket` on PATH. Dolt is optional (soft links need it).
+# Needs `ket` on PATH. Dolt is optional.
 set -euo pipefail
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -34,17 +34,15 @@ S="$(ket --json merge "g = 9.81 ± 0.02; drag hypothesis untested" \
         --parents "$D" "$H" --agent human | jget node_cid)"
 run ket dag show "$S" | grep -A2 Parents
 
-say "4. The hypothesis turns out wrong. The correction is a NEW node that points at the old one."
+say "4. The hypothesis turns out wrong. The correction is a NEW node whose edge to the old one says so."
 C="$(node "retracted: shortfall was a timing offset (stopwatch latency), not drag" \
-        --kind reasoning --agent claude --parent "$H")"
-if command -v dolt >/dev/null 2>&1; then
-  run ket link create "$C" "$H" supersedes
-fi
+        --kind reasoning --agent claude --parent "$H:supersedes" --parent "$M:grounds")"
+run ket dag show "$C" | grep -A2 Parents
 OLD="$(ket --json dag show "$H" | jget output_cid)"
 run ket get "$OLD"; echo
 echo "   ^ the superseded claim is still there, byte for byte. Resolution is an event, not a deletion."
 
-say "5. The graph. Bold = grounds, dashed = proposes, plain = derives, grey = supersedes."
+say "5. The graph. Bold = grounds, dashed = proposes, plain = derives, circle-head = supersedes."
 run ket graph --format mermaid
 
 say "6. The log. Every event above, in order, append-only."
