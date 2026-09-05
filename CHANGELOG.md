@@ -25,6 +25,12 @@ ket adheres to semantic versioning.
   used to read the store directory).
 
 ### Added
+- **Resolution edges.** `EdgeKind` gains `confirms`, `refutes`, `supersedes`
+  (with `EdgeKind::ALL` and a strict `parse`). `ket dag create --parent`
+  accepts `<cid>:<kind>` so one node can confirm a claim and be grounded
+  by evidence in a single write. This closes DESIGN.md's open L2 choice:
+  edge kind is in-node; a correction is a node with a `supersedes` parent,
+  never an overwrite. `ket graph` styles the new kinds.
 - `ket graph --format dot|mermaid|json` (alias `ket dot`). Nodes carry
   kind, agent and a one-line content preview; provenance edges are styled
   by epistemic kind; soft links render dashed. Mermaid output renders

@@ -1044,9 +1044,11 @@ fn escape_sql(s: &str) -> String {
 /// - `grounds`: irreducible input (axiom, measurement, definition)
 /// - `derives`: logically follows from parent (default)
 /// - `proposes`: suggested by parent but not entailed (hypothesis)
+/// - `confirms` / `refutes`: verification evidence for / against the parent
+/// - `supersedes`: child replaces parent as canonical; parent stays addressable
 fn validate_edge_kind(kind: &str) -> &str {
     match kind {
-        "grounds" | "derives" | "proposes" => kind,
+        "grounds" | "derives" | "proposes" | "confirms" | "refutes" | "supersedes" => kind,
         "" => "derives",
         _ => "derives", // unknown kinds fall back to derives
     }

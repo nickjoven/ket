@@ -106,14 +106,42 @@ pub enum EdgeKind {
     Derives,
     /// Suggested but not entailed — a hypothesis or conjecture.
     Proposes,
+    /// Verification: this node is evidence that the parent claim holds.
+    Confirms,
+    /// Verification: this node is evidence that the parent claim fails.
+    Refutes,
+    /// Resolution: this node replaces the parent as the canonical statement.
+    /// The parent is not deleted or edited — it stays addressable — and the
+    /// replacement is itself a node with an agent and provenance. This is the
+    /// "resolution is a logged event, never an overwrite" rule from DESIGN.md
+    /// expressed in the one identity discipline the substrate already has.
+    Supersedes,
 }
 
 impl EdgeKind {
+    /// Every kind, in declaration order. For help text, schemas, validators.
+    pub const ALL: [EdgeKind; 6] = [
+        EdgeKind::Grounds,
+        EdgeKind::Derives,
+        EdgeKind::Proposes,
+        EdgeKind::Confirms,
+        EdgeKind::Refutes,
+        EdgeKind::Supersedes,
+    ];
+
+    /// Strict parse: `None` for anything that is not a known kind word.
+    pub fn parse(s: &str) -> Option<Self> {
+        EdgeKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             EdgeKind::Grounds => "grounds",
             EdgeKind::Derives => "derives",
             EdgeKind::Proposes => "proposes",
+            EdgeKind::Confirms => "confirms",
+            EdgeKind::Refutes => "refutes",
+            EdgeKind::Supersedes => "supersedes",
         }
     }
 
@@ -123,6 +151,9 @@ impl EdgeKind {
         match s {
             "grounds" => EdgeKind::Grounds,
             "proposes" => EdgeKind::Proposes,
+            "confirms" => EdgeKind::Confirms,
+            "refutes" => EdgeKind::Refutes,
+            "supersedes" => EdgeKind::Supersedes,
             _ => EdgeKind::Derives,
         }
     }
@@ -726,6 +757,36 @@ mod tests {
         let kinds: Vec<EdgeKind> = node.parent_links().map(|(_, k)| k).collect();
         assert_eq!(kinds, vec![EdgeKind::Derives]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_edge_kind_roundtrips_and_changes_identity() {
+        let out = Cid::from("o".repeat(64).as_str());
+        let p = Cid::from("p".repeat(64).as_str());
+        let mut seen = std::collections::HashSet::new();
+        for kind in EdgeKind::ALL {
+            let node = DagNode::new_typed(
+                NodeKind::Reasoning,
+                vec![(p.clone(), kind)],
+                out.clone(),
+                "t",
+            );
+            let bytes = node.to_bytes().unwrap();
+            let back = DagNode::from_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.parent_links().next().unwrap().1,
+                kind,
+                "{kind} survives the bytes"
+            );
+            assert_eq!(EdgeKind::parse(kind.as_str()), Some(kind));
+            // Different kind, different bytes (derives is the omitted default,
+            // so it is distinct from every typed form too).
+            assert!(
+                seen.insert(bytes),
+                "{kind} must not collide with another kind"
+            );
+        }
+        assert_eq!(EdgeKind::parse("nonsense"), None);
     }
 
     #[test]

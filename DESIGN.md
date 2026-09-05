@@ -170,11 +170,19 @@ and must not be mistaken for the endpoint.
   source — bottom-left of the partition. (See the k-stack `ket_store` and
   `ket_store_reasoning` write paths; they currently feed the projection, which is
   fine *as a projection writer* and wrong *as the source*.)
-- **Decide L2 identity for edges** — edge kind as in-node typed parents
-  (`Vec<(Cid, EdgeKind)>`, consistent with how `saturation`/`activation` are kept
-  in the node) **vs.** edge kind as a separate content-addressed annotation node.
-  Both pass the test; the SQL-column-as-source does not. This is the one open
-  design choice; everything else follows from it.
+- **L2 identity for edges — decided (2026-09-05): in-node typed parents.**
+  Edge kind lives in the node as `parent_kinds`, index-aligned with `parents`
+  and canonicalized (all-`derives` is omitted, so the untyped form shares its
+  CID). It passes the test, it is consistent with how `saturation`/`activation`
+  are kept, and it needs no second identity discipline. The alternative — a
+  separate annotation node per edge — also passes but doubles the node count
+  for nothing the graph can't already say. Resolution edges (`confirms`,
+  `refutes`, `supersedes`) are therefore ordinary typed parents: a correction
+  is a new node whose parent link to the old claim is `supersedes`, so the
+  resolution event is itself content-addressed, agented, and rebuildable.
+  **Soft links stay a Dolt-side annotation** for cross-cutting labels
+  (`cites`, `formalizes`, …) that are convenient to query and cheap to lose;
+  they are not the home of anything the substrate must be able to rebuild.
 - **Project graphs from sealed blobs**, CID-pinned via the log, not by regex over
   a mutable working tree. A graph derived from the tree heals to "whatever the
   tree says," which is a fake heal.

@@ -296,6 +296,82 @@ fn typed_edge_is_sealed_in_node_and_projection_agrees() {
     assert!(ok, "still clean after rebuild: {out}");
 }
 
+/// A verdict node confirms a claim and is grounded by evidence in one write:
+/// `--parent <cid>:<kind>` gives each parent its own kind, and the projection
+/// agrees. Resolution edges are ordinary typed parents (DESIGN.md, L2 decided).
+#[test]
+fn per_parent_edge_kinds_seal_and_project() {
+    let (ket_dir, _dir) = fresh_ket("per-parent-kinds");
+    let mk = |content: &str, kind: &str| -> String {
+        ket_json(&ket_dir, &["dag", "create", content, "--kind", kind])["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let claim = mk("claim: no path traversal", "reasoning");
+    let evidence = mk("$ grep -rn '\\.\\.' src/ -> 0 hits", "memory");
+    let verdict = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "CONFIRMED",
+            "--kind",
+            "reasoning",
+            "--agent",
+            "verify",
+            "--parent",
+            &format!("{claim}:confirms"),
+            "--parent",
+            &format!("{evidence}:grounds"),
+        ],
+    );
+    let verdict = verdict["node_cid"].as_str().unwrap();
+    let node = ket_json(&ket_dir, &["dag", "show", verdict]);
+    assert_eq!(
+        node["parent_kinds"],
+        serde_json::json!(["confirms", "grounds"])
+    );
+
+    let corrected = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "claim: no path traversal in put(); get() unchecked",
+            "--parent",
+            &format!("{claim}:supersedes"),
+        ],
+    );
+    let corrected = corrected["node_cid"].as_str().unwrap();
+
+    let (ok, mermaid, _) = ket(&ket_dir, &["graph", "--format", "mermaid"]);
+    assert!(ok);
+    assert!(mermaid.contains("-->|confirms|"), "{mermaid}");
+    assert!(mermaid.contains("==>|grounds|"), "{mermaid}");
+    assert!(mermaid.contains("--o|supersedes|"), "{mermaid}");
+
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["dag", "create", "x", "--parent", &format!("{claim}:bogus")],
+    );
+    assert!(!ok, "unknown kind is rejected, not defaulted");
+    assert!(err.contains("Unknown edge kind"), "{err}");
+
+    if !has_dolt() {
+        return;
+    }
+    let (ok, out, _) = ket(&ket_dir, &["verify-projection"]);
+    assert!(ok, "mixed-kind parents must project cleanly: {out}");
+    let rows = ket(&ket_dir, &["sql", &format!(
+        "select edge_kind from dag_edges where child_cid in ('{verdict}','{corrected}') order by edge_kind"
+    )]).1;
+    assert!(
+        rows.contains("confirms") && rows.contains("grounds") && rows.contains("supersedes"),
+        "{rows}"
+    );
+}
+
 /// Merge nodes go through the same sealed path, with the same flag.
 #[test]
 fn merge_typed_edges_projection_agrees() {

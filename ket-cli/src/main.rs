@@ -122,6 +122,8 @@ Node kinds: memory, code, reasoning, task, cdom, score, context
 Examples:
   ket dag create 'initial design' --kind reasoning --agent claude
   ket dag create 'revision' --kind code --agent codex --parent <cid>
+  ket dag create 'verified' --parent <claim>:confirms --parent <evidence>:grounds
+  ket dag create 'corrected claim' --parent <claim>:supersedes
   ket dag lineage <cid>            Walk the parent chain
   ket dag ls                       List all nodes
   ket dag show <cid>               Show node details")]
@@ -515,7 +517,7 @@ Examples:
         /// Agent name
         #[arg(long, default_value = "human")]
         agent: String,
-        /// Epistemic edge kind for every parent link: grounds, derives (default), proposes
+        /// Edge kind for every parent link: grounds, derives (default), proposes, confirms, refutes, supersedes
         #[arg(long, default_value = "derives")]
         edge_kind: String,
         /// Schema CID that the output conforms to
@@ -542,7 +544,8 @@ Render the DAG for visualization.
 
 Nodes are labelled with their short CID, kind, agent, and a one-line
 preview of their content. Provenance edges are styled by epistemic kind
-(grounds = bold, derives = plain, proposes = dashed). Soft links, when
+(grounds = bold, derives = plain, proposes = dashed, confirms = green,
+refutes = red tee, supersedes = dotted). Soft links, when
 Dolt is available, appear as dashed grey edges labelled with the relation.
 
 Formats:
@@ -635,10 +638,11 @@ enum DagAction {
         /// Agent that produced this (human, claude, codex, copilot)
         #[arg(long, default_value = "human")]
         agent: String,
-        /// Parent node CIDs (can specify multiple for merge)
+        /// Parent node CID, optionally with its own edge kind: <cid>[:<kind>]. Repeatable.
         #[arg(long)]
         parent: Vec<String>,
-        /// Epistemic edge kind for parent links: grounds, derives (default), proposes
+        /// Edge kind for parents given without a suffix:
+        /// grounds, derives (default), proposes, confirms, refutes, supersedes
         #[arg(long, default_value = "derives")]
         edge_kind: String,
         /// Schema CID that the output conforms to
@@ -915,9 +919,21 @@ fn parse_node_kind(kind: &str) -> Result<ket_dag::NodeKind, Box<dyn std::error::
 }
 
 fn parse_edge_kind(kind: &str) -> Result<ket_dag::EdgeKind, Box<dyn std::error::Error>> {
-    match kind {
-        "grounds" | "derives" | "proposes" => Ok(ket_dag::EdgeKind::parse_or_default(kind)),
-        _ => Err(format!("Unknown edge kind: {kind} (grounds, derives, proposes)").into()),
+    ket_dag::EdgeKind::parse(kind).ok_or_else(|| {
+        let known: Vec<&str> = ket_dag::EdgeKind::ALL.iter().map(|k| k.as_str()).collect();
+        format!("Unknown edge kind: {kind} ({})", known.join(", ")).into()
+    })
+}
+
+/// Parse `--parent <cid>[:<kind>]`. A parent without a suffix takes `default`.
+/// CIDs are hex, so the colon is unambiguous.
+fn parse_parent_link(
+    spec: &str,
+    default: ket_dag::EdgeKind,
+) -> Result<(ket_cas::Cid, ket_dag::EdgeKind), Box<dyn std::error::Error>> {
+    match spec.split_once(':') {
+        Some((cid, kind)) => Ok((ket_cas::Cid::from(cid), parse_edge_kind(kind)?)),
+        None => Ok((ket_cas::Cid::from(spec), default)),
     }
 }
 
@@ -1154,9 +1170,9 @@ fn cmd_dag(
             // not a projection-side annotation. `new_typed` canonicalizes:
             // all-`derives` is byte-identical to the untyped form.
             let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> = parent
-                .into_iter()
-                .map(|p| (ket_cas::Cid::from(p), edge))
-                .collect();
+                .iter()
+                .map(|p| parse_parent_link(p, edge))
+                .collect::<Result<_, _>>()?;
             let content_cid = cas.put(content.as_bytes())?;
             let mut node =
                 ket_dag::DagNode::new_typed(node_kind, parent_links, content_cid.clone(), &agent);
@@ -2684,6 +2700,9 @@ fn render_dot(g: &GraphOut) -> String {
         let style = match e.kind.as_str() {
             "grounds" => ", style=bold",
             "proposes" => ", style=dashed",
+            "confirms" => ", color=\"darkgreen\"",
+            "refutes" => ", color=\"firebrick\", arrowhead=tee",
+            "supersedes" => ", style=dotted",
             _ => "",
         };
         s.push_str(&format!(
@@ -2723,9 +2742,12 @@ fn render_mermaid(g: &GraphOut) -> String {
     }
     for e in &g.edges {
         let arrow = match e.kind.as_str() {
-            "grounds" => format!("==>|{}|", e.kind),
-            "proposes" => format!("-.->|{}|", e.kind),
-            _ => "-->".to_string(),
+            "grounds" => "==>|grounds|",
+            "proposes" => "-.->|proposes|",
+            "confirms" => "-->|confirms|",
+            "refutes" => "--x|refutes|",
+            "supersedes" => "--o|supersedes|",
+            _ => "-->",
         };
         s.push_str(&format!("  {} {} {}\n", id(&e.child), arrow, id(&e.parent)));
     }
