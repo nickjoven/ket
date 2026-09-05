@@ -244,10 +244,10 @@ for anything else.
 
 ## Domain demos
 
-The walkthrough above is one domain: a code handoff. Two more, each a single
+The walkthrough above is one domain: a code handoff. Three more, each a single
 script in [`docs/demos/`](demos/), show what the same substrate does when the
-artifacts are claims instead of files, and when the agents run at once instead
-of in turn.
+artifacts are claims instead of files, when the agents run at once instead of
+in turn, and when the job is to audit a repository and keep the receipts.
 
 ### Research claims: typed edges and supersession
 
@@ -372,6 +372,143 @@ with a concurrent test to keep it fixed. A demo that exercises the substrate
 the way agents actually use it is worth more than one that only shows the
 happy path.
 
+
+### Repository audit: findings as a DAG, verdicts as edges
+
+[`demos/repo-audit.sh`](demos/repo-audit.sh), driving [sieve](https://github.com/nickjoven/sieve).
+This is the domain the substrate was built for. Reviewers fan out by dimension
+and *propose* findings against a root that names the audited tip. Verifiers fan
+in: a verdict node *confirms* or *refutes* each material finding and is
+*grounded* by the evidence it captured. A partial verdict writes a corrected
+finding that *supersedes* the original. The ledger is rendered from the graph,
+never edited; re-auditing a new tip is a diff by finding content.
+
+The demo runs sieve's deterministic fake agent so it is free and repeatable.
+Two findings below: one refuted with evidence, one corrected and then confirmed.
+
+```
+## security
+
+1. **THEATER/high** (REFUTED) — A hard-coded AWS secret appears in config.example
+   - evidence: config.example:2 AKIA...
+   - verification evidence `03efd047ae96`:
+
+     $ git grep -n AKIA
+     (no matches)
+     The string in config.example is a placeholder.
+
+## tests
+
+1. **VACUOUS/low** (CONFIRMED) — No tests assert anything (in src/ only; tests/ is covered)
+   - evidence: grep -rL assert
+   - supersedes `643ac9e3192e`
+   - verification evidence `b74a7fb1f675`:
+
+     $ grep -rL 'assert' src tests
+     src/lib.py
+```
+
+```mermaid
+graph BT
+  nc323c2f79084["c323c2f79084<br/>context · sieve<br/>{#quot;dimensions#quot;:[#quot;docs#quot;,#quot;security#quot;,#quot;tests#quot;],#quot;kind#quot;…"]
+  class nc323c2f79084 context
+  n3295d80be04a["3295d80be04a<br/>memory · audit:tests<br/>tests: 1 findings"]
+  class n3295d80be04a memory
+  n52327c967d4f["52327c967d4f<br/>memory · audit:security<br/>security: 2 findings"]
+  class n52327c967d4f memory
+  n99d01e23dfad["99d01e23dfad<br/>memory · audit:docs<br/>docs: 2 findings"]
+  class n99d01e23dfad memory
+  nc867b26da2d6["c867b26da2d6<br/>reasoning · audit:docs<br/>{#quot;claim#quot;:#quot;README promises CI but the repo has no…"]
+  class nc867b26da2d6 reasoning
+  n78814f0132dc["78814f0132dc<br/>reasoning · audit:security<br/>{#quot;claim#quot;:#quot;A hard-coded AWS secret appears in con…"]
+  class n78814f0132dc reasoning
+  n643ac9e3192e["643ac9e3192e<br/>reasoning · audit:tests<br/>{#quot;claim#quot;:#quot;No tests assert anything#quot;,#quot;classificat…"]
+  class n643ac9e3192e reasoning
+  n551a4165e79c["551a4165e79c<br/>reasoning · audit:docs<br/>{#quot;claim#quot;:#quot;README documents the install command a…"]
+  class n551a4165e79c reasoning
+  n9a4cfeb2a532["9a4cfeb2a532<br/>reasoning · audit:security<br/>{#quot;claim#quot;:#quot;README promises CI but the repo has no…"]
+  class n9a4cfeb2a532 reasoning
+  n03efd047ae96["03efd047ae96<br/>memory · verify:security<br/>$ git grep -n AKIA"]
+  class n03efd047ae96 memory
+  nfa597a8009ec["fa597a8009ec<br/>memory · verify:security<br/>$ ls .github/workflows"]
+  class nfa597a8009ec memory
+  n7567b06cebd9["7567b06cebd9<br/>memory · verify:docs<br/>$ ls .github/workflows"]
+  class n7567b06cebd9 memory
+  n4640e36e849a["4640e36e849a<br/>reasoning · verify:docs<br/>{#quot;correction#quot;:#quot;#quot;,#quot;verdict#quot;:#quot;CONFIRMED#quot;}"]
+  class n4640e36e849a reasoning
+  n715cd1c6f6b3["715cd1c6f6b3<br/>reasoning · verify:security<br/>{#quot;correction#quot;:#quot;#quot;,#quot;verdict#quot;:#quot;REFUTED#quot;}"]
+  class n715cd1c6f6b3 reasoning
+  n5cde08fdd1bb["5cde08fdd1bb<br/>reasoning · verify:security<br/>{#quot;correction#quot;:#quot;#quot;,#quot;verdict#quot;:#quot;CONFIRMED#quot;}"]
+  class n5cde08fdd1bb reasoning
+  nb74a7fb1f675["b74a7fb1f675<br/>memory · verify:tests<br/>$ grep -rL 'assert' src tests"]
+  class nb74a7fb1f675 memory
+  nfaa62f762e0b["faa62f762e0b<br/>reasoning · verify:tests<br/>{#quot;claim#quot;:#quot;No tests assert anything (in src/ only…"]
+  class nfaa62f762e0b reasoning
+  nfd85e8c39836["fd85e8c39836<br/>reasoning · verify:tests<br/>{#quot;correction#quot;:#quot;No tests assert anything (in src/…"]
+  class nfd85e8c39836 reasoning
+  n3295d80be04a --> nc323c2f79084
+  n52327c967d4f --> nc323c2f79084
+  n99d01e23dfad --> nc323c2f79084
+  nc867b26da2d6 -.->|proposes| nc323c2f79084
+  n78814f0132dc -.->|proposes| nc323c2f79084
+  n643ac9e3192e -.->|proposes| nc323c2f79084
+  n551a4165e79c -.->|proposes| nc323c2f79084
+  n9a4cfeb2a532 -.->|proposes| nc323c2f79084
+  n03efd047ae96 --> nc323c2f79084
+  nfa597a8009ec --> nc323c2f79084
+  n7567b06cebd9 --> nc323c2f79084
+  n4640e36e849a -->|confirms| nc867b26da2d6
+  n4640e36e849a ==>|grounds| n7567b06cebd9
+  n715cd1c6f6b3 --x|refutes| n78814f0132dc
+  n715cd1c6f6b3 ==>|grounds| n03efd047ae96
+  n5cde08fdd1bb -->|confirms| n9a4cfeb2a532
+  n5cde08fdd1bb ==>|grounds| nfa597a8009ec
+  nb74a7fb1f675 --> nc323c2f79084
+  nfaa62f762e0b --o|supersedes| n643ac9e3192e
+  nfaa62f762e0b -.->|proposes| nc323c2f79084
+  nfd85e8c39836 -->|confirms| nfaa62f762e0b
+  nfd85e8c39836 ==>|grounds| nb74a7fb1f675
+  classDef memory fill:#E8F5E9,stroke:#555,color:#111
+  classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
+  classDef context fill:#F1F8E9,stroke:#555,color:#111
+```
+
+**The real run.** The same pipeline with Claude as reviewer and verifier, two
+dimensions, pointed at catbus. It cost $3.64 and took about eleven minutes. It
+found that `catbus guard` printed the handoff to the terminal and then ran the
+agent with nothing, that a bare `catbus validate` could not fail on any packet
+`pack` produces, and that the README's dependency snippet was stale. All three
+were fixed the same day. The store it wrote, and the ledger rendered from it,
+are archived in
+[sieve/examples/catbus-2026-09-05](https://github.com/nickjoven/sieve/tree/main/examples/catbus-2026-09-05).
+
+```
+**17 findings** · 2 confirmed · 0 refuted · 15 unverified · 1 superseded by corrections
+
+1. **OVERSTATING/medium** (CONFIRMED) — README.md:63-66 "Enforce Handoffs ... wrap agent
+   execution with scripts/catbus-guard.sh"
+   - evidence: scripts/catbus-guard.sh:31-35 runs `catbus validate`, then `catbus handoff`
+     (printed to the wrapper's stdout), then `exec "$@"`. Nothing is passed to the agent
+     command: no env var, no stdin, no file.
+
+2. **OVERSTATING/medium** (CONFIRMED, corrected from VACUOUS) — README.md:64 "Use
+   `catbus validate` to ensure packets meet requirements"
+   - evidence: validate_packet checks four things … any packet made by `catbus pack` sets
+     the meta unconditionally and --summary is required, so a default `catbus validate`
+     cannot fail on a packet pack produced.
+
+7. **OVERSTATING/low** (unverified) — README.md:98-105 Cargo snippet
+   - evidence: Actual Cargo.toml:20-23 is `git = ".../ket.git", tag = "v0.3.0"`; the
+     README snippet omits the tag pin and the .git suffix that commit 6158d66
+     deliberately added.
+```
+
+Why this domain fits: an audit is a set of claims about a specific state of the
+world, each needing provenance, evidence, and the possibility of being wrong
+later. Content addressing gives every claim an identity; typed edges make
+"confirmed", "refuted" and "corrected" part of that identity; the log makes the
+whole audit re-derivable. The audit of the audit is `ket verify-projection`.
+
 ---
 
 ## What you just saw, in the four words
@@ -381,6 +518,7 @@ happy path.
 - **Generation** became a graph you can walk backwards, across models.
 - **Tokens** dropped from the size of the project to the size of a receipt.
 - **Agents in parallel** write to one store with no locks and no conflicts, and the graph shows who did what.
+- **An audit** becomes a graph of claims, verdicts and evidence that can be re-derived, diffed, and audited itself.
 
 Next steps: [README](../README.md) for the full command surface and the MCP
 tools that expose all of this to Claude directly. [catbus](https://github.com/nickjoven/catbus)
