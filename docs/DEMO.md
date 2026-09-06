@@ -393,13 +393,13 @@ Two findings below: one refuted with evidence, one corrected and then confirmed.
    - evidence: config.example:2 AKIA...
    - verification evidence `03efd047ae96`:
 
-     $ git grep -n AKIA
+     - ran: git grep -n AKIA
      (no matches)
      The string in config.example is a placeholder.
 
 ## tests
 
-1. **VACUOUS/low** (CONFIRMED) — No tests assert anything (in src/ only; tests/ is covered)
+1. **VACUOUS/low** (CORRECTED) — No tests assert anything (in src/ only; tests/ is covered)
    - evidence: grep -rL assert
    - supersedes `643ac9e3192e`
    - verification evidence `b74a7fb1f675`:
@@ -483,7 +483,7 @@ are archived in
 [sieve/examples/catbus-2026-09-05](https://github.com/nickjoven/sieve/tree/main/examples/catbus-2026-09-05).
 
 ```
-**17 findings** · 2 confirmed · 0 refuted · 15 unverified · 1 superseded by corrections
+**17 findings** · 1 confirmed · 1 corrected · 0 refuted · 15 unverified · 1 superseded by corrections
 
 1. **OVERSTATING/medium** (CONFIRMED) — README.md:63-66 "Enforce Handoffs ... wrap agent
    execution with scripts/catbus-guard.sh"

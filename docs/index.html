@@ -328,13 +328,13 @@ graph BT
    - evidence: config.example:2 AKIA...
    - verification evidence `03efd047ae96`:
 
-     $ git grep -n AKIA
+     - ran: git grep -n AKIA
      (no matches)
      The string in config.example is a placeholder.
 
 ## tests
 
-1. **VACUOUS/low** (CONFIRMED) — No tests assert anything (in src/ only; tests/ is covered)
+1. **VACUOUS/low** (CORRECTED) — No tests assert anything (in src/ only; tests/ is covered)
    - evidence: grep -rL assert
    - supersedes `643ac9e3192e`
    - verification evidence `b74a7fb1f675`:
@@ -406,7 +406,7 @@ graph BT
   classDef context fill:#F1F8E9,stroke:#555,color:#111
 </pre></div>
 <p><b>The real run.</b> The same pipeline with Claude as reviewer and verifier, two dimensions, pointed at catbus. It cost $3.64 and took about eleven minutes. It found that <code>catbus guard</code> printed the handoff to the terminal and then ran the agent with nothing, that a bare <code>catbus validate</code> could not fail on any packet <code>pack</code> produces, and that the README's dependency snippet was stale. All three were fixed the same day. The store it wrote, and the ledger rendered from it, are archived in <a href="https://github.com/nickjoven/sieve/tree/main/examples/catbus-2026-09-05">sieve/examples/catbus-2026-09-05</a>.</p>
-<pre><code>**17 findings** · 2 confirmed · 0 refuted · 15 unverified · 1 superseded by corrections
+<pre><code>**17 findings** · 1 confirmed · 1 corrected · 0 refuted · 15 unverified · 1 superseded by corrections
 
 1. **OVERSTATING/medium** (CONFIRMED) — README.md:63-66 "Enforce Handoffs ... wrap agent
    execution with scripts/catbus-guard.sh"
