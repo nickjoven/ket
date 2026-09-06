@@ -505,6 +505,7 @@ dependencies = [
  "chrono",
  "ket-cas",
  "ket-dag",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

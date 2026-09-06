@@ -6,6 +6,84 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// An exclusive, cross-process advisory lock on one Dolt store.
+///
+/// Dolt's local storage does not tolerate concurrent writers — a second
+/// `dolt sql -q` against the same store while another is writing fails with
+/// "cannot update manifest: database is read only", and ket used to swallow
+/// that error and silently drop the row. Every `dolt` invocation for a store
+/// now runs while holding this lock, so access to the projection is
+/// serialized across processes and threads. The CAS write that precedes a
+/// projection sync is itself lock-free and content-addressed; only the Dolt
+/// mirror serializes, which is inherent to Dolt and invisible to the caller
+/// beyond a short wait. The lock is released when the guard's file descriptor
+/// closes (flock semantics), so a crashed holder never wedges the store.
+/// Held for the lifetime of one locked section, keyed by store path.
+struct DoltGuard {
+    path: PathBuf,
+}
+
+fn dolt_lock_path(db_path: &Path) -> PathBuf {
+    db_path.join(".ket-dolt.lock")
+}
+
+// Reentrant within a thread: the public methods lock, and some of them call
+// other locked methods (`init` → `create_schema` → `exec`; `dolt_commit` →
+// `dolt_head`). A plain flock would self-deadlock there, because a second
+// open file description on the same file blocks even within one process. A
+// per-thread depth counter keyed by store path takes the real flock only at
+// the outermost entry and releases it when the last guard drops. Two threads
+// (or two processes) still exclude each other: each opens its own file
+// description and blocks on the flock.
+#[cfg(unix)]
+thread_local! {
+    static DOLT_LOCKS: std::cell::RefCell<std::collections::HashMap<PathBuf, (u32, std::fs::File)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn acquire_dolt_lock(db_path: &Path) -> Result<DoltGuard, SqlError> {
+    let key = db_path.to_path_buf();
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        DOLT_LOCKS.with(|cell| -> Result<(), SqlError> {
+            let mut map = cell.borrow_mut();
+            if let Some((depth, _)) = map.get_mut(&key) {
+                *depth += 1; // already held on this thread; reentrant no-op
+                return Ok(());
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(dolt_lock_path(db_path))?;
+            // Blocking exclusive lock; released when `file` is dropped below.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(SqlError::Io(std::io::Error::last_os_error()));
+            }
+            map.insert(key.clone(), (1, file));
+            Ok(())
+        })?;
+    }
+    Ok(DoltGuard { path: key })
+}
+
+impl Drop for DoltGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        DOLT_LOCKS.with(|cell| {
+            let mut map = cell.borrow_mut();
+            if let Some((depth, _)) = map.get_mut(&self.path) {
+                *depth -= 1;
+                if *depth == 0 {
+                    map.remove(&self.path); // drops the File → releases the flock
+                }
+            }
+        });
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SqlError {
     #[error("Dolt command failed: {0}")]
@@ -36,6 +114,19 @@ pub struct EdgeRow {
     pub edge_kind: String,
 }
 
+/// The projected columns of a `dag_nodes` row that are a pure function of the
+/// content-addressed node (so they can be re-derived and audited). `meta` is
+/// omitted: ket always projects it empty, so it carries no state to verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRow {
+    pub cid: String,
+    pub kind: String,
+    pub agent: String,
+    pub created_at: String,
+    pub output_cid: String,
+    pub schema_cid: String,
+}
+
 /// Result of auditing the `dag_edges` projection against the CAS/DAG.
 ///
 /// The projection is *correct* exactly when all three lists are empty: every
@@ -49,6 +140,14 @@ pub struct ProjectionDiff {
     pub extra: Vec<EdgeRow>,
     /// Same (parent, child) but ordinal or kind disagree: (expected, actual).
     pub mismatched: Vec<(EdgeRow, EdgeRow)>,
+    /// Nodes the CAS implies but `dag_nodes` lacks — the loss concurrent
+    /// writers used to cause silently. Edge-only auditing missed a lost
+    /// parentless node entirely.
+    pub missing_nodes: Vec<NodeRow>,
+    /// Rows in `dag_nodes` with no node in the CAS — orphan/stale.
+    pub extra_nodes: Vec<NodeRow>,
+    /// Same cid, but a projected column disagrees: (expected, actual).
+    pub mismatched_nodes: Vec<(NodeRow, NodeRow)>,
 }
 
 /// Result of replaying the substrate into the projection.
@@ -59,13 +158,20 @@ pub struct ProjectionDiff {
 /// `purged == written`; a heal of a tampered projection will have them differ.
 #[derive(Debug, Default)]
 pub struct RebuildReport {
+    pub nodes_purged: u64,
+    pub nodes_written: usize,
     pub edges_purged: u64,
     pub edges_written: usize,
 }
 
 impl ProjectionDiff {
     pub fn is_clean(&self) -> bool {
-        self.missing.is_empty() && self.extra.is_empty() && self.mismatched.is_empty()
+        self.missing.is_empty()
+            && self.extra.is_empty()
+            && self.mismatched.is_empty()
+            && self.missing_nodes.is_empty()
+            && self.extra_nodes.is_empty()
+            && self.mismatched_nodes.is_empty()
     }
 }
 
@@ -97,6 +203,56 @@ fn diff_edges(expected: Vec<EdgeRow>, actual: Vec<EdgeRow>) -> ProjectionDiff {
     diff
 }
 
+/// Pure diff of two node sets keyed by cid, folded into an existing
+/// `ProjectionDiff` (which also carries the edge diff).
+fn diff_nodes(diff: &mut ProjectionDiff, expected: Vec<NodeRow>, actual: Vec<NodeRow>) {
+    use std::collections::HashMap;
+    let exp: HashMap<_, _> = expected.into_iter().map(|r| (r.cid.clone(), r)).collect();
+    let act: HashMap<_, _> = actual.into_iter().map(|r| (r.cid.clone(), r)).collect();
+    for (k, e) in &exp {
+        match act.get(k) {
+            None => diff.missing_nodes.push(e.clone()),
+            Some(a) if a != e => diff.mismatched_nodes.push((e.clone(), a.clone())),
+            Some(_) => {}
+        }
+    }
+    for (k, a) in &act {
+        if !exp.contains_key(k) {
+            diff.extra_nodes.push(a.clone());
+        }
+    }
+}
+
+/// Split one CSV record into fields, honoring RFC-4180 double-quote quoting
+/// (Dolt quotes a field that contains a comma, quote, or newline). Agent names
+/// are user-controlled and may contain commas, so a naive `split(',')` would
+/// mis-diff them.
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    cur.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                fields.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur);
+    fields
+}
+
 /// The Dolt database handle.
 pub struct DoltDb {
     db_path: PathBuf,
@@ -114,6 +270,7 @@ impl DoltDb {
     /// Initialize a new Dolt database and create schema.
     pub fn init(db_path: &Path) -> Result<Self, SqlError> {
         std::fs::create_dir_all(db_path).map_err(SqlError::Io)?;
+        let _guard = acquire_dolt_lock(db_path)?;
 
         // Check dolt is available
         Command::new("dolt")
@@ -148,6 +305,7 @@ impl DoltDb {
 
     /// Execute a SQL query, return raw output.
     pub fn query(&self, sql: &str) -> Result<String, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let output = Command::new("dolt")
             .args(["sql", "-q", sql, "-r", "csv"])
             .current_dir(&self.db_path)
@@ -163,6 +321,7 @@ impl DoltDb {
 
     /// Execute a SQL statement (INSERT/UPDATE/DELETE), no result expected.
     pub fn exec(&self, sql: &str) -> Result<(), SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let output = Command::new("dolt")
             .args(["sql", "-q", sql])
             .current_dir(&self.db_path)
@@ -182,6 +341,7 @@ impl DoltDb {
         if statements.is_empty() {
             return Ok(());
         }
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let mut batch = String::from("BEGIN;\n");
         for stmt in statements {
             batch.push_str(stmt);
@@ -204,6 +364,7 @@ impl DoltDb {
 
     /// Commit the current state in Dolt.
     pub fn commit(&self, message: &str) -> Result<(), SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         // Stage all changes
         let _ = Command::new("dolt")
             .args(["add", "."])
@@ -348,7 +509,8 @@ impl DoltDb {
         let schema_val = schema_cid.unwrap_or("");
         let sql = format!(
             "INSERT INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta, schema_cid) \
-             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
+             VALUES ('{cid}', '{kind}', '{}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
+            escape_sql(agent),
             escape_sql(meta)
         );
         self.exec(&sql)
@@ -397,7 +559,8 @@ impl DoltDb {
         let schema_val = schema_cid.unwrap_or("");
         stmts.push(format!(
             "INSERT IGNORE INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta, schema_cid) \
-             VALUES ('{cid}', '{kind}', '{agent}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
+             VALUES ('{cid}', '{kind}', '{}', '{created_at}', '{output_cid}', '{}', '{schema_val}')",
+            escape_sql(agent),
             escape_sql(meta)
         ));
 
@@ -565,7 +728,36 @@ impl DoltDb {
     /// back into Dolt to repair any divergence this surfaces.
     pub fn verify_projection(&self, cas: &ket_cas::Store) -> Result<ProjectionDiff, SqlError> {
         let expected = expected_edges_from_cas(cas)?;
-        Ok(diff_edges(expected, self.dag_edges()?))
+        let mut diff = diff_edges(expected, self.dag_edges()?);
+        diff_nodes(
+            &mut diff,
+            expected_nodes_from_cas(cas)?,
+            self.dag_node_rows()?,
+        );
+        Ok(diff)
+    }
+
+    /// The `dag_nodes` rows, as projected columns, for the audit.
+    pub fn dag_node_rows(&self) -> Result<Vec<NodeRow>, SqlError> {
+        let csv = self.query(
+            "SELECT cid, kind, agent, created_at, output_cid, schema_cid FROM dag_nodes ORDER BY cid",
+        )?;
+        let mut rows = Vec::new();
+        for line in csv.lines().skip(1) {
+            let f = parse_csv_line(line);
+            if f.len() != 6 {
+                continue;
+            }
+            rows.push(NodeRow {
+                cid: f[0].clone(),
+                kind: f[1].clone(),
+                agent: f[2].clone(),
+                created_at: f[3].clone(),
+                output_cid: f[4].clone(),
+                schema_cid: f[5].clone(),
+            });
+        }
+        Ok(rows)
     }
 
     /// Heal the `dag_edges` projection by replaying the substrate.
@@ -583,14 +775,30 @@ impl DoltDb {
     /// Closes the second DESIGN.md L3 target (`verify` had no `rebuild`, so a
     /// surfaced divergence had no mechanical fix).
     pub fn rebuild_projection(&self, cas: &ket_cas::Store) -> Result<RebuildReport, SqlError> {
-        let expected = expected_edges_from_cas(cas)?;
+        let expected_edges = expected_edges_from_cas(cas)?;
+        let expected_nodes = expected_nodes_from_cas(cas)?;
 
-        // One transaction: wipe + replay. exec_batch wraps in BEGIN/COMMIT, so
-        // a failure mid-replay leaves the projection at its pre-rebuild state
-        // (no partial table).
-        let mut stmts = Vec::with_capacity(1 + expected.len());
+        // One transaction: wipe + replay BOTH dag_nodes and dag_edges from the
+        // CAS. exec_batch wraps in BEGIN/COMMIT, so a failure mid-replay leaves
+        // the projection at its pre-rebuild state. Only the two DAG-projection
+        // tables are touched; soft_links, scores, tasks and agents are primary
+        // Dolt state with no CAS upstream and are left alone.
+        let mut stmts = Vec::with_capacity(2 + expected_nodes.len() + expected_edges.len());
         stmts.push("DELETE FROM dag_edges".to_string());
-        for row in &expected {
+        stmts.push("DELETE FROM dag_nodes".to_string());
+        for n in &expected_nodes {
+            stmts.push(format!(
+                "INSERT INTO dag_nodes (cid, kind, agent, created_at, output_cid, meta, schema_cid) \
+                 VALUES ('{}', '{}', '{}', '{}', '{}', '', '{}')",
+                n.cid,
+                n.kind,
+                escape_sql(&n.agent),
+                n.created_at,
+                n.output_cid,
+                n.schema_cid,
+            ));
+        }
+        for row in &expected_edges {
             stmts.push(format!(
                 "INSERT INTO dag_edges (parent_cid, child_cid, ordinal, edge_kind) \
                  VALUES ('{}', '{}', {}, '{}')",
@@ -601,15 +809,17 @@ impl DoltDb {
             ));
         }
 
-        // The current row count before purge is the audit-relevant "what was
-        // there"; we read it first so the report is honest even when the wipe
-        // succeeds and the replay surprises us.
+        // Row counts before the purge are the audit-relevant "what was there";
+        // read first so the report is honest even if the replay surprises us.
         let edges_purged = self.count_dag_edges()?;
+        let nodes_purged = self.count_dag_nodes()?;
         self.exec_batch(&stmts)?;
 
         Ok(RebuildReport {
+            nodes_purged,
+            nodes_written: expected_nodes.len(),
             edges_purged,
-            edges_written: expected.len(),
+            edges_written: expected_edges.len(),
         })
     }
 
@@ -617,6 +827,16 @@ impl DoltDb {
     /// the wipe removed before the replay.
     fn count_dag_edges(&self) -> Result<u64, SqlError> {
         let csv = self.query("SELECT COUNT(*) AS n FROM dag_edges")?;
+        let n = csv
+            .lines()
+            .nth(1)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        Ok(n)
+    }
+
+    fn count_dag_nodes(&self) -> Result<u64, SqlError> {
+        let csv = self.query("SELECT COUNT(*) AS n FROM dag_nodes")?;
         let n = csv
             .lines()
             .nth(1)
@@ -759,6 +979,7 @@ impl DoltDb {
 
     /// Commit current working set with a message. Returns the commit hash.
     pub fn dolt_commit(&self, message: &str) -> Result<String, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let _ = Command::new("dolt")
             .args(["add", "."])
             .current_dir(&self.db_path)
@@ -783,6 +1004,7 @@ impl DoltDb {
 
     /// Get current HEAD commit hash.
     pub fn dolt_head(&self) -> Result<String, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let output = Command::new("dolt")
             .args(["log", "-n", "1", "--oneline"])
             .current_dir(&self.db_path)
@@ -798,6 +1020,7 @@ impl DoltDb {
 
     /// Get commit history.
     pub fn dolt_log(&self, n: usize) -> Result<String, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let output = Command::new("dolt")
             .args(["log", "-n", &n.to_string()])
             .current_dir(&self.db_path)
@@ -813,6 +1036,7 @@ impl DoltDb {
 
     /// Diff between two commits (or working set vs HEAD).
     pub fn dolt_diff(&self, from: Option<&str>, to: Option<&str>) -> Result<String, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
         let mut args = vec!["diff".to_string()];
         if let Some(f) = from {
             args.push(f.to_string());
@@ -1087,6 +1311,39 @@ fn expected_edges_from_cas(cas: &ket_cas::Store) -> Result<Vec<EdgeRow>, SqlErro
     Ok(expected)
 }
 
+/// Derive the `dag_nodes` rows every node in the CAS implies — the companion
+/// of [`expected_edges_from_cas`] for the node table. Shared by the audit and
+/// the heal so they cannot disagree about what the projection should hold.
+fn expected_nodes_from_cas(cas: &ket_cas::Store) -> Result<Vec<NodeRow>, SqlError> {
+    let mut expected = Vec::new();
+    let mut cids = cas.list().map_err(|e| SqlError::DoltError(e.to_string()))?;
+    cids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for cid in cids {
+        let bytes = match cas.get(&cid) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let node = match ket_dag::DagNode::from_bytes(&bytes) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        expected.push(NodeRow {
+            cid: cid.as_str().to_string(),
+            kind: node.kind.to_string(),
+            agent: node.agent.clone(),
+            created_at: node.timestamp.clone(),
+            output_cid: node.output_cid.as_str().to_string(),
+            schema_cid: node
+                .schema_cid
+                .as_ref()
+                .map(|c| c.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+    Ok(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,5 +1443,51 @@ mod tests {
         let (exp, act) = &diff.mismatched[0];
         assert_eq!(exp.edge_kind, "grounds");
         assert_eq!(act.edge_kind, "derives");
+    }
+
+    fn node(cid: &str, agent: &str) -> NodeRow {
+        NodeRow {
+            cid: cid.into(),
+            kind: "memory".into(),
+            agent: agent.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            output_cid: "o".into(),
+            schema_cid: "".into(),
+        }
+    }
+
+    #[test]
+    fn diff_nodes_flags_missing_extra_and_altered_rows() {
+        let mut diff = ProjectionDiff::default();
+        diff_nodes(
+            &mut diff,
+            vec![node("a", "honest"), node("b", "x")], // expected (CAS)
+            vec![node("a", "evil"), node("c", "y")],   // actual (SQL)
+        );
+        // "a" present in both but agent altered -> mismatch; "b" only in CAS
+        // -> missing; "c" only in SQL -> extra.
+        assert_eq!(diff.mismatched_nodes.len(), 1);
+        assert_eq!(diff.mismatched_nodes[0].0.agent, "honest");
+        assert_eq!(diff.mismatched_nodes[0].1.agent, "evil");
+        assert_eq!(diff.missing_nodes.len(), 1);
+        assert_eq!(diff.missing_nodes[0].cid, "b");
+        assert_eq!(diff.extra_nodes.len(), 1);
+        assert_eq!(diff.extra_nodes[0].cid, "c");
+        assert!(!diff.is_clean());
+    }
+
+    #[test]
+    fn parse_csv_line_honors_quoting() {
+        // A field with a comma is quoted by Dolt; a doubled quote is one quote.
+        assert_eq!(parse_csv_line("a,b,c"), vec!["a", "b", "c"]);
+        assert_eq!(
+            parse_csv_line(r#"cid,memory,"audit:sec, and more",ts"#),
+            vec!["cid", "memory", "audit:sec, and more", "ts"]
+        );
+        // A doubled quote inside a quoted field decodes to a single quote.
+        assert_eq!(
+            parse_csv_line(r#""he said ""hi""",tail"#),
+            vec![r#"he said "hi""#, "tail"]
+        );
     }
 }
