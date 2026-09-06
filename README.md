@@ -179,7 +179,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket sql <query>` — Raw SQL against Dolt
 - `ket log [-n <count>]` — Mutation log
 - `ket status` — Health dashboard
-- `ket history` / `ket diff` — Dolt version history
+- `ket history` / `ket diff` — Dolt projection checkpoints (commits made at init and on `repair`/`rebuild-projection`). For the fine-grained, per-write event history use `ket log`, the append-only mutation log — that, not Dolt's commit graph, is ket's record of every operation.
 - `ket verify-projection` — Audit the SQL projection against the CAS (nodes and edges); exit 0 clean, 1 divergence, 2 env error
 - `ket rebuild-projection` — Reconstruct the SQL projection from the CAS, recreating the Dolt db if it was deleted
 - `ket repair [--dry-run]` — Reconcile the projection with the CAS: fixes missing, extra, and altered node/edge rows (Dolt-only tables are left intact)

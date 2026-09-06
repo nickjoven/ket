@@ -141,8 +141,23 @@ impl<'a> Orchestrator<'a> {
         if !self.db.task_exists(task_id)? {
             return Err(AgentError::NotFound(format!("task {task_id}")));
         }
+        if !self.agent_is_known(agent)? {
+            return Err(AgentError::NotFound(format!(
+                "agent {agent} (register it first, or use a preset: claude/codex/copilot)"
+            )));
+        }
         self.db.assign_task(task_id, agent)?;
         Ok(())
+    }
+
+    /// An agent is known if it is registered or is one of the built-in presets
+    /// `run` can invoke. Guards `assign`/`run` from silently accepting a
+    /// misspelled agent that would only fail (or do nothing) at run time.
+    fn agent_is_known(&self, agent: &str) -> Result<bool, AgentError> {
+        if matches!(agent, "claude" | "codex" | "copilot") {
+            return Ok(true);
+        }
+        Ok(self.db.agent_command(agent)?.is_some())
     }
 
     /// Run a task by spawning the assigned agent.
@@ -153,9 +168,15 @@ impl<'a> Orchestrator<'a> {
         agent_name: &str,
         context: Option<&str>,
     ) -> Result<Cid, AgentError> {
-        // Refuse an unknown task instead of running and minting an orphan node.
+        // Refuse an unknown task or agent instead of running and minting an
+        // orphan node.
         if !self.db.task_exists(task_id)? {
             return Err(AgentError::NotFound(format!("task {task_id}")));
+        }
+        if !self.agent_is_known(agent_name)? {
+            return Err(AgentError::NotFound(format!(
+                "agent {agent_name} (register it first, or use a preset: claude/codex/copilot)"
+            )));
         }
         self.db
             .update_task_status(task_id, TaskStatus::Running.as_str())?;
@@ -219,13 +240,37 @@ impl<'a> Orchestrator<'a> {
             )));
         };
 
-        // Store result as DAG node
+        // Store result as DAG node. If the task was created against a context
+        // blob that is itself a node, parent the result to it so the result
+        // has lineage back to what it was reasoning over. (Tasks live in Dolt,
+        // not the DAG, so a task with no context node yields a root result.)
         let dag = Dag::new(self.cas);
-        let (node_cid, _) =
-            dag.store_with_node(result.as_bytes(), NodeKind::Reasoning, vec![], agent_name)?;
+        let parents: Vec<Cid> = match self.db.task_context_cid(task_id)? {
+            Some(ctx) => {
+                let cid = Cid::from(ctx.as_str());
+                if dag.get_node(&cid).is_ok() {
+                    vec![cid]
+                } else {
+                    vec![]
+                }
+            }
+            None => vec![],
+        };
+        let (node_cid, _) = dag.store_with_node(
+            result.as_bytes(),
+            NodeKind::Reasoning,
+            parents.clone(),
+            agent_name,
+        )?;
 
-        // Sync to SQL in single transaction
+        // Sync to SQL in single transaction, projecting the parent edge (if
+        // any) from the sealed node so verify-projection stays clean.
         let node = dag.get_node(&node_cid)?;
+        let parent_refs: Vec<(&str, i32, &str)> = node
+            .parent_links()
+            .enumerate()
+            .map(|(i, (cid, k))| (cid.as_str(), i as i32, k.as_str()))
+            .collect();
         self.db.sync_dag_node(
             node_cid.as_str(),
             &node.kind.to_string(),
@@ -233,7 +278,7 @@ impl<'a> Orchestrator<'a> {
             &node.timestamp,
             node.output_cid.as_str(),
             "",
-            &[],
+            &parent_refs,
             node.schema_cid.as_ref().map(|c| c.as_str()),
         )?;
 

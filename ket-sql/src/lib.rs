@@ -656,6 +656,20 @@ impl DoltDb {
         ))
     }
 
+    /// The context blob a task was created against, if any — so a run can
+    /// parent its result node to that context and give the result lineage.
+    pub fn task_context_cid(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT context_cid FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| l.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
     /// The registered invocation command for an agent, if any — so `run`
     /// honors what `ket agent register` stored instead of a hard-coded argv.
     pub fn agent_command(&self, name: &str) -> Result<Option<String>, SqlError> {

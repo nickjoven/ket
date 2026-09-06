@@ -744,6 +744,8 @@ pub fn handle_tool_call(
             };
             let cid = ket_cas::Cid::from(root_cid);
             let (node_cid, result) = ket_opt::calibrate(cas, &dag, db, &cid, &constraints, "mcp")?;
+            // A calibration is a DAG write; log it like every other MCP write.
+            log_event(cas, "calibrate", node_cid.as_str());
 
             Ok(serde_json::json!({
                 "node_cid": node_cid.as_str(),

@@ -1471,3 +1471,117 @@ fn status_json_has_no_ansi_escapes() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("dolt_head").is_some());
 }
+
+// --- Audit round 3: agent validation, result lineage, Dolt history ---
+
+#[test]
+fn assign_and_run_refuse_an_unregistered_agent() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("unknown-agent");
+    let tid = ket_json(&ket_dir, &["task", "create", "t", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A misspelled/unregistered agent must be refused, not silently accepted.
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "cla;ude-typo"]);
+    assert!(!ok, "assign to an unregistered agent must fail: {err}");
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid, "--agent", "nope-agent"]);
+    assert!(!ok, "run with an unregistered agent must fail: {err}");
+    // Presets are always known.
+    let (ok, _, _) = ket(&ket_dir, &["task", "assign", &tid, "claude"]);
+    assert!(ok, "a preset agent name is accepted");
+}
+
+#[test]
+fn a_run_result_has_lineage_to_its_task_context() {
+    // When a task carries a context node, the result node parents to it, so
+    // `dag lineage` on the result reaches the context (result nodes were
+    // previously always parentless).
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-lineage");
+    // A context node to reason over.
+    let ctx = create_node(
+        &ket_dir,
+        "the source material",
+        &["--kind", "context", "--agent", "human"],
+    );
+
+    let agent_sh = tmp.path().join("agent.sh");
+    std::fs::write(&agent_sh, "#!/usr/bin/env bash\necho '{\"done\":1}'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent_sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "worker",
+            "--command",
+            &format!("bash {}", agent_sh.to_str().unwrap()),
+        ],
+    );
+    // Create the task against the context node.
+    let tid = ket_json(
+        &ket_dir,
+        &[
+            "task",
+            "create",
+            "reason over it",
+            "--by",
+            "human",
+            "--context",
+            &ctx,
+        ],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "worker"]);
+    let result = ket_json(&ket_dir, &["run", &tid, "--agent", "worker"])["result_cid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &result]);
+    let cids: Vec<String> = lineage
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["cid"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        cids.contains(&ctx),
+        "result must have lineage to the task context: {cids:?}"
+    );
+    assert_eq!(
+        verify_projection(&ket_dir)["clean"],
+        true,
+        "projection clean with the result's parent edge"
+    );
+}
+
+#[test]
+fn dolt_history_advances_on_repair() {
+    // `ket history` used to be frozen at the two init commits because nothing
+    // committed. A repair now checkpoints the projection, so history grows.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("history-advances");
+    create_node(&ket_dir, "n", &["--kind", "memory", "--agent", "a"]);
+    let before = ket(&ket_dir, &["history"]).1.lines().count();
+    let (ok, _, err) = ket(&ket_dir, &["repair"]);
+    assert!(ok, "{err}");
+    let after = ket(&ket_dir, &["history"]).1.lines().count();
+    assert!(
+        after > before,
+        "history advanced after repair: {before} -> {after}"
+    );
+}

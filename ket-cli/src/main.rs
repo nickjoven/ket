@@ -688,6 +688,13 @@ enum TaskAction {
         /// Creator
         #[arg(long, default_value = "human")]
         by: String,
+        /// Context node CID this task reasons over; a run's result parents to
+        /// it, giving the result lineage
+        #[arg(long)]
+        context: Option<String>,
+        /// Parent task id (for subtasks)
+        #[arg(long)]
+        parent: Option<String>,
     },
     /// List tasks
     Ls,
@@ -1396,8 +1403,14 @@ fn cmd_task(
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
     match action {
-        TaskAction::Create { title, by } => {
-            let id = orch.create_task(&title, &by, None, None)?;
+        TaskAction::Create {
+            title,
+            by,
+            context,
+            parent,
+        } => {
+            let context_cid = context.as_ref().map(|c| ket_cas::Cid::from(c.as_str()));
+            let id = orch.create_task(&title, &by, parent.as_deref(), context_cid.as_ref())?;
             if json {
                 println!(
                     "{}",
@@ -2023,6 +2036,7 @@ fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn s
     }
 
     let report = db.rebuild_projection(&cas)?;
+    let _ = db.commit("ket repair: reconcile projection with CAS");
 
     if json {
         println!(
@@ -3394,6 +3408,10 @@ fn cmd_rebuild_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std:
             std::process::exit(2);
         }
     };
+    // Commit the projection so `ket history`/`diff` show a checkpoint rather
+    // than freezing at the two init commits. Best-effort: the CAS and log are
+    // the source of truth, not this Dolt commit.
+    let _ = db.commit("ket rebuild-projection");
 
     if json {
         println!(
