@@ -1371,3 +1371,103 @@ fn import_preserves_typed_edges() {
         "imported projection is clean"
     );
 }
+
+// --- Audit round 2: agent orchestration + status hygiene ---
+
+#[test]
+fn run_and_assign_refuse_an_unknown_task() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("run-unknown-task");
+    // A fake agent on PATH is not needed: the task check happens first.
+    let (ok, _out, err) = ket(&ket_dir, &["run", "no-such-task", "--agent", "claude"]);
+    assert!(!ok, "run of a nonexistent task must fail, not mint a node");
+    assert!(
+        err.to_lowercase().contains("task"),
+        "error names the task: {err}"
+    );
+    // And no stray node was created.
+    assert_eq!(
+        ket_json(&ket_dir, &["dag", "ls"]).as_array().unwrap().len(),
+        0
+    );
+
+    let (ok, _, err) = ket(&ket_dir, &["agent", "register", "claude"]);
+    assert!(ok, "{err}");
+    let (ok, _, _) = ket(&ket_dir, &["task", "assign", "no-such-task", "claude"]);
+    assert!(!ok, "assigning a nonexistent task must fail");
+}
+
+#[test]
+fn run_honors_the_registered_agent_command_and_records_the_result() {
+    // `ket run` used to hard-code claude/codex and ignore the registered
+    // command; and it never set the task's result_cid. Register an agent whose
+    // command is a trivial shell that echoes JSON, run a real task, and check
+    // the result node exists and is linked from the task row.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-honors-config");
+    // A stand-in agent: prints a fixed line, ignores its args.
+    let agent_sh = tmp.path().join("echo-agent.sh");
+    std::fs::write(&agent_sh, "#!/usr/bin/env bash\necho '{\"ok\":true}'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent_sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cmd = format!("bash {}", agent_sh.to_str().unwrap());
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["agent", "register", "claude", "--command", &cmd],
+    );
+    assert!(ok, "register with --command: {err}");
+
+    let tid = ket_json(&ket_dir, &["task", "create", "do a thing", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "claude"]);
+    let (ok, out, err) = ket(&ket_dir, &["--json", "run", &tid, "--agent", "claude"]);
+    assert!(ok, "run via the registered command: {out}{err}");
+    let result_cid = serde_json::from_str::<serde_json::Value>(&out).unwrap()["result_cid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The result content is what our agent printed (resolve the node's output).
+    let output_cid = ket_json(&ket_dir, &["dag", "show", &result_cid])["output_cid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(ket(&ket_dir, &["get", &output_cid])
+        .1
+        .contains("\"ok\":true"));
+    // The task row now links to the result.
+    let row = ket(
+        &ket_dir,
+        &[
+            "sql",
+            &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+        ],
+    )
+    .1;
+    assert!(row.contains(&result_cid), "task.result_cid set: {row}");
+}
+
+#[test]
+fn status_json_has_no_ansi_escapes() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("status-ansi");
+    let (ok, out, _) = ket(&ket_dir, &["--json", "status"]);
+    assert!(ok);
+    assert!(
+        !out.contains('\u{1b}'),
+        "no raw ANSI escape in --json status: {out:?}"
+    );
+    // It must still be valid JSON with a dolt_head field.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("dolt_head").is_some());
+}

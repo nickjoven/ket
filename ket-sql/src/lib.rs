@@ -636,6 +636,40 @@ impl DoltDb {
         self.exec(&sql)
     }
 
+    /// Whether a task row exists — so `run`/`assign` refuse an unknown id
+    /// instead of silently no-op'ing an UPDATE and proceeding.
+    pub fn task_exists(&self, id: &str) -> Result<bool, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT COUNT(*) AS cnt FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv.lines().nth(1).map(|l| l.trim() != "0").unwrap_or(false))
+    }
+
+    /// Record the result node CID a run produced, closing the task→result link
+    /// (the `result_cid` column existed but nothing populated it).
+    pub fn set_task_result(&self, id: &str, result_cid: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET result_cid = '{result_cid}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(id)
+        ))
+    }
+
+    /// The registered invocation command for an agent, if any — so `run`
+    /// honors what `ket agent register` stored instead of a hard-coded argv.
+    pub fn agent_command(&self, name: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT cli_command FROM agents WHERE name = '{}'",
+            escape_sql(name)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| l.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
     /// Insert or update an agent.
     pub fn upsert_agent(
         &self,
@@ -1010,7 +1044,7 @@ impl DoltDb {
             .current_dir(&self.db_path)
             .output()?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
         Ok(stdout
             .split_whitespace()
             .next()
@@ -1260,6 +1294,29 @@ fn parse_count(csv: &str) -> u64 {
 
 fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Strip ANSI colour escapes. `dolt log` colourises its output, and those
+/// codes leaked into `ket status --json` (a JSON string with raw \u001b[33m).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC '[' ... final byte in @-~
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for d in chars.by_ref() {
+                    if ('@'..='~').contains(&d) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Validate and normalize an edge kind string.

@@ -709,8 +709,16 @@ enum TaskAction {
 enum AgentAction {
     /// Register an agent
     Register {
-        /// Agent name (claude, codex, copilot)
+        /// Agent name: a preset (claude, codex, copilot) or any name when
+        /// --command is given
         name: String,
+        /// Invocation command for a custom agent; the prompt is appended as
+        /// the final argument. Overrides the preset for this name.
+        #[arg(long)]
+        command: Option<String>,
+        /// Model identifier to record (optional)
+        #[arg(long)]
+        model: Option<String>,
     },
     /// List agents
     Ls,
@@ -1449,15 +1457,28 @@ fn cmd_agent(
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
     match action {
-        AgentAction::Register { name } => {
-            let config = match name.as_str() {
-                "claude" => ket_agent::AgentConfig::claude(),
-                "codex" => ket_agent::AgentConfig::codex(),
-                "copilot" => ket_agent::AgentConfig::copilot(),
-                _ => {
-                    return Err(
-                        format!("Unknown agent preset: {name}. Use claude/codex/copilot").into(),
-                    );
+        AgentAction::Register {
+            name,
+            command,
+            model,
+        } => {
+            let config = match (command, name.as_str()) {
+                // An explicit command registers any named agent.
+                (Some(cli_command), _) => ket_agent::AgentConfig {
+                    name: name.clone(),
+                    cli_command,
+                    mcp_capable: false,
+                    capabilities: vec![],
+                    model,
+                },
+                (None, "claude") => ket_agent::AgentConfig::claude(),
+                (None, "codex") => ket_agent::AgentConfig::codex(),
+                (None, "copilot") => ket_agent::AgentConfig::copilot(),
+                (None, _) => {
+                    return Err(format!(
+                        "Unknown agent preset: {name}. Use claude/codex/copilot, or pass --command"
+                    )
+                    .into());
                 }
             };
             orch.register_agent(&config)?;
@@ -1874,6 +1895,10 @@ fn cmd_calibrate(
             let root_cid = ket_cas::Cid::from(root.as_str());
             let (node_cid, result) =
                 ket_opt::calibrate(&cas, &dag, &db, &root_cid, &constraints, &agent)?;
+
+            // A calibration is a DAG write like any other; log it so the
+            // mutation log is complete (it was the one write path with no line).
+            log_event(&base.join("log"), "calibrate", node_cid.as_str());
 
             if json {
                 println!(

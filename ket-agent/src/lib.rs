@@ -138,6 +138,9 @@ impl<'a> Orchestrator<'a> {
 
     /// Assign a task to an agent.
     pub fn assign_task(&self, task_id: &str, agent: &str) -> Result<(), AgentError> {
+        if !self.db.task_exists(task_id)? {
+            return Err(AgentError::NotFound(format!("task {task_id}")));
+        }
         self.db.assign_task(task_id, agent)?;
         Ok(())
     }
@@ -150,25 +153,45 @@ impl<'a> Orchestrator<'a> {
         agent_name: &str,
         context: Option<&str>,
     ) -> Result<Cid, AgentError> {
+        // Refuse an unknown task instead of running and minting an orphan node.
+        if !self.db.task_exists(task_id)? {
+            return Err(AgentError::NotFound(format!("task {task_id}")));
+        }
         self.db
             .update_task_status(task_id, TaskStatus::Running.as_str())?;
 
-        // Build the command
-        let (program, args) = match agent_name {
-            "claude" => (
-                "claude",
-                vec![
-                    "-p".to_string(),
-                    "--output-format".to_string(),
-                    "json".to_string(),
-                    prompt.to_string(),
-                ],
-            ),
-            "codex" => ("codex", vec!["exec".to_string(), prompt.to_string()]),
-            _ => {
-                return Err(AgentError::NotFound(agent_name.to_string()));
-            }
-        };
+        // Prefer the command `ket agent register` stored for this agent; the
+        // prompt is appended as the final argument. Fall back to the built-in
+        // presets, then error. (Simple whitespace splitting: agent commands
+        // are flags, not shell.) This is the fix for `run` ignoring the
+        // registered `cli_command`.
+        let (program, args): (String, Vec<String>) =
+            if let Some(cmd) = self.db.agent_command(agent_name)? {
+                let mut parts = cmd.split_whitespace().map(str::to_string);
+                let program = parts
+                    .next()
+                    .ok_or_else(|| AgentError::NotFound(agent_name.to_string()))?;
+                let mut args: Vec<String> = parts.collect();
+                args.push(prompt.to_string());
+                (program, args)
+            } else {
+                match agent_name {
+                    "claude" => (
+                        "claude".to_string(),
+                        vec![
+                            "-p".to_string(),
+                            "--output-format".to_string(),
+                            "json".to_string(),
+                            prompt.to_string(),
+                        ],
+                    ),
+                    "codex" => (
+                        "codex".to_string(),
+                        vec!["exec".to_string(), prompt.to_string()],
+                    ),
+                    _ => return Err(AgentError::NotFound(agent_name.to_string())),
+                }
+            };
 
         // Build full prompt with context
         let full_prompt = if let Some(ctx) = context {
@@ -178,7 +201,7 @@ impl<'a> Orchestrator<'a> {
         };
 
         // Spawn the process
-        let output = tokio::process::Command::new(program)
+        let output = tokio::process::Command::new(&program)
             .args(&args[..args.len() - 1])
             .arg(&full_prompt)
             .output()
@@ -201,10 +224,6 @@ impl<'a> Orchestrator<'a> {
         let (node_cid, _) =
             dag.store_with_node(result.as_bytes(), NodeKind::Reasoning, vec![], agent_name)?;
 
-        // Update task with result
-        self.db
-            .update_task_status(task_id, TaskStatus::Done.as_str())?;
-
         // Sync to SQL in single transaction
         let node = dag.get_node(&node_cid)?;
         self.db.sync_dag_node(
@@ -217,6 +236,12 @@ impl<'a> Orchestrator<'a> {
             &[],
             node.schema_cid.as_ref().map(|c| c.as_str()),
         )?;
+
+        // Record the result on the task and mark it done, so the task row
+        // links to the node the run produced (`result_cid` was never set).
+        self.db.set_task_result(task_id, node_cid.as_str())?;
+        self.db
+            .update_task_status(task_id, TaskStatus::Done.as_str())?;
 
         Ok(node_cid)
     }
