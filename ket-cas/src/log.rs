@@ -56,9 +56,16 @@ pub fn append(log_path: &Path, event: &str, detail: &str) -> Result<(), std::io:
         last[0] != b'\n'
     };
     let guard = if needs_newline { "\n" } else { "" };
-    // One write: the guard newline and the entry cannot be split by a
-    // crash into a state worse than the one being healed.
-    writeln!(file, "{guard}{timestamp} | {event} | {detail}")?;
+    // One `write_all`, not `writeln!`. `writeln!` on a File is `write_fmt`,
+    // which issues a separate write(2) per format fragment; under O_APPEND
+    // each write lands atomically at end-of-file, but concurrent writers then
+    // interleave their fragments and tear each other's lines. Building the
+    // whole line — heal newline, entry, terminator — into one buffer and
+    // emitting it in a single write keeps each entry whole: O_APPEND makes a
+    // lone write of a short line atomic. (32 concurrent appenders produced 20
+    // malformed lines out of 42 before this; a live-log audit found the same.)
+    let line = format!("{guard}{timestamp} | {event} | {detail}\n");
+    file.write_all(line.as_bytes())?;
     file.sync_data()?;
     Ok(())
 }
@@ -122,6 +129,54 @@ mod tests {
         let log2 = dir.join("log2");
         append(&log2, "init", "x").unwrap();
         assert!(!fs::read_to_string(&log2).unwrap().starts_with('\n'));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_appends_never_tear_a_line() {
+        // Many writers appending at once must each leave one whole, well-formed
+        // line — no interleaved fragments. `writeln!` tore lines here (a
+        // 32-writer run left 20 of 42 lines malformed); one buffered write per
+        // entry, under O_APPEND, does not.
+        let dir = std::env::temp_dir().join(format!("ket-log-concurrent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+
+        let writers = 32;
+        let per_writer = 8;
+        let handles: Vec<_> = (0..writers)
+            .map(|w| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for i in 0..per_writer {
+                        append(&log, "put", &format!("w{w:02}-{i} -> {}", "a".repeat(64))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let text = fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            writers * per_writer,
+            "one line per append, none torn or merged"
+        );
+        let re_ok = |l: &str| {
+            // "<ts> | put | w##-# -> <64 hex-ish>"
+            let parts: Vec<&str> = l.splitn(3, " | ").collect();
+            parts.len() == 3
+                && parts[1] == "put"
+                && parts[2].contains(" -> ")
+                && parts[2].ends_with(&"a".repeat(64))
+        };
+        let malformed: Vec<&&str> = lines.iter().filter(|l| !re_ok(l)).collect();
+        assert!(malformed.is_empty(), "torn/merged lines: {malformed:?}");
 
         fs::remove_dir_all(&dir).unwrap();
     }
