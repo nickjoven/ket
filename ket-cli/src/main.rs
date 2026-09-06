@@ -958,7 +958,27 @@ fn resolve_parent(
     if !cas.exists(&cid) {
         return Err(format!("Parent not found in store: {raw}").into());
     }
+    // A parent is a node in the DAG, not any blob. Sealing a content/schema
+    // blob as a parent produced a node whose `lineage` silently dead-ended.
+    let bytes = cas.get(&cid)?;
+    if ket_dag::DagNode::from_bytes(&bytes).is_err() {
+        return Err(format!(
+            "Parent {} is not a DAG node (it is a content blob)",
+            &raw[..12.min(raw.len())]
+        )
+        .into());
+    }
     Ok(cid)
+}
+
+/// A projection sync happens after the node is already sealed in CAS (the
+/// source of truth). If Dolt rejects it, warn and point at `ket repair`
+/// rather than failing the command and making the caller retry into a
+/// duplicate — but never swallow it silently, which used to lose rows.
+fn warn_if_projection_failed(result: Result<(), ket_sql::SqlError>) {
+    if let Err(e) = result {
+        eprintln!("warning: projection sync failed (run `ket repair`): {e}");
+    }
 }
 
 /// Parse `--parent <cid>[:<kind>]`. A parent without a suffix takes `default`.
@@ -1251,7 +1271,7 @@ fn cmd_dag(
             if let Ok(db) = open_db(base) {
                 let node = dag.get_node(&node_cid)?;
                 let edges = projected_edges(&node);
-                let _ = db.sync_dag_node(
+                warn_if_projection_failed(db.sync_dag_node(
                     node_cid.as_str(),
                     &kind,
                     &agent,
@@ -1260,7 +1280,7 @@ fn cmd_dag(
                     "",
                     &edge_refs(&edges),
                     schema.as_deref(),
-                );
+                ));
             }
 
             // Log
@@ -1927,106 +1947,77 @@ fn cmd_calibrate(
 fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cas = open_cas(base)?;
     let db = open_db(base)?;
-    let dag = ket_dag::Dag::new(&cas);
 
-    // Scan all CAS blobs, find valid DAG nodes
-    let cids = cas.list()?;
-    let mut synced = 0u64;
-    let mut skipped = 0u64;
-    let mut errors = 0u64;
+    // Reconcile the DAG projection with the CAS, the source of truth. This is
+    // a full node+edge diff, so it fixes not just *missing* rows but *altered*
+    // and *orphan* ones too — an earlier repair only INSERT-IGNOREd missing
+    // nodes, so a hand-edited `agent='evil'` row survived it. Only the two
+    // DAG-projection tables are reconciled; soft_links, scores, tasks and
+    // agents are primary Dolt state with no CAS upstream and are left intact.
+    let diff = db.verify_projection(&cas)?;
+    let to_fix = diff.missing.len()
+        + diff.extra.len()
+        + diff.mismatched.len()
+        + diff.missing_nodes.len()
+        + diff.extra_nodes.len()
+        + diff.mismatched_nodes.len();
 
-    for cid in &cids {
-        // Try to parse as a DagNode
-        let node = match dag.get_node(cid) {
-            Ok(n) => n,
-            Err(_) => continue, // raw content blob, not a node
-        };
-
-        // Check if already in SQL
-        match db.dag_node_exists(cid.as_str()) {
-            Ok(true) => {
-                skipped += 1;
-                continue;
-            }
-            Ok(false) => {}
-            Err(_) => {
-                errors += 1;
-                continue;
-            }
+    if dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "dry_run": true,
+                    "clean": diff.is_clean(),
+                    "nodes": {
+                        "missing": diff.missing_nodes.len(),
+                        "extra": diff.extra_nodes.len(),
+                        "mismatched": diff.mismatched_nodes.len(),
+                    },
+                    "edges": {
+                        "missing": diff.missing.len(),
+                        "extra": diff.extra.len(),
+                        "mismatched": diff.mismatched.len(),
+                    },
+                }))?
+            );
+        } else if diff.is_clean() {
+            println!("Repair (dry-run): projection already agrees with the substrate.");
+        } else {
+            println!(
+                "Repair (dry-run): would reconcile {to_fix} divergence(s) — nodes(missing={} extra={} mismatched={}) edges(missing={} extra={} mismatched={}).",
+                diff.missing_nodes.len(),
+                diff.extra_nodes.len(),
+                diff.mismatched_nodes.len(),
+                diff.missing.len(),
+                diff.extra.len(),
+                diff.mismatched.len(),
+            );
         }
-
-        if dry_run {
-            if !json {
-                println!(
-                    "  would sync: {}  {}  {}",
-                    &cid.as_str()[..12],
-                    node.kind,
-                    node.agent
-                );
-            }
-            synced += 1;
-            continue;
-        }
-
-        // Sync node + edges in one transaction; edge kinds come from the
-        // sealed node, so repair reproduces exactly what verify expects.
-        let edges = projected_edges(&node);
-        let parent_refs = edge_refs(&edges);
-
-        match db.sync_dag_node(
-            cid.as_str(),
-            &node.kind.to_string(),
-            &node.agent,
-            &node.timestamp,
-            node.output_cid.as_str(),
-            "",
-            &parent_refs,
-            node.schema_cid.as_ref().map(|c| c.as_str()),
-        ) {
-            Ok(()) => {
-                synced += 1;
-                if !json {
-                    println!(
-                        "  synced: {}  {}  {}",
-                        &cid.as_str()[..12],
-                        node.kind,
-                        node.agent
-                    );
-                }
-            }
-            Err(e) => {
-                errors += 1;
-                if !json {
-                    eprintln!("  error: {}: {e}", &cid.as_str()[..12]);
-                }
-            }
-        }
+        return Ok(());
     }
+
+    let report = db.rebuild_projection(&cas)?;
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "dry_run": dry_run,
-                "synced": synced,
-                "skipped": skipped,
-                "errors": errors,
+                "dry_run": false,
+                "reconciled": to_fix,
+                "nodes_written": report.nodes_written,
+                "edges_written": report.edges_written,
             }))?
         );
     } else {
-        let verb = if dry_run { "would sync" } else { "synced" };
-        println!("\nRepair: {synced} {verb}, {skipped} already in sync, {errors} errors");
-    }
-
-    // Log the repair
-    if !dry_run {
-        let log_path = base.join("log");
-        log_event(
-            &log_path,
-            "repair",
-            &format!("synced={synced} skipped={skipped} errors={errors}"),
+        println!(
+            "Repair: reconciled {to_fix} divergence(s); projection now holds {} nodes and {} edges.",
+            report.nodes_written, report.edges_written
         );
     }
+
+    let log_path = base.join("log");
+    log_event(&log_path, "repair", &format!("reconciled={to_fix}"));
 
     Ok(())
 }
@@ -2461,35 +2452,42 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
     let cas = open_cas(base)?;
     let dag = ket_dag::Dag::new(&cas);
 
-    let data = fs::read_to_string(path)?;
+    // `-` reads the bundle from stdin, so `ket export <cid> | ket import -`
+    // works as documented.
+    let data = if path == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        buf
+    } else {
+        fs::read_to_string(path)?
+    };
     let bundle: ket_dag::DagBundle = serde_json::from_str(&data)?;
     let imported = dag.import(&bundle)?;
 
-    // Sync imported nodes to SQL if available
+    // Sync imported nodes to SQL if available. Edge kinds come from the sealed
+    // node via `projected_edges` — projecting them all as `derives` (the old
+    // behavior) downgraded every grounds/proposes/supersedes edge and left
+    // `verify-projection` dirty on any bundle with typed edges.
     let mut sql_synced = 0;
     if let Ok(db) = open_db(base) {
         for entry in &bundle.entries {
             if let Ok(node) = dag.get_node(&entry.node_cid) {
-                let parent_refs: Vec<(&str, i32, &str)> = node
-                    .parents
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| (p.as_str(), i as i32, "derives"))
-                    .collect();
-                if db
-                    .sync_dag_node(
-                        entry.node_cid.as_str(),
-                        &node.kind.to_string(),
-                        &node.agent,
-                        &node.timestamp,
-                        node.output_cid.as_str(),
-                        "",
-                        &parent_refs,
-                        node.schema_cid.as_ref().map(|c| c.as_str()),
-                    )
-                    .is_ok()
-                {
-                    sql_synced += 1;
+                let edges = projected_edges(&node);
+                match db.sync_dag_node(
+                    entry.node_cid.as_str(),
+                    &node.kind.to_string(),
+                    &node.agent,
+                    &node.timestamp,
+                    node.output_cid.as_str(),
+                    "",
+                    &edge_refs(&edges),
+                    node.schema_cid.as_ref().map(|c| c.as_str()),
+                ) {
+                    Ok(()) => sql_synced += 1,
+                    Err(e) => eprintln!(
+                        "warning: projection sync failed for {} (run `ket repair`): {e}",
+                        &entry.node_cid.as_str()[..12]
+                    ),
                 }
             }
         }
@@ -2561,7 +2559,7 @@ fn cmd_merge(
     if let Ok(db) = open_db(base) {
         let node = dag.get_node(&node_cid)?;
         let edges = projected_edges(&node);
-        let _ = db.sync_dag_node(
+        warn_if_projection_failed(db.sync_dag_node(
             node_cid.as_str(),
             kind,
             agent,
@@ -2570,7 +2568,7 @@ fn cmd_merge(
             "",
             &edge_refs(&edges),
             schema,
-        );
+        ));
     }
 
     // Log
@@ -3264,6 +3262,9 @@ fn cmd_verify_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::
     let missing = diff.missing.len();
     let extra = diff.extra.len();
     let mismatched = diff.mismatched.len();
+    let missing_nodes = diff.missing_nodes.len();
+    let extra_nodes = diff.extra_nodes.len();
+    let mismatched_nodes = diff.mismatched_nodes.len();
     let clean = diff.is_clean();
 
     if json {
@@ -3274,14 +3275,33 @@ fn cmd_verify_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::
                 "missing": missing,
                 "extra": extra,
                 "mismatched": mismatched,
+                "missing_nodes": missing_nodes,
+                "extra_nodes": extra_nodes,
+                "mismatched_nodes": mismatched_nodes,
             }))?
         );
     } else if clean {
         println!("verify-projection: clean (projection agrees with substrate)");
     } else {
         println!(
-            "verify-projection: divergence — missing={missing} extra={extra} mismatched={mismatched}"
+            "verify-projection: divergence — nodes(missing={missing_nodes} extra={extra_nodes} mismatched={mismatched_nodes}) edges(missing={missing} extra={extra} mismatched={mismatched})"
         );
+        for n in &diff.missing_nodes {
+            println!(
+                "  missing node: {} {} {}",
+                &n.cid[..12.min(n.cid.len())],
+                n.kind,
+                n.agent
+            );
+        }
+        for n in &diff.extra_nodes {
+            println!(
+                "  extra node:   {} {} {}",
+                &n.cid[..12.min(n.cid.len())],
+                n.kind,
+                n.agent
+            );
+        }
         for row in &diff.missing {
             println!(
                 "  missing: {}→{} ord={} kind={}",
@@ -3328,12 +3348,18 @@ fn cmd_rebuild_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std:
             std::process::exit(2);
         }
     };
+    // Recreate the Dolt db if it is gone: rebuild-projection's whole job is
+    // to reconstruct the projection from the CAS, so a missing projection is
+    // the case it must handle, not refuse.
     let db = match open_db(base) {
         Ok(d) => d,
-        Err(e) => {
-            eprintln!("rebuild-projection: cannot open Dolt ({e})");
-            std::process::exit(2);
-        }
+        Err(_) => match ket_sql::DoltDb::init(&base.join("ket.db")) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("rebuild-projection: cannot open or create Dolt ({e})");
+                std::process::exit(2);
+            }
+        },
     };
 
     let report = match db.rebuild_projection(&cas) {
@@ -3348,14 +3374,16 @@ fn cmd_rebuild_projection(base: &PathBuf, json: bool) -> Result<(), Box<dyn std:
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "nodes_purged": report.nodes_purged,
+                "nodes_written": report.nodes_written,
                 "edges_purged": report.edges_purged,
                 "edges_written": report.edges_written,
             }))?
         );
     } else {
         println!(
-            "rebuild-projection: purged {} · wrote {}",
-            report.edges_purged, report.edges_written
+            "rebuild-projection: nodes purged {} · wrote {}; edges purged {} · wrote {}",
+            report.nodes_purged, report.nodes_written, report.edges_purged, report.edges_written
         );
     }
     Ok(())

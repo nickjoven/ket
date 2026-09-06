@@ -534,17 +534,24 @@ fn repair_idempotent() {
         return;
     }
 
-    // First repair
+    // The dual-write already synced both nodes, so the projection is clean and
+    // repair reconciles nothing — twice. (repair now reconciles the whole DAG
+    // projection against CAS, so its report is a divergence count, not a
+    // per-node synced/skipped tally.)
     let r1 = ket_json(&ket_dir, &["repair"]);
-    // Nodes might or might not need syncing depending on dual-write
-    let synced1 = r1["synced"].as_u64().unwrap();
-    let skipped1 = r1["skipped"].as_u64().unwrap();
-    assert!(synced1 + skipped1 >= 2);
+    assert_eq!(
+        r1["reconciled"].as_u64().unwrap(),
+        0,
+        "clean store needs no repair"
+    );
+    assert!(r1["nodes_written"].as_u64().unwrap() >= 2);
 
-    // Second repair should skip all
     let r2 = ket_json(&ket_dir, &["repair"]);
-    assert_eq!(r2["synced"].as_u64().unwrap(), 0);
-    assert!(r2["skipped"].as_u64().unwrap() >= 2);
+    assert_eq!(
+        r2["reconciled"].as_u64().unwrap(),
+        0,
+        "repair is idempotent"
+    );
 }
 
 // --- CDOM test ---
@@ -955,6 +962,15 @@ fn create_node(ket_dir: &Path, content: &str, extra: &[&str]) -> String {
         .to_string()
 }
 
+/// `verify-projection --json` parsed from stdout regardless of exit code:
+/// the command exits 1 on divergence (by contract), so `ket_json` — which
+/// asserts success — can't be used when we expect a dirty projection.
+fn verify_projection(ket_dir: &Path) -> serde_json::Value {
+    let (_ok, out, err) = ket(ket_dir, &["--json", "verify-projection"]);
+    serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("verify-projection json: {e}\nstdout={out}\nstderr={err}"))
+}
+
 #[test]
 fn malformed_or_dangling_parents_are_rejected_before_sealing() {
     let (ket_dir, _tmp) = fresh_ket("bad-parents");
@@ -1141,5 +1157,217 @@ fn drift_exit_2_when_a_tracked_file_cannot_be_read() {
         status.status.code(),
         Some(2),
         "present-but-unreadable is 'cannot check', not 'missing'"
+    );
+}
+
+// --- Audit round 2: concurrency, recoverability, gc, import typed edges ---
+
+#[test]
+fn concurrent_creates_keep_the_projection_complete() {
+    // "No locks, no conflicts": many processes writing one store at once must
+    // all land, in CAS and in the Dolt projection, with verify-projection
+    // clean and no repair. Before the Dolt lock, 16 writers left 3 of 17 node
+    // rows and verify-projection dirty.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("concurrent-proj");
+    let root = create_node(&ket_dir, "root", &["--kind", "context", "--agent", "t"]);
+
+    let n = 16;
+    let mut kids = Vec::new();
+    for i in 0..n {
+        let ket_dir = ket_dir.clone();
+        let root = root.clone();
+        kids.push(std::thread::spawn(move || {
+            Command::new(ket_bin())
+                .args([
+                    "--home",
+                    ket_dir.to_str().unwrap(),
+                    "dag",
+                    "create",
+                    &format!("child-{i}"),
+                    "--kind",
+                    "memory",
+                    "--agent",
+                    &format!("w{i}"),
+                    "--parent",
+                    &root,
+                ])
+                .output()
+                .unwrap()
+        }));
+    }
+    for k in kids {
+        assert!(k.join().unwrap().status.success());
+    }
+
+    // Every node in CAS is in the projection, and verify is clean with no repair.
+    let nodes = ket_json(&ket_dir, &["dag", "ls"]).as_array().unwrap().len();
+    assert_eq!(nodes, n + 1, "root + {n} children all present in CAS");
+    let v = verify_projection(&ket_dir);
+    assert_eq!(v["clean"], true, "projection clean without repair: {v}");
+}
+
+#[test]
+fn verify_projection_detects_a_lost_node_row() {
+    // A parentless node lost from the projection has no edges, so an
+    // edge-only audit missed it entirely. The node audit must catch it.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("lost-node");
+    let root = create_node(&ket_dir, "root", &["--kind", "context", "--agent", "t"]);
+    let (ok, _, _) = ket(
+        &ket_dir,
+        &["sql", &format!("DELETE FROM dag_nodes WHERE cid='{root}'")],
+    );
+    assert!(ok);
+    let v = verify_projection(&ket_dir);
+    assert_eq!(v["clean"], false, "a lost node row is a divergence");
+    assert_eq!(v["missing_nodes"], 1);
+}
+
+#[test]
+fn rebuild_projection_recreates_a_deleted_db_with_typed_edges() {
+    // "Either can reconstruct the other" (CAS -> projection): after the whole
+    // Dolt db is deleted, rebuild-projection recreates it from the CAS, with
+    // node rows and typed edges intact, and verify is clean.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("rebuild-deleted");
+    let a = create_node(
+        &ket_dir,
+        "measurement",
+        &["--kind", "context", "--agent", "t"],
+    );
+    let b = create_node(
+        &ket_dir,
+        "claim",
+        &[
+            "--kind",
+            "reasoning",
+            "--agent",
+            "c",
+            "--parent",
+            &format!("{a}:grounds"),
+        ],
+    );
+
+    std::fs::remove_dir_all(ket_dir.join("ket.db")).unwrap();
+    let (ok, out, err) = ket(&ket_dir, &["rebuild-projection"]);
+    assert!(ok, "rebuild recreates a missing db: {out}{err}");
+
+    let v = verify_projection(&ket_dir);
+    assert_eq!(v["clean"], true, "clean after rebuild from CAS alone: {v}");
+    // The grounds edge survived the round-trip (not downgraded to derives).
+    let edge_kind = ket_json(&ket_dir, &["dag", "show", &b])["parent_kinds"][0].clone();
+    assert_eq!(edge_kind, "grounds");
+    let _ = a;
+}
+
+#[test]
+fn repair_fixes_an_altered_row_not_just_a_missing_one() {
+    // repair must reconcile, not only insert: a hand-edited column is fixed.
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("repair-altered");
+    let c = create_node(&ket_dir, "x", &["--kind", "memory", "--agent", "honest"]);
+    let (ok, _, _) = ket(
+        &ket_dir,
+        &[
+            "sql",
+            &format!("UPDATE dag_nodes SET agent='evil' WHERE cid='{c}'"),
+        ],
+    );
+    assert!(ok);
+    let (ok, _, err) = ket(&ket_dir, &["repair"]);
+    assert!(ok, "{err}");
+    let after = ket(
+        &ket_dir,
+        &[
+            "sql",
+            &format!("SELECT agent FROM dag_nodes WHERE cid='{c}'"),
+        ],
+    )
+    .1;
+    assert!(
+        after.contains("honest") && !after.contains("evil"),
+        "altered row reconciled: {after}"
+    );
+    assert_eq!(verify_projection(&ket_dir)["clean"], true);
+}
+
+#[test]
+fn gc_delete_keeps_a_referenced_schema_blob() {
+    let (ket_dir, _tmp) = fresh_ket("gc-schema-cli");
+    let schema = {
+        // put a schema blob via stdin
+        let out = Command::new(ket_bin())
+            .args(["--home", ket_dir.to_str().unwrap(), "--json", "put", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin
+                    .take()
+                    .unwrap()
+                    .write_all(br#"{"type":"finding"}"#)?;
+                c.wait_with_output()
+            })
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["cid"].as_str().unwrap().to_string()
+    };
+    create_node(
+        &ket_dir,
+        "a claim",
+        &["--kind", "reasoning", "--agent", "a", "--schema", &schema],
+    );
+    let (ok, _, _) = ket(&ket_dir, &["gc", "--delete"]);
+    assert!(ok);
+    let (vok, _, _) = ket(&ket_dir, &["verify", &schema]);
+    assert!(vok, "the schema a live node points to must survive gc");
+}
+
+#[test]
+fn import_preserves_typed_edges() {
+    // A bundle round-trips its edge kinds through export/import (stdin form),
+    // and the destination projection is clean.
+    if !has_dolt() {
+        return;
+    }
+    let (src, _s) = fresh_ket("import-src");
+    let a = create_node(&src, "measurement", &["--kind", "context", "--agent", "t"]);
+    let b = create_node(
+        &src,
+        "claim",
+        &[
+            "--kind",
+            "reasoning",
+            "--agent",
+            "c",
+            "--parent",
+            &format!("{a}:grounds"),
+        ],
+    );
+    let bundle = ket(&src, &["export", &b]).1;
+
+    let (dst, _d) = fresh_ket("import-dst");
+    let bundle_path = _d.path().join("bundle.json");
+    std::fs::write(&bundle_path, &bundle).unwrap();
+    let (ok, _, err) = ket(&dst, &["import", bundle_path.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        ket_json(&dst, &["dag", "show", &b])["parent_kinds"][0],
+        "grounds"
+    );
+    assert_eq!(
+        verify_projection(&dst)["clean"],
+        true,
+        "imported projection is clean"
     );
 }
