@@ -71,10 +71,12 @@ P2="$(catbus --json pack --title "dag.rs tests" \
 run catbus diff "$P1" "$P2"
 run ket dag lineage "$P2"
 
-say "6. SQL is a projection. catbus wrote blobs only; replay them into Dolt and audit."
+say "6. SQL is a projection: every write already mirrors into Dolt, and it rebuilds from the blobs alone."
 if command -v dolt >/dev/null 2>&1; then
-  run ket repair
-  run ket verify-projection
+  run ket verify-projection            # already clean — each writer projects as it goes
+  run rm -rf "$KET_HOME/ket.db"         # throw the whole SQL side away
+  run ket rebuild-projection            # replay the sealed nodes back out of CAS
+  run ket verify-projection            # clean again: the projection is a function of the substrate
 fi
 run ket status
 

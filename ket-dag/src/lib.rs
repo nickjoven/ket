@@ -521,6 +521,8 @@ impl<'a> Dag<'a> {
     pub fn export(&self, root_cid: &Cid) -> Result<DagBundle, DagError> {
         let lineage = self.lineage(root_cid)?;
         let mut entries = Vec::new();
+        let mut schema_blobs = Vec::new();
+        let mut seen_schemas = std::collections::HashSet::new();
 
         for (cid, node) in &lineage {
             // Get the node's serialized bytes
@@ -534,11 +536,25 @@ impl<'a> Dag<'a> {
                 output_cid: node.output_cid.clone(),
                 output_bytes,
             });
+
+            // Bundle any schema blob a node references, so `schema_cid`
+            // resolves after import instead of dangling.
+            if let Some(schema) = &node.schema_cid {
+                if seen_schemas.insert(schema.clone()) {
+                    if let Ok(bytes) = self.cas.get(schema) {
+                        schema_blobs.push(SchemaBlob {
+                            cid: schema.clone(),
+                            bytes,
+                        });
+                    }
+                }
+            }
         }
 
         Ok(DagBundle {
             root_cid: root_cid.clone(),
             entries,
+            schema_blobs,
         })
     }
 
@@ -546,6 +562,20 @@ impl<'a> Dag<'a> {
     /// Returns the number of new blobs imported.
     pub fn import(&self, bundle: &DagBundle) -> Result<usize, DagError> {
         let mut imported = 0;
+
+        // Schema blobs first, so a node's `schema_cid` resolves once imported.
+        for sb in &bundle.schema_blobs {
+            if !self.cas.exists(&sb.cid) {
+                let cid = self.cas.put(&sb.bytes)?;
+                if cid != sb.cid {
+                    return Err(DagError::BundleMismatch {
+                        claimed: sb.cid.as_str().to_string(),
+                        actual: cid.as_str().to_string(),
+                    });
+                }
+                imported += 1;
+            }
+        }
 
         for entry in &bundle.entries {
             // Import the output content. A bundle is untrusted input, so a
@@ -584,6 +614,18 @@ impl<'a> Dag<'a> {
 pub struct DagBundle {
     pub root_cid: Cid,
     pub entries: Vec<BundleEntry>,
+    /// Schema blobs referenced by any exported node's `schema_cid`. Defaulted
+    /// so bundles written before this field still deserialize.
+    #[serde(default)]
+    pub schema_blobs: Vec<SchemaBlob>,
+}
+
+/// A schema blob carried in a bundle so `schema_cid` resolves after import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaBlob {
+    pub cid: Cid,
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
 }
 
 /// A single entry in a DAG bundle.
@@ -963,6 +1005,30 @@ mod tests {
             referenced.contains(&schema),
             "the schema blob must be reachable, not collected"
         );
+    }
+
+    #[test]
+    fn export_bundles_schema_blobs_so_import_resolves_them() {
+        let (cas, _dir) = temp_store("export-schema");
+        let dag = Dag::new(&cas);
+        let schema = cas.put(br#"{"type":"finding"}"#).unwrap();
+        let content = cas.put(b"a claim").unwrap();
+        let node =
+            DagNode::new(NodeKind::Reasoning, vec![], content, "a").with_schema(schema.clone());
+        let node_cid = dag.put_node(&node).unwrap();
+        let bundle = dag.export(&node_cid).unwrap();
+        assert!(
+            bundle.schema_blobs.iter().any(|b| b.cid == schema),
+            "schema blob is bundled"
+        );
+
+        let (cas2, _d2) = temp_store("export-schema-dst");
+        let dag2 = Dag::new(&cas2);
+        dag2.import(&bundle).unwrap();
+        // The schema_cid the imported node points at now resolves in the dst.
+        let imported = dag2.get_node(&node_cid).unwrap();
+        let sc = imported.schema_cid.expect("schema_cid preserved");
+        assert!(cas2.exists(&sc), "schema blob resolvable after import");
     }
 
     #[test]

@@ -195,12 +195,12 @@ Changed artifacts:
       7df1d9beabcc  reasoning  claude</code></pre>
 
 <h2><span class="n">6</span>SQL is a projection, not a second truth</h2>
-<p>catbus wrote blobs only; it never touched the SQL side. <code>repair</code> replays the sealed nodes into Dolt, and <code>verify-projection</code> re-derives every edge and diffs it against the table. Throw the database away and this rebuilds it bit-identically. That is the design test the whole substrate is held to (<a href="https://github.com/nickjoven/ket/blob/main/DESIGN.md">DESIGN.md</a>).</p>
-<pre><code><span class="p">$ ket repair</span>
-  synced: 69206df074c2  context  claude
-  synced: 69ceca8ae83a  context  codex
-
-Repair: 2 synced, 2 already in sync, 0 errors
+<p>Every write — CLI, MCP server, or catbus — mirrors into Dolt as it goes, so <code>verify-projection</code> is already clean. The point is that the SQL side is <em>derived</em>: throw the whole database away and <code>rebuild-projection</code> replays the sealed nodes back out of the CAS, and <code>verify-projection</code> re-derives every node and edge and diffs it against the tables. That is the design test the whole substrate is held to (<a href="https://github.com/nickjoven/ket/blob/main/DESIGN.md">DESIGN.md</a>). Truth flows one way: SQL stores no blob content, so it cannot rebuild the CAS.</p>
+<pre><code><span class="p">$ ket verify-projection</span>
+verify-projection: clean (projection agrees with substrate)
+<span class="p">$ rm -rf .ket/ket.db</span>
+<span class="p">$ ket rebuild-projection</span>
+rebuild-projection: nodes purged 0 · wrote 4; edges purged 0 · wrote 3
 <span class="p">$ ket verify-projection</span>
 verify-projection: clean (projection agrees with substrate)</code></pre>
 
