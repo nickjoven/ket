@@ -148,13 +148,13 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag drift <path> <cid>` — Detect file drift
-- `ket link create <from> <to> <rel>` — Soft links (supersedes, contradicts, etc.)
+- `ket link create <from> <to> <rel>` / `ket link ls <cid>` — Soft links (supersedes, contradicts, etc.)
 - `ket merge <content> --parents <cid>[:<kind>]...` — Multi-parent merge node (`--edge-kind`, `--content-file`)
 - `ket graph [--root <cid>] [--format dot|mermaid|json]` — Render the DAG (`ket dot` is an alias). Edges styled by epistemic kind; labels carry a content preview.
 - `ket export <cid>` / `ket import <file|->` — Portable DAG bundles (typed edges preserved; `-` imports from stdin, so `ket export <cid> | ket import -` works)
 
 ### Tasks & Agents
-- `ket task create <title>` / `ket task ls` / `ket task assign <id> <agent>`
+- `ket task create <title>` (`--by`, `--context <cid>`, `--parent <id>`) / `ket task ls` / `ket task show <id>` / `ket task assign <id> <agent>`
 - `ket agent register <name>` / `ket agent ls` — presets claude/codex/copilot, or any name with `--command "<cli> ..."` (`--model` optional)
 - `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task
 
