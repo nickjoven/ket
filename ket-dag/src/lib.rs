@@ -18,6 +18,8 @@ pub enum DagError {
     Serde(#[from] serde_json::Error),
     #[error("Node not found: {0}")]
     NotFound(String),
+    #[error("Bundle entry CID mismatch: claimed {claimed}, bytes hash to {actual}")]
+    BundleMismatch { claimed: String, actual: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +477,12 @@ impl<'a> Dag<'a> {
                 referenced.insert(cid.clone());
                 // Its output content is referenced
                 referenced.insert(node.output_cid.clone());
+                // The schema it conforms to is referenced — a schema blob a
+                // live node points to via `schema_cid` is not garbage, and
+                // deleting it would leave `dag show` citing a missing CID.
+                if let Some(schema) = &node.schema_cid {
+                    referenced.insert(schema.clone());
+                }
                 // Its parent node CIDs are referenced
                 for parent in &node.parents {
                     referenced.insert(parent.clone());
@@ -540,17 +548,29 @@ impl<'a> Dag<'a> {
         let mut imported = 0;
 
         for entry in &bundle.entries {
-            // Import the output content
+            // Import the output content. A bundle is untrusted input, so a
+            // claimed CID that does not match the bytes is a returned error,
+            // never a panic that aborts mid-import.
             if !self.cas.exists(&entry.output_cid) {
                 let cid = self.cas.put(&entry.output_bytes)?;
-                assert_eq!(cid, entry.output_cid, "Output CID mismatch on import");
+                if cid != entry.output_cid {
+                    return Err(DagError::BundleMismatch {
+                        claimed: entry.output_cid.as_str().to_string(),
+                        actual: cid.as_str().to_string(),
+                    });
+                }
                 imported += 1;
             }
 
             // Import the node
             if !self.cas.exists(&entry.node_cid) {
                 let cid = self.cas.put(&entry.node_bytes)?;
-                assert_eq!(cid, entry.node_cid, "Node CID mismatch on import");
+                if cid != entry.node_cid {
+                    return Err(DagError::BundleMismatch {
+                        claimed: entry.node_cid.as_str().to_string(),
+                        actual: cid.as_str().to_string(),
+                    });
+                }
                 imported += 1;
             }
         }
@@ -925,5 +945,45 @@ mod tests {
         assert!(dag.check_drift(&test_file, &original_cid).unwrap());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_reachability_includes_the_schema_a_node_points_to() {
+        // A schema blob a live node references via `schema_cid` is not garbage.
+        let (cas, _dir) = temp_store("gc-schema");
+        let dag = Dag::new(&cas);
+        let schema = cas.put(br#"{"type":"finding"}"#).unwrap();
+        let content = cas.put(b"a claim").unwrap();
+        let node =
+            DagNode::new(NodeKind::Reasoning, vec![], content, "a").with_schema(schema.clone());
+        dag.put_node(&node).unwrap();
+
+        let referenced = dag.referenced_cids().unwrap();
+        assert!(
+            referenced.contains(&schema),
+            "the schema blob must be reachable, not collected"
+        );
+    }
+
+    #[test]
+    fn import_of_a_tampered_bundle_errors_not_panics() {
+        // A bundle is untrusted: a claimed CID that does not match its bytes
+        // must be a returned error, not a panic that aborts a partial import.
+        let (cas, _dir) = temp_store("import-tampered");
+        let dag = Dag::new(&cas);
+        let content = cas.put(b"real").unwrap();
+        let node = DagNode::new(NodeKind::Memory, vec![], content.clone(), "a");
+        let node_cid = dag.put_node(&node).unwrap();
+        let mut bundle = dag.export(&node_cid).unwrap();
+        // Corrupt the output bytes but keep the claimed CID.
+        bundle.entries[0].output_bytes = b"tampered".to_vec();
+
+        let (cas2, _d2) = temp_store("import-tampered-dst");
+        let dag2 = Dag::new(&cas2);
+        let err = dag2.import(&bundle);
+        assert!(
+            matches!(err, Err(DagError::BundleMismatch { .. })),
+            "got {err:?}"
+        );
     }
 }
