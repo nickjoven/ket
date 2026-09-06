@@ -127,7 +127,14 @@ impl Store {
             std::process::id(),
             seq
         ));
-        fs::write(&tmp, data)?;
+        // Write, fsync, then rename: the log is fsynced on every append, so
+        // a blob the log names must be at least as durable as the log line.
+        // Any failure before the rename removes the temp file — a partial
+        // `.tmp.*` must never outlive the call.
+        if let Err(e) = write_synced(&tmp, data) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         if let Err(e) = fs::rename(&tmp, &target) {
             let _ = fs::remove_file(&tmp);
             // A concurrent writer may have landed the same content first;
@@ -189,8 +196,11 @@ impl Store {
         Ok(cids)
     }
 
-    /// Get the byte size of a blob.
+    /// Get the byte size of a blob. Malformed CIDs are `NotFound`, as in `get`.
     pub fn blob_size(&self, cid: &Cid) -> Result<u64, CasError> {
+        if !cid.is_well_formed() {
+            return Err(CasError::NotFound(cid.0.clone()));
+        }
         let path = self.blob_path(cid);
         if !path.exists() {
             return Err(CasError::NotFound(cid.0.clone()));
@@ -198,8 +208,12 @@ impl Store {
         Ok(fs::metadata(&path)?.len())
     }
 
-    /// Delete a blob by CID. Returns true if it existed.
+    /// Delete a blob by CID. Returns true if it existed. A malformed CID
+    /// never names a file to remove (`Cid::from("../x")` must not escape).
     pub fn delete(&self, cid: &Cid) -> Result<bool, CasError> {
+        if !cid.is_well_formed() {
+            return Ok(false);
+        }
         let path = self.blob_path(cid);
         if path.exists() {
             fs::remove_file(&path)?;
@@ -230,6 +244,14 @@ impl Store {
     fn blob_path(&self, cid: &Cid) -> PathBuf {
         self.root.join(&cid.0)
     }
+}
+
+/// Write `data` to `path` and flush it to disk before returning.
+fn write_synced(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
 }
 
 #[cfg(test)]
@@ -268,6 +290,68 @@ mod tests {
             "no temp files left behind: {leftovers:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_cid_never_touches_the_filesystem_on_delete_or_size() {
+        let dir = std::env::temp_dir().join("ket-cas-test-traversal");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let outside = dir.join("outside.txt");
+        fs::write(&outside, b"keep me").unwrap();
+        let store = Store::init(&dir.join("cas")).unwrap();
+        let escape = Cid::from("../outside.txt");
+        assert!(
+            !store.delete(&escape).unwrap(),
+            "malformed CID deletes nothing"
+        );
+        assert!(
+            outside.exists(),
+            "a traversal CID must not remove files outside the store"
+        );
+        assert!(matches!(
+            store.blob_size(&escape),
+            Err(CasError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.blob_size(&Cid::from("")),
+            Err(CasError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_put_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("ket-cas-test-failed-put");
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::init(&dir.join("cas")).unwrap();
+        // Root can't take a new file (0o555); root user bypasses this, so skip there.
+        if unsafe { libc_geteuid() } == 0 {
+            return;
+        }
+        std::fs::set_permissions(store.root(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = store.put(b"never lands");
+        std::fs::set_permissions(store.root(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(res.is_err(), "put into an unwritable root must fail");
+        let leftovers: Vec<_> = std::fs::read_dir(store.root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp.* after a failed put: {leftovers:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    unsafe fn libc_geteuid() -> u32 {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        geteuid()
     }
 
     #[test]
