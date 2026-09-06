@@ -19,7 +19,7 @@ The same pages are published at <https://nickjoven.github.io/ket/>.
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     ket-cli                         │
-│              30 commands, --json output             │
+│           30+ commands, --json output               │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
 │ 19 tools │  tasks   │ 4 dims    │   tree-sitter     │
@@ -50,7 +50,7 @@ The same pages are published at <https://nickjoven.github.io/ket/>.
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
 | **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
 | **ket-cdom** | Code Document Object Model — tree-sitter parsing for Rust and Python symbol extraction |
-| **ket-cli** | CLI binary with 30 commands |
+| **ket-cli** | CLI binary; run `ket --help` for the full command list |
 | **ket-py** | PyO3 Python bindings for CAS and DAG operations |
 
 ## Getting Started
@@ -59,7 +59,7 @@ Three tiers — start minimal, add capabilities when you need them.
 
 ### Tier 1: Just ket (no dependencies beyond Rust)
 
-Everything you need for content-addressed agent memory: store, DAG, lineage, drift detection, MCP server. **14 of 19 MCP tools work at this tier.**
+Everything you need for content-addressed agent memory: store, DAG, lineage, a stateless drift check, MCP server. **14 of 19 MCP tools work at this tier.**
 
 ```sh
 # Install (puts `ket` on your PATH)
@@ -77,19 +77,19 @@ ket put myfile.rs
 # Create a DAG node with lineage
 ket dag create "initial reasoning" --kind reasoning --agent claude
 
-# Track a file for drift detection
-ket track add src/main.rs --agent claude
-ket drift
+# Stateless drift check: has this file changed since that CID? (no Dolt)
+ket dag drift src/main.rs <cid>
 
 # Start the MCP server (for Claude integration)
 ket mcp
-
-# Scan code symbols
-ket scan src/lib.rs
-ket cdom "parse"
 ```
 
 **Prerequisites:** Rust (stable, 2021 edition). That's it.
+
+> Persistent drift tracking (`ket track add` / `ket drift`) and symbol search
+> (`ket scan` indexing + `ket cdom <query>`) write to and read the Dolt
+> projection, so they belong to Tier 2. The stateless `ket dag drift <path>
+> <cid>` above, and the MCP `ket_check_drift` tool, need only the CAS.
 
 ### Tier 2: Add Docker (scoring, tasks, SQL queries)
 
@@ -151,12 +151,12 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket link create <from> <to> <rel>` — Soft links (supersedes, contradicts, etc.)
 - `ket merge <content> --parents <cid>[:<kind>]...` — Multi-parent merge node (`--edge-kind`, `--content-file`)
 - `ket graph [--root <cid>] [--format dot|mermaid|json]` — Render the DAG (`ket dot` is an alias). Edges styled by epistemic kind; labels carry a content preview.
-- `ket export <cid>` / `ket import <file>` — Portable DAG bundles
+- `ket export <cid>` / `ket import <file|->` — Portable DAG bundles (typed edges preserved; `-` imports from stdin, so `ket export <cid> | ket import -` works)
 
 ### Tasks & Agents
 - `ket task create <title>` / `ket task ls` / `ket task assign <id> <agent>`
-- `ket agent register <preset>` / `ket agent ls`
-- `ket run <task-id>` — Execute task via agent subprocess
+- `ket agent register <name>` / `ket agent ls` — presets claude/codex/copilot, or any name with `--command "<cli> ..."` (`--model` optional)
+- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task
 
 ### Code Intelligence
 - `ket scan <path>` — Index symbols (Rust/Python)
@@ -180,8 +180,12 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket log [-n <count>]` — Mutation log
 - `ket status` — Health dashboard
 - `ket history` / `ket diff` — Dolt version history
-- `ket repair [--dry-run]` — Rebuild SQL from CAS
-- `ket track add/ls/rm` — File drift tracking (`ket drift` exits 1 on drift, so it gates: `ket drift && agent`)
+- `ket verify-projection` — Audit the SQL projection against the CAS (nodes and edges); exit 0 clean, 1 divergence, 2 env error
+- `ket rebuild-projection` — Reconstruct the SQL projection from the CAS, recreating the Dolt db if it was deleted
+- `ket repair [--dry-run]` — Reconcile the projection with the CAS: fixes missing, extra, and altered node/edge rows (Dolt-only tables are left intact)
+- `ket snapshot create/ls/verify` — Named CAS snapshots
+- `ket mcp` — Start the MCP server (stdio JSON-RPC)
+- `ket track add/ls/rm` — File drift tracking, needs Dolt (`ket drift` exits 1 on drift/missing, 2 on env error, so it gates: `ket drift && agent`)
 
 ### Global Flags
 - `--home <path>` — Override `.ket` directory (env: `KET_HOME`)
@@ -232,7 +236,7 @@ Add to your Claude MCP config:
 
 - **Content-addressed everything** — Same content = same CID. Deterministic, deduped, immutable.
 - **Provenance by default** — Every artifact links to its parents via the Merkle DAG.
-- **Dual storage** — CAS for truth, SQL for queries. Either can reconstruct the other.
+- **Dual storage** — CAS is the source of truth; SQL is a queryable mirror. The DAG projection (nodes and edges) is fully rebuildable from the CAS with `ket rebuild-projection`, even after the Dolt db is deleted. The reverse does not hold: SQL stores no blob content, and the annotation tables (soft links, scores, tasks, agents) are primary Dolt state with no CAS upstream.
 - **Scoring gates routing** — Historical evaluation across 4 dimensions lets the system learn which agent is best at what.
 - **Drift detection** — Tracked files are re-hashed on demand to prevent stale reasoning context.
 - **Portable bundles** — DAG subgraphs can be exported and imported across instances.

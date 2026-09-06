@@ -7,6 +7,38 @@ ket adheres to semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- **Concurrent writers no longer lose projection rows.** `dolt sql` cannot
+  take concurrent writers; ket ran them anyway and swallowed the error, so
+  16 parallel `dag create`s left 3 of 17 node rows in SQL. Every Dolt access
+  now runs under a per-store advisory lock (reentrant within a thread). The
+  CAS write stays lock-free; only the projection serializes.
+- **The mutation log no longer tears under concurrency.** Each entry is
+  written in one buffered `write_all` instead of `writeln!`'s several
+  syscalls, so O_APPEND keeps concurrent entries whole (32 writers used to
+  leave 20 of 42 lines malformed).
+- **The projection audit and rebuild now cover `dag_nodes`, not only
+  `dag_edges`.** A lost parentless node has no edges, so edge-only auditing
+  called it clean. `rebuild-projection` replays both tables from the CAS and
+  recreates the Dolt db if it was deleted, so the projection is
+  reconstructible from the substrate. `repair` reconciles missing, extra AND
+  altered rows (it used to only insert missing ones, so a hand-edited row
+  survived); the Dolt-only tables (soft links, scores, tasks, agents) are
+  left intact.
+- **Projection sync failures surface** instead of being dropped with
+  `let _ =`: `dag create`/`merge`/`import` warn and point at `ket repair`.
+- `ket gc --delete` no longer deletes a schema blob a live node references.
+- `ket import` preserves typed edges (it downgraded them all to `derives`),
+  errors on a tampered bundle instead of panicking, and reads from stdin
+  (`ket import -`).
+- A parent must be a real DAG node; a content blob as a parent used to seal a
+  node whose `lineage` silently dead-ended.
+- `ket run` honors the registered agent's command (it hard-coded claude/codex),
+  refuses an unknown task instead of minting an orphan node, and records the
+  result CID on the task; `task assign` refuses an unknown task too.
+- `ket calibrate` writes a mutation-log line (the one DAG write that left none).
+- `ket status --json` strips Dolt's ANSI colour codes from `dolt_head`.
+- `Store::put` fsyncs the blob before the rename and removes its temp file on a
+  failed write; `Store::delete`/`blob_size` reject malformed CIDs.
 - **Typed edges are sealed in the node.** `ket dag create --edge-kind` and
   `ket merge` wrote the kind to `dag_edges` only, so `verify-projection`
   diverged on the very next call. Both now build the node with
@@ -61,6 +93,8 @@ ket adheres to semantic versioning.
 - `ket merge --edge-kind`.
 - `ket dag create --content-file <path>` and `ket merge --content-file`
   (`-` for stdin), for content too large for argv or shaped like a flag.
+- `ket agent register <name> --command "<cli> ..." [--model <m>]` registers a
+  custom agent, not only the three presets.
 - `ket_cas::log` — the append-only mutation log moved from ket-cli into
   ket-cas (`log_path_for(store)` derives `.ket/log` from a CAS root) so
   every writer shares it. The MCP server now appends `put` and
