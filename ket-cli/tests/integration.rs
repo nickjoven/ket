@@ -943,3 +943,203 @@ fn rebuild_projection_heals_and_is_idempotent() {
 fn has_dolt() -> bool {
     Command::new("dolt").arg("version").output().is_ok()
 }
+
+// --- Review fixes: parents are validated before sealing; renderers escape ---
+
+fn create_node(ket_dir: &Path, content: &str, extra: &[&str]) -> String {
+    let mut args = vec!["dag", "create", content];
+    args.extend_from_slice(extra);
+    ket_json(ket_dir, &args)["node_cid"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn malformed_or_dangling_parents_are_rejected_before_sealing() {
+    let (ket_dir, _tmp) = fresh_ket("bad-parents");
+    let missing = "0".repeat(64);
+    for (parent, why) in [
+        ("a€€€€", "non-ascii"),
+        ("", "empty"),
+        (":grounds", "empty with kind"),
+        ("deadbeef", "short"),
+        (missing.as_str(), "well-formed but absent"),
+    ] {
+        let (ok, _, err) = ket(&ket_dir, &["dag", "create", "x", "--parent", parent]);
+        assert!(!ok, "{why} parent {parent:?} must be rejected");
+        assert!(
+            err.contains("Malformed parent") || err.contains("Parent not found"),
+            "{why}: {err}"
+        );
+    }
+    // Nothing was sealed, so the whole-store graph still renders.
+    let (ok, out, _) = ket(&ket_dir, &["graph", "--format", "mermaid"]);
+    assert!(ok, "graph renders on a store with only good nodes");
+    assert!(out.starts_with("graph BT"));
+    // merge gets the same checks.
+    let a = create_node(&ket_dir, "a", &[]);
+    let (ok, _, err) = ket(&ket_dir, &["merge", "m", "--parents", &a, "deadbeef"]);
+    assert!(!ok && err.contains("Malformed parent"), "{err}");
+}
+
+#[test]
+fn merge_accepts_per_parent_edge_kinds() {
+    let (ket_dir, _tmp) = fresh_ket("merge-typed");
+    let a = create_node(&ket_dir, "measurement", &[]);
+    let b = create_node(&ket_dir, "prior claim", &[]);
+    let spec = format!("{a}:grounds");
+    let m = ket_json(
+        &ket_dir,
+        &[
+            "merge",
+            "synthesis",
+            "--parents",
+            &spec,
+            &b,
+            "--edge-kind",
+            "supersedes",
+        ],
+    )["node_cid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let node = ket_json(&ket_dir, &["dag", "show", &m]);
+    let parents: Vec<&str> = node["parents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        parents,
+        vec![a.as_str(), b.as_str()],
+        "the :kind suffix is not part of the CID"
+    );
+    assert_eq!(node["parent_kinds"][0], "grounds");
+    assert_eq!(node["parent_kinds"][1], "supersedes");
+}
+
+#[test]
+fn content_can_come_from_a_file_or_stdin_or_start_with_a_dash() {
+    let (ket_dir, tmp) = fresh_ket("content-file");
+    let big = "x".repeat(300 * 1024); // past argv's single-argument limit
+    let path = tmp.path().join("big.txt");
+    std::fs::write(&path, &big).unwrap();
+    let v = ket_json(
+        &ket_dir,
+        &["dag", "create", "--content-file", path.to_str().unwrap()],
+    );
+    let (_, got, _) = ket(&ket_dir, &["get", v["content_cid"].as_str().unwrap()]);
+    assert_eq!(got.len(), big.len());
+
+    // `--` lets content that looks like a flag through (a markdown bullet).
+    let v = ket_json(&ket_dir, &["dag", "create", "--", "- ran ls .github"]);
+    let (_, got, _) = ket(&ket_dir, &["get", v["content_cid"].as_str().unwrap()]);
+    assert_eq!(got, "- ran ls .github");
+
+    // stdin
+    use std::io::Write;
+    let mut child = Command::new(ket_bin())
+        .args([
+            "--home",
+            ket_dir.to_str().unwrap(),
+            "--json",
+            "dag",
+            "create",
+            "--content-file",
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from stdin")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let (_, got, _) = ket(&ket_dir, &["get", v["content_cid"].as_str().unwrap()]);
+    assert_eq!(got, "from stdin");
+
+    // Both at once is a usage error, neither is too.
+    let (ok, _, _) = ket(&ket_dir, &["dag", "create", "a", "--content-file", "-"]);
+    assert!(!ok);
+    let (ok, _, _) = ket(&ket_dir, &["dag", "create"]);
+    assert!(!ok);
+}
+
+#[test]
+fn graph_renderers_escape_agent_names_and_labels() {
+    let (ket_dir, _tmp) = fresh_ket("graph-escape");
+    create_node(
+        &ket_dir,
+        "{\"title\":\"first\\nsecond \\\"quoted\\\" <b>#1</b> | [x]\"}",
+        &["--agent", "ag\"ent]|", "--kind", "context"],
+    );
+    let (ok, dot, _) = ket(&ket_dir, &["graph", "--format", "dot"]);
+    assert!(ok);
+    let node_line = dot.lines().find(|l| l.contains("[label=")).unwrap();
+    assert!(
+        node_line.contains("ag\\\"ent]|"),
+        "quote in agent is escaped: {node_line}"
+    );
+    assert!(
+        node_line.contains("first second"),
+        "newline in a JSON title collapses to one line: {node_line}"
+    );
+    assert!(node_line.contains("\\\"quoted\\\""), "{node_line}");
+
+    let (ok, mmd, _) = ket(&ket_dir, &["graph", "--format", "mermaid"]);
+    assert!(ok);
+    let node_line = mmd.lines().find(|l| l.contains("[\"")).unwrap();
+    for raw in ["<b>", "</b>", "]|", "ag\"ent"] {
+        assert!(
+            !node_line.contains(raw),
+            "{raw:?} must not appear raw: {node_line}"
+        );
+    }
+    for esc in ["#quot;", "#lt;b#gt;", "#35;1", "#124;", "#91;x#93;"] {
+        assert!(node_line.contains(esc), "{esc} expected: {node_line}");
+    }
+    // The opening quote is the only unescaped one on the line: `id["` ... `"]`.
+    assert_eq!(node_line.matches('"').count(), 2, "{node_line}");
+}
+
+#[test]
+#[cfg(unix)]
+fn drift_exit_2_when_a_tracked_file_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_dolt() {
+        return;
+    }
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    if unsafe { geteuid() } == 0 {
+        return; // root reads anything; the case cannot be produced
+    }
+    let (ket_dir, tmp) = fresh_ket("drift-unreadable");
+    let f = tmp.path().join("secret.rs");
+    std::fs::write(&f, "fn main() {}").unwrap();
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["track", "add", f.to_str().unwrap(), "--agent", "t"],
+    );
+    assert!(ok, "{err}");
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let status = Command::new(ket_bin())
+        .args(["--home", ket_dir.to_str().unwrap(), "drift"])
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        status.status.code(),
+        Some(2),
+        "present-but-unreadable is 'cannot check', not 'missing'"
+    );
+}

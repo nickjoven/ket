@@ -23,6 +23,29 @@ ket adheres to semantic versioning.
 - A malformed CID (empty, non-hex, wrong length) is `NotFound` from
   `Store::get`/`exists` instead of a filesystem probe (`Cid::from("")`
   used to read the store directory).
+- **Parents are checked before they are sealed.** `dag create --parent`,
+  `merge --parents` and the MCP `parents` array accepted any string; a
+  non-ASCII or empty parent then broke `ket graph` for the whole store,
+  permanently, because nodes are immutable. Each parent must now be a
+  well-formed CID that exists in the store. `ket graph` itself no longer
+  byte-slices CIDs and sanitizes Mermaid node ids.
+- MCP `edge_kind` is strict: a misspelled `supersedes` used to seal
+  silently as `derives`. `EdgeKind::parse_or_default` is gone.
+- `ket merge --parents` accepts the same `<cid>[:<kind>]` syntax as
+  `dag create`; before, the suffix was sealed into the parent CID.
+- DOT and Mermaid output escape agent names, labels and soft-link
+  relations; a JSON `title` with a newline no longer splits a node
+  statement. Soft-link relations containing commas parse correctly.
+- A log append that fails after a write has already been sealed is a
+  warning on stderr, not a failed command (CLI and MCP). Failing the
+  command told the caller nothing was written and invited a retry that
+  minted a duplicate node.
+- `Store::put` fsyncs the blob before the rename (the log was already
+  fsynced, so a crash could leave a logged CID with a partial blob) and
+  removes its temp file when the write fails. `Store::delete` and
+  `blob_size` get the same well-formedness guard as `get`.
+- `ket drift` exits 2, not 1, when a tracked file is present but
+  unreadable: that is "cannot check", not "missing".
 
 ### Added
 - **Resolution edges.** `EdgeKind` gains `confirms`, `refutes`, `supersedes`
@@ -36,6 +59,8 @@ ket adheres to semantic versioning.
   by epistemic kind; soft links render dashed. Mermaid output renders
   natively in GitHub Markdown and on GitHub Pages.
 - `ket merge --edge-kind`.
+- `ket dag create --content-file <path>` and `ket merge --content-file`
+  (`-` for stdin), for content too large for argv or shaped like a flag.
 - `ket_cas::log` — the append-only mutation log moved from ket-cli into
   ket-cas (`log_path_for(store)` derives `.ket/log` from a CAS root) so
   every writer shares it. The MCP server now appends `put` and

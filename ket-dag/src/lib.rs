@@ -144,19 +144,6 @@ impl EdgeKind {
             EdgeKind::Supersedes => "supersedes",
         }
     }
-
-    /// Parse a kind word, falling back to the default (`derives`) for anything
-    /// unrecognized — mirrors ket-sql's `validate_edge_kind`.
-    pub fn parse_or_default(s: &str) -> Self {
-        match s {
-            "grounds" => EdgeKind::Grounds,
-            "proposes" => EdgeKind::Proposes,
-            "confirms" => EdgeKind::Confirms,
-            "refutes" => EdgeKind::Refutes,
-            "supersedes" => EdgeKind::Supersedes,
-            _ => EdgeKind::Derives,
-        }
-    }
 }
 
 impl std::fmt::Display for EdgeKind {

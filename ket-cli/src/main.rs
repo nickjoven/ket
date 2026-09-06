@@ -4,7 +4,7 @@ use ket_cas::log;
 
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -506,9 +506,16 @@ Examples:
   ket merge 'synthesis' --parents <cid1> <cid2> --agent human
   ket merge 'combined review' --parents <a> <b> <c> --kind reasoning")]
     Merge {
-        /// Content for the merge node
-        content: String,
-        /// Parent CIDs to merge (at least 2 required)
+        /// Content for the merge node (use `--` before content starting with a dash)
+        #[arg(
+            required_unless_present = "content_file",
+            conflicts_with = "content_file"
+        )]
+        content: Option<String>,
+        /// Read the content from a file instead (`-` for stdin); avoids argv limits
+        #[arg(long, value_name = "PATH")]
+        content_file: Option<PathBuf>,
+        /// Parent CIDs to merge (at least 2 required), each optionally <cid>[:<kind>]
         #[arg(long, required = true, num_args = 2..)]
         parents: Vec<String>,
         /// Node kind (memory, code, reasoning, task, cdom, score, context)
@@ -517,7 +524,8 @@ Examples:
         /// Agent name
         #[arg(long, default_value = "human")]
         agent: String,
-        /// Edge kind for every parent link: grounds, derives (default), proposes, confirms, refutes, supersedes
+        /// Edge kind for parents given without a suffix:
+        /// grounds, derives (default), proposes, confirms, refutes, supersedes
         #[arg(long, default_value = "derives")]
         edge_kind: String,
         /// Schema CID that the output conforms to
@@ -630,8 +638,16 @@ enum DagAction {
     },
     /// Create a new DAG node with content
     Create {
-        /// Content string to store (becomes the node's output)
-        content: String,
+        /// Content string to store (becomes the node's output). Use `--` before
+        /// content that starts with a dash, or --content-file for large content.
+        #[arg(
+            required_unless_present = "content_file",
+            conflicts_with = "content_file"
+        )]
+        content: Option<String>,
+        /// Read the content from a file instead (`-` for stdin); avoids argv limits
+        #[arg(long, value_name = "PATH")]
+        content_file: Option<PathBuf>,
         /// Node kind: memory, code, reasoning, task, cdom, score, context
         #[arg(long, default_value = "code")]
         kind: String,
@@ -868,6 +884,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Import { path } => cmd_import(&base, &path, cli.json),
         Commands::Merge {
             content,
+            content_file,
             parents,
             kind,
             agent,
@@ -875,7 +892,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             schema,
         } => cmd_merge(
             &base,
-            &content,
+            &read_content(content, content_file)?,
             &parents,
             &kind,
             &agent,
@@ -925,15 +942,62 @@ fn parse_edge_kind(kind: &str) -> Result<ket_dag::EdgeKind, Box<dyn std::error::
     })
 }
 
+/// A parent reference that is about to be sealed into a node. Nodes are
+/// immutable, so a malformed or dangling parent would be permanent: it must
+/// be a well-formed CID that exists in this store.
+fn resolve_parent(
+    cas: &ket_cas::Store,
+    raw: &str,
+) -> Result<ket_cas::Cid, Box<dyn std::error::Error>> {
+    let cid = ket_cas::Cid::from(raw);
+    if !cid.is_well_formed() {
+        return Err(
+            format!("Malformed parent CID {raw:?} (expected 64 lowercase hex chars)").into(),
+        );
+    }
+    if !cas.exists(&cid) {
+        return Err(format!("Parent not found in store: {raw}").into());
+    }
+    Ok(cid)
+}
+
 /// Parse `--parent <cid>[:<kind>]`. A parent without a suffix takes `default`.
 /// CIDs are hex, so the colon is unambiguous.
 fn parse_parent_link(
+    cas: &ket_cas::Store,
     spec: &str,
     default: ket_dag::EdgeKind,
 ) -> Result<(ket_cas::Cid, ket_dag::EdgeKind), Box<dyn std::error::Error>> {
     match spec.split_once(':') {
-        Some((cid, kind)) => Ok((ket_cas::Cid::from(cid), parse_edge_kind(kind)?)),
-        None => Ok((ket_cas::Cid::from(spec), default)),
+        Some((cid, kind)) => Ok((resolve_parent(cas, cid)?, parse_edge_kind(kind)?)),
+        None => Ok((resolve_parent(cas, spec)?, default)),
+    }
+}
+
+/// Node content from the positional argument or `--content-file` (`-` = stdin).
+fn read_content(
+    content: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    match (content, file) {
+        (Some(c), _) => Ok(c.into_bytes()),
+        (None, Some(p)) if p.as_os_str() == "-" => {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+            Ok(buf)
+        }
+        (None, Some(p)) => Ok(fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?),
+        (None, None) => Err("content required".into()),
+    }
+}
+
+/// Record an event that has already happened. The write it describes is
+/// sealed by the time this runs, so a log failure is reported, not turned
+/// into a failed command that would leave the caller believing nothing was
+/// written (and retrying into a duplicate node).
+fn log_event(log_path: &Path, event: &str, detail: &str) {
+    if let Err(e) = log::append(log_path, event, detail) {
+        eprintln!("warning: {event} succeeded but the log append failed: {e}");
     }
 }
 
@@ -993,7 +1057,7 @@ fn cmd_init(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error>
 
     // Log the init event
     let log_path = base.join("log");
-    log::append(&log_path, "init", &base.display().to_string())?;
+    log_event(&log_path, "init", &base.display().to_string());
 
     Ok(())
 }
@@ -1011,7 +1075,7 @@ fn cmd_put(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std::er
 
     // Log the put
     let log_path = base.join("log");
-    log::append(&log_path, "put", &format!("{path} -> {cid}"))?;
+    log_event(&log_path, "put", &format!("{path} -> {cid}"));
 
     if json {
         println!(
@@ -1157,6 +1221,7 @@ fn cmd_dag(
         }
         DagAction::Create {
             content,
+            content_file,
             kind,
             agent,
             parent,
@@ -1165,15 +1230,16 @@ fn cmd_dag(
         } => {
             let node_kind = parse_node_kind(&kind)?;
             let edge = parse_edge_kind(&edge_kind)?;
+            let content = read_content(content, content_file)?;
 
             // The edge kind is part of the node's identity (sealed in CAS),
             // not a projection-side annotation. `new_typed` canonicalizes:
             // all-`derives` is byte-identical to the untyped form.
             let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> = parent
                 .iter()
-                .map(|p| parse_parent_link(p, edge))
+                .map(|p| parse_parent_link(&cas, p, edge))
                 .collect::<Result<_, _>>()?;
-            let content_cid = cas.put(content.as_bytes())?;
+            let content_cid = cas.put(&content)?;
             let mut node =
                 ket_dag::DagNode::new_typed(node_kind, parent_links, content_cid.clone(), &agent);
             if let Some(ref s) = schema {
@@ -1199,7 +1265,7 @@ fn cmd_dag(
 
             // Log
             let log_path = base.join("log");
-            log::append(&log_path, "dag:create", &format!("{node_cid}"))?;
+            log_event(&log_path, "dag:create", &format!("{node_cid}"));
 
             if json {
                 let mut obj = serde_json::json!({
@@ -1417,7 +1483,7 @@ fn cmd_run(
 
     // Log the run
     let log_path = base.join("log");
-    log::append(&log_path, "run", &format!("{task_id} -> {result_cid}"))?;
+    log_event(&log_path, "run", &format!("{task_id} -> {result_cid}"));
 
     if json {
         println!(
@@ -1955,11 +2021,11 @@ fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn s
     // Log the repair
     if !dry_run {
         let log_path = base.join("log");
-        log::append(
+        log_event(
             &log_path,
             "repair",
             &format!("synced={synced} skipped={skipped} errors={errors}"),
-        )?;
+        );
     }
 
     Ok(())
@@ -2188,6 +2254,7 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
     let mut drifted = Vec::new();
     let mut ok = Vec::new();
     let mut missing = Vec::new();
+    let mut unreadable = Vec::new();
 
     // Parse CSV: path,cid,tracked_at,agent
     for line in tracked.lines().skip(1) {
@@ -2212,10 +2279,19 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
                     ok.push(path.to_string());
                 }
             }
-            Err(_) => {
+            Err(ket_cas::CasError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 missing.push(path.to_string());
             }
+            // Present but unreadable is "cannot check", not "gone": exit 2.
+            Err(e) => unreadable.push((path.to_string(), e.to_string())),
         }
+    }
+
+    if !unreadable.is_empty() {
+        for (path, err) in &unreadable {
+            eprintln!("Error: cannot read {path}: {err}");
+        }
+        std::process::exit(2);
     }
 
     if json {
@@ -2236,8 +2312,8 @@ fn cmd_drift(base: &PathBuf, json: bool) -> Result<(), Box<dyn std::error::Error
                 println!(
                     "  {} expected:{} actual:{}",
                     path,
-                    &expected[..12],
-                    &actual[..12]
+                    short(expected),
+                    short(actual)
                 );
             }
         }
@@ -2295,7 +2371,7 @@ fn cmd_gc(base: &PathBuf, delete: bool, json: bool) -> Result<(), Box<dyn std::e
     // Log
     if delete && !unreferenced.is_empty() {
         let log_path = base.join("log");
-        log::append(
+        log_event(
             &log_path,
             "gc",
             &format!(
@@ -2303,7 +2379,7 @@ fn cmd_gc(base: &PathBuf, delete: bool, json: bool) -> Result<(), Box<dyn std::e
                 unreferenced.len(),
                 unreferenced_bytes
             ),
-        )?;
+        );
     }
 
     if json {
@@ -2368,7 +2444,7 @@ fn cmd_export(
 
     // Log
     let log_path = base.join("log");
-    log::append(
+    log_event(
         &log_path,
         "export",
         &format!(
@@ -2376,7 +2452,7 @@ fn cmd_export(
             &cid[..12.min(cid.len())],
             bundle.entries.len()
         ),
-    )?;
+    );
 
     Ok(())
 }
@@ -2421,11 +2497,11 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
 
     // Log
     let log_path = base.join("log");
-    log::append(
+    log_event(
         &log_path,
         "import",
         &format!("{} blobs from {}", imported, path),
-    )?;
+    );
 
     if json {
         println!(
@@ -2455,7 +2531,7 @@ fn cmd_import(base: &PathBuf, path: &str, json: bool) -> Result<(), Box<dyn std:
 #[allow(clippy::too_many_arguments)]
 fn cmd_merge(
     base: &PathBuf,
-    content: &str,
+    content: &[u8],
     parents: &[String],
     kind: &str,
     agent: &str,
@@ -2469,11 +2545,12 @@ fn cmd_merge(
     let node_kind = parse_node_kind(kind)?;
     let edge = parse_edge_kind(edge_kind)?;
 
+    // Same <cid>[:<kind>] syntax as `dag create --parent`; the same checks.
     let parent_links: Vec<(ket_cas::Cid, ket_dag::EdgeKind)> = parents
         .iter()
-        .map(|p| (ket_cas::Cid::from(p.as_str()), edge))
-        .collect();
-    let content_cid = cas.put(content.as_bytes())?;
+        .map(|p| parse_parent_link(&cas, p, edge))
+        .collect::<Result<_, _>>()?;
+    let content_cid = cas.put(content)?;
     let mut node = ket_dag::DagNode::new_typed(node_kind, parent_links, content_cid.clone(), agent);
     if let Some(s) = schema {
         node = node.with_schema(ket_cas::Cid::from(s));
@@ -2498,11 +2575,11 @@ fn cmd_merge(
 
     // Log
     let log_path = base.join("log");
-    log::append(
+    log_event(
         &log_path,
         "merge",
         &format!("{} ({} parents)", node_cid, parents.len()),
-    )?;
+    );
 
     if json {
         let mut obj = serde_json::json!({
@@ -2587,11 +2664,45 @@ fn content_preview(bytes: &[u8], max: usize) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_default();
+    // One line, always: a JSON title with a newline in it must not split a
+    // renderer's node statement.
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = line.chars().take(max).collect();
     if line.chars().count() > max {
         out.push('…');
     }
     out
+}
+
+/// Escape for a DOT double-quoted string.
+fn dot_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\\' => "\\\\".to_string(),
+            '"' => "\\\"".to_string(),
+            '\n' | '\r' => "\\n".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// Escape for a Mermaid node or edge label, using entity codes. `#` goes
+/// first so the codes themselves survive.
+fn mermaid_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '#' => "#35;".to_string(),
+            '"' => "#quot;".to_string(),
+            '<' => "#lt;".to_string(),
+            '>' => "#gt;".to_string(),
+            '|' => "#124;".to_string(),
+            '`' => "#96;".to_string(),
+            '[' => "#91;".to_string(),
+            ']' => "#93;".to_string(),
+            '\n' | '\r' => " ".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 fn collect_graph(
@@ -2646,15 +2757,23 @@ fn collect_graph(
     if let Ok(db) = open_db(base) {
         for (cid, _) in &nodes {
             if let Ok(links) = db.soft_links_from(cid.as_str()) {
+                // CSV columns: to_cid, relation, created_at. Only the middle
+                // one is free text, so split from both ends.
                 for line in links.lines().skip(1) {
-                    let parts: Vec<&str> = line.splitn(3, ',').collect();
-                    if parts.len() >= 2 {
-                        out.soft_links.push(GraphSoftLink {
-                            from: cid.as_str().to_string(),
-                            to: parts[0].to_string(),
-                            relation: parts[1].to_string(),
-                        });
-                    }
+                    let Some((to, rest)) = line.split_once(',') else {
+                        continue;
+                    };
+                    let relation = rest.rsplit_once(',').map(|(r, _)| r).unwrap_or(rest);
+                    let relation = relation
+                        .strip_prefix('"')
+                        .and_then(|r| r.strip_suffix('"'))
+                        .map(|r| r.replace("\"\"", "\""))
+                        .unwrap_or_else(|| relation.to_string());
+                    out.soft_links.push(GraphSoftLink {
+                        from: cid.as_str().to_string(),
+                        to: to.to_string(),
+                        relation,
+                    });
                 }
             }
         }
@@ -2662,8 +2781,10 @@ fn collect_graph(
     Ok(out)
 }
 
-fn short(cid: &str) -> &str {
-    &cid[..12.min(cid.len())]
+/// First 12 characters of a CID for labels. Char-based: a sealed parent
+/// string is whatever a writer put there, and slicing bytes would panic.
+fn short(cid: &str) -> String {
+    cid.chars().take(12).collect()
 }
 
 fn kind_color(kind: &str) -> &'static str {
@@ -2684,14 +2805,13 @@ fn render_dot(g: &GraphOut) -> String {
     s.push_str("digraph ket {\n  rankdir=BT;\n");
     s.push_str("  node [shape=box, style=filled, fontname=\"monospace\"];\n\n");
     for n in &g.nodes {
-        let label = n.label.replace('\\', "\\\\").replace('"', "\\\"");
         s.push_str(&format!(
             "  \"{}\" [label=\"{}\\n{} · {}\\n{}\", fillcolor=\"{}\"];\n",
-            short(&n.cid),
-            short(&n.cid),
+            dot_escape(&short(&n.cid)),
+            dot_escape(&short(&n.cid)),
             n.kind,
-            n.agent,
-            label,
+            dot_escape(&n.agent),
+            dot_escape(&n.label),
             kind_color(&n.kind)
         ));
     }
@@ -2707,8 +2827,8 @@ fn render_dot(g: &GraphOut) -> String {
         };
         s.push_str(&format!(
             "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
-            short(&e.child),
-            short(&e.parent),
+            dot_escape(&short(&e.child)),
+            dot_escape(&short(&e.parent)),
             e.kind,
             style
         ));
@@ -2716,9 +2836,9 @@ fn render_dot(g: &GraphOut) -> String {
     for l in &g.soft_links {
         s.push_str(&format!(
             "  \"{}\" -> \"{}\" [style=dashed, label=\"{}\", color=\"gray\"];\n",
-            short(&l.from),
-            short(&l.to),
-            l.relation
+            dot_escape(&short(&l.from)),
+            dot_escape(&short(&l.to)),
+            dot_escape(&l.relation)
         ));
     }
     s.push_str("}\n");
@@ -2726,17 +2846,24 @@ fn render_dot(g: &GraphOut) -> String {
 }
 
 fn render_mermaid(g: &GraphOut) -> String {
-    let id = |cid: &str| format!("n{}", short(cid));
+    // Node ids are identifiers: only [A-Za-z0-9_] survive, so a sealed
+    // parent string that is not hex still yields a parseable graph.
+    let id = |cid: &str| {
+        let safe: String = short(cid)
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("n{safe}")
+    };
     let mut s = String::from("graph BT\n");
     for n in &g.nodes {
-        let label = n.label.replace('"', "#quot;");
         s.push_str(&format!(
             "  {}[\"{}<br/>{} · {}<br/>{}\"]\n",
             id(&n.cid),
-            short(&n.cid),
+            mermaid_escape(&short(&n.cid)),
             n.kind,
-            n.agent,
-            label
+            mermaid_escape(&n.agent),
+            mermaid_escape(&n.label)
         ));
         s.push_str(&format!("  class {} {}\n", id(&n.cid), n.kind));
     }
@@ -2753,9 +2880,9 @@ fn render_mermaid(g: &GraphOut) -> String {
     }
     for l in &g.soft_links {
         s.push_str(&format!(
-            "  {} -. {} .-> {}\n",
+            "  {} -.->|{}| {}\n",
             id(&l.from),
-            l.relation,
+            mermaid_escape(&l.relation),
             id(&l.to)
         ));
     }
@@ -2906,7 +3033,7 @@ fn cmd_snapshot(
 
             // Log
             let log_path = base.join("log");
-            log::append(&log_path, "snapshot:create", &name)?;
+            log_event(&log_path, "snapshot:create", &name);
 
             if json {
                 println!(

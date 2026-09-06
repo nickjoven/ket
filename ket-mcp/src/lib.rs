@@ -401,6 +401,62 @@ fn parse_decay_params(params: &Value) -> Result<Option<(f64, ket_dag::DecayConfi
     )))
 }
 
+/// Parent CIDs for a new node. Nodes are immutable, so a malformed or
+/// dangling parent would be sealed forever: each must be a well-formed CID
+/// that exists in this store. Non-string entries are an error, not skipped.
+fn parse_parents(params: &Value, cas: &ket_cas::Store) -> Result<Vec<ket_cas::Cid>, McpError> {
+    let Some(arr) = params.get("parents") else {
+        return Ok(Vec::new());
+    };
+    let arr = arr
+        .as_array()
+        .ok_or_else(|| McpError::InvalidParams("parents must be an array of CIDs".into()))?;
+    arr.iter()
+        .map(|v| {
+            let raw = v
+                .as_str()
+                .ok_or_else(|| McpError::InvalidParams(format!("parent is not a string: {v}")))?;
+            let cid = ket_cas::Cid::from(raw);
+            if !cid.is_well_formed() {
+                return Err(McpError::InvalidParams(format!(
+                    "malformed parent CID {raw:?} (expected 64 lowercase hex chars)"
+                )));
+            }
+            if !cas.exists(&cid) {
+                return Err(McpError::InvalidParams(format!(
+                    "parent not found in store: {raw}"
+                )));
+            }
+            Ok(cid)
+        })
+        .collect()
+}
+
+/// `edge_kind` is strict: the schema's enum is advisory to clients, and a
+/// misspelled resolution edge must not silently seal as `derives`.
+fn parse_edge_kind(params: &Value) -> Result<ket_dag::EdgeKind, McpError> {
+    let raw = params
+        .get("edge_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("derives");
+    ket_dag::EdgeKind::parse(raw).ok_or_else(|| {
+        let known: Vec<&str> = ket_dag::EdgeKind::ALL.iter().map(|k| k.as_str()).collect();
+        McpError::InvalidParams(format!(
+            "unknown edge_kind {raw:?} (one of: {})",
+            known.join(", ")
+        ))
+    })
+}
+
+/// Record an event that has already happened. The write is sealed by now;
+/// a log failure is reported on stderr, not returned as a failed call that
+/// would make the client retry into a duplicate node.
+fn log_event(cas: &ket_cas::Store, event: &str, detail: &str) {
+    if let Err(e) = ket_cas::log::append(&ket_cas::log::log_path_for(cas), event, detail) {
+        eprintln!("warning: {event} succeeded but the log append failed: {e}");
+    }
+}
+
 /// Handle an MCP tool call.
 pub fn handle_tool_call(
     tool_name: &str,
@@ -414,11 +470,7 @@ pub fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("content required".into()))?;
             let cid = cas.put(content.as_bytes())?;
-            ket_cas::log::append(
-                &ket_cas::log::log_path_for(cas),
-                "put",
-                &format!("mcp -> {}", cid.as_str()),
-            )?;
+            log_event(cas, "put", &format!("mcp -> {}", cid.as_str()));
             Ok(serde_json::json!({ "cid": cid.as_str() }))
         }
         "ket_get" => {
@@ -448,22 +500,9 @@ pub fn handle_tool_call(
             let agent = params["agent"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("agent required".into()))?;
-            let parents: Vec<ket_cas::Cid> = params
-                .get("parents")
-                .and_then(|p| p.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(ket_cas::Cid::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let parents = parse_parents(params, cas)?;
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
-            let edge_kind = ket_dag::EdgeKind::parse_or_default(
-                params
-                    .get("edge_kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("derives"),
-            );
+            let edge_kind = parse_edge_kind(params)?;
 
             let kind = parse_node_kind(kind_str)?;
             let saturation_param = parse_saturation_param(params)?;
@@ -490,11 +529,7 @@ pub fn handle_tool_call(
             // Same append-only log the CLI writes: an MCP write is an event
             // like any other, and a writer that skips the log leaves silent
             // history.
-            ket_cas::log::append(
-                &ket_cas::log::log_path_for(cas),
-                "dag:create",
-                node_cid.as_str(),
-            )?;
+            log_event(cas, "dag:create", node_cid.as_str());
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
@@ -584,22 +619,9 @@ pub fn handle_tool_call(
             let agent = params["agent"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("agent required".into()))?;
-            let parents: Vec<ket_cas::Cid> = params
-                .get("parents")
-                .and_then(|p| p.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(ket_cas::Cid::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let parents = parse_parents(params, cas)?;
             let schema_cid_param = params.get("schema_cid").and_then(|v| v.as_str());
-            let edge_kind = ket_dag::EdgeKind::parse_or_default(
-                params
-                    .get("edge_kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("derives"),
-            );
+            let edge_kind = parse_edge_kind(params)?;
             let saturation_param = parse_saturation_param(params)?;
             let decay_param = parse_decay_params(params)?;
 
@@ -628,11 +650,7 @@ pub fn handle_tool_call(
             // Same append-only log the CLI writes: an MCP write is an event
             // like any other, and a writer that skips the log leaves silent
             // history.
-            ket_cas::log::append(
-                &ket_cas::log::log_path_for(cas),
-                "dag:create",
-                node_cid.as_str(),
-            )?;
+            log_event(cas, "dag:create", node_cid.as_str());
 
             // Sync to SQL if Dolt is available
             if let Some(db) = db {
@@ -1146,6 +1164,62 @@ mod tests {
             "{log}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resolution edge with a typo must be an error, never a silent
+    /// `derives`; a parent that is malformed or absent must never be sealed.
+    #[test]
+    fn dag_link_rejects_unknown_edge_kind_and_bad_parents() {
+        let dir = std::env::temp_dir().join(format!("ket-mcp-strict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cas = ket_cas::Store::init(&dir.join(".ket").join("cas")).unwrap();
+        let base = handle_tool_call(
+            "ket_dag_link",
+            &json!({ "content": "claim", "kind": "memory", "agent": "a" }),
+            &cas,
+            None,
+        )
+        .unwrap();
+        let base_cid = base["node_cid"].as_str().unwrap().to_string();
+
+        let typo = handle_tool_call(
+            "ket_dag_link",
+            &json!({ "content": "fix", "kind": "memory", "agent": "a",
+                     "parents": [base_cid], "edge_kind": "supercedes" }),
+            &cas,
+            None,
+        );
+        assert!(
+            matches!(typo, Err(McpError::InvalidParams(ref m)) if m.contains("supercedes")),
+            "{typo:?}"
+        );
+
+        for bad in ["a€€€€", "", "deadbeef", &"0".repeat(64)] {
+            let r = handle_tool_call(
+                "ket_dag_link",
+                &json!({ "content": "x", "kind": "memory", "agent": "a", "parents": [bad] }),
+                &cas,
+                None,
+            );
+            assert!(
+                matches!(r, Err(McpError::InvalidParams(_))),
+                "{bad:?}: {r:?}"
+            );
+        }
+        let r = handle_tool_call(
+            "ket_dag_link",
+            &json!({ "content": "x", "kind": "memory", "agent": "a", "parents": [42] }),
+            &cas,
+            None,
+        );
+        assert!(
+            matches!(r, Err(McpError::InvalidParams(_))),
+            "non-string parent: {r:?}"
+        );
+
+        // Only the one good node exists: nothing bad was sealed.
+        assert_eq!(cas.list().unwrap().len(), 2, "content blob + node blob");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

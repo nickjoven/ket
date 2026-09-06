@@ -144,12 +144,12 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket gc [--delete]` — Garbage collect orphan blobs
 
 ### DAG & Lineage
-- `ket dag create <content>` — Create node (`--kind`, `--parent`, `--agent`, `--edge-kind grounds|derives|proposes`)
+- `ket dag create <content>` — Create node (`--kind`, `--parent <cid>[:<kind>]`, `--agent`, `--edge-kind grounds|derives|proposes|confirms|refutes|supersedes`, `--content-file <path|->` for large or dash-shaped content). Parents must exist in the store.
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag drift <path> <cid>` — Detect file drift
 - `ket link create <from> <to> <rel>` — Soft links (supersedes, contradicts, etc.)
-- `ket merge <content> --parents <cid>...` — Multi-parent merge node (`--edge-kind`)
+- `ket merge <content> --parents <cid>[:<kind>]...` — Multi-parent merge node (`--edge-kind`, `--content-file`)
 - `ket graph [--root <cid>] [--format dot|mermaid|json]` — Render the DAG (`ket dot` is an alias). Edges styled by epistemic kind; labels carry a content preview.
 - `ket export <cid>` / `ket import <file>` — Portable DAG bundles
 
