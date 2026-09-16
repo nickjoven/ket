@@ -567,7 +567,10 @@ fn migrate_restores_dropped_schema() {
     // the dag_nodes.schema_cid column. Matches the real-world failure mode
     // from old .ket stores created before these were added.
     ket(&ket_dir, &["sql", "DROP TABLE calibrations"]);
-    ket(&ket_dir, &["sql", "ALTER TABLE dag_nodes DROP COLUMN schema_cid"]);
+    ket(
+        &ket_dir,
+        &["sql", "ALTER TABLE dag_nodes DROP COLUMN schema_cid"],
+    );
 
     // Status should now fail (reproduces the sandbox/.ket symptom).
     let (ok, _, _) = ket(&ket_dir, &["status"]);
@@ -579,10 +582,7 @@ fn migrate_restores_dropped_schema() {
     assert_eq!(plan["applied"], false);
     let steps = plan["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 2, "expected 2 drift steps, got: {steps:?}");
-    let kinds: Vec<&str> = steps
-        .iter()
-        .map(|s| s["kind"].as_str().unwrap())
-        .collect();
+    let kinds: Vec<&str> = steps.iter().map(|s| s["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"create_table"));
     assert!(kinds.contains(&"add_column"));
 
@@ -1635,4 +1635,249 @@ fn dolt_history_advances_on_repair() {
         after > before,
         "history advanced after repair: {before} -> {after}"
     );
+}
+
+// --- #20 / #21: run routes through the stored assignee with the task's
+// content, and every launch failure leaves a failed task with its reason ---
+
+/// A stand-in agent: a shell script that records its argv and stdin-free
+/// prompt to `capture` and prints a JSON line. Returns the registered command.
+fn capture_agent(tmp: &Path, name: &str) -> (String, PathBuf) {
+    let script = tmp.join(format!("{name}.sh"));
+    let capture = tmp.join(format!("{name}.argv"));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n---\\n' \"$@\" > '{}'\necho '{{\"ok\":true}}'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (format!("bash {}", script.display()), capture)
+}
+
+fn task_row(ket_dir: &Path, tid: &str) -> String {
+    ket(
+        ket_dir,
+        &[
+            "sql",
+            &format!("SELECT status, meta FROM tasks WHERE id='{tid}'"),
+        ],
+    )
+    .1
+}
+
+#[test]
+fn run_uses_the_stored_assignee_and_passes_the_task_content() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-assignee");
+    let (cmd, capture) = capture_agent(tmp.path(), "review-agent");
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["agent", "register", "review-agent", "--command", &cmd],
+    );
+    assert!(ok, "register: {err}");
+    // the context the task is created against must reach the agent
+    let ctx_cid = {
+        let mut child = std::process::Command::new(ket_bin())
+            .args(["--home", ket_dir.to_str().unwrap(), "put", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"CTX-BLOB the file under review")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let tid = ket_json(
+        &ket_dir,
+        &[
+            "task",
+            "create",
+            "review the parser, carefully",
+            "--by",
+            "human",
+            "--context",
+            &ctx_cid,
+        ],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "review-agent"]);
+    assert!(ok, "assign: {err}");
+
+    // no --agent: the stored assignee runs it
+    let (ok, out, err) = ket(&ket_dir, &["--json", "run", &tid]);
+    assert!(ok, "run without --agent: {out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["agent"], "review-agent");
+    assert_eq!(v["agent_source"], "assigned");
+    let seen = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        seen.contains("review the parser, carefully"),
+        "title in the invocation: {seen}"
+    );
+    assert!(
+        seen.contains("CTX-BLOB the file under review"),
+        "context in the invocation: {seen}"
+    );
+    assert!(seen.contains(&tid), "task id in the invocation: {seen}");
+    assert!(task_row(&ket_dir, &tid).contains("done"));
+}
+
+#[test]
+fn run_with_explicit_agent_is_recorded_as_an_override() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-override");
+    let (cmd_a, _) = capture_agent(tmp.path(), "assignee");
+    let (cmd_b, capture_b) = capture_agent(tmp.path(), "override");
+    ket(
+        &ket_dir,
+        &["agent", "register", "assignee", "--command", &cmd_a],
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "override", "--command", &cmd_b],
+    );
+    let tid = ket_json(&ket_dir, &["task", "create", "t", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "assignee"]);
+    let (ok, out, err) = ket(&ket_dir, &["--json", "run", &tid, "--agent", "override"]);
+    assert!(ok, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["agent"], "override");
+    assert_eq!(v["agent_source"], "override");
+    assert!(
+        capture_b.exists(),
+        "the override agent, not the assignee, was invoked"
+    );
+    // the sealed result names the agent that actually ran
+    let node = ket_json(
+        &ket_dir,
+        &["dag", "show", v["result_cid"].as_str().unwrap()],
+    );
+    assert_eq!(node["agent"], "override");
+}
+
+#[test]
+fn run_refuses_an_unassigned_task_without_an_agent() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("run-unassigned");
+    let tid = ket_json(&ket_dir, &["task", "create", "t", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(err.contains("not assigned"), "{err}");
+    assert!(
+        task_row(&ket_dir, &tid).contains("pending"),
+        "nothing ran, nothing changed"
+    );
+}
+
+#[test]
+fn run_marks_the_task_failed_when_the_agent_cannot_launch() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-launch-failure");
+    // missing executable
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "review-missing",
+            "--command",
+            "/definitely-not-installed-review-agent",
+        ],
+    );
+    let tid = ket_json(
+        &ket_dir,
+        &["task", "create", "review spawn failure", "--by", "review"],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "review-missing"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid, "--agent", "review-missing"]);
+    assert!(!ok);
+    assert!(err.contains("definitely-not-installed"), "{err}");
+    let row = task_row(&ket_dir, &tid);
+    assert!(row.contains("failed"), "status must leave running: {row}");
+    assert!(
+        row.contains("launch") && row.contains("definitely-not-installed"),
+        "reason kept on the row: {row}"
+    );
+
+    // permission denied: a real file that is not executable
+    let noexec = tmp.path().join("noexec-agent");
+    std::fs::write(&noexec, "#!/usr/bin/env bash\necho hi\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&noexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "review-noexec",
+            "--command",
+            noexec.to_str().unwrap(),
+        ],
+    );
+    let tid2 = ket_json(
+        &ket_dir,
+        &[
+            "task",
+            "create",
+            "review permission failure",
+            "--by",
+            "review",
+        ],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid2, "review-noexec"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid2]);
+    assert!(!ok, "{err}");
+    let row = task_row(&ket_dir, &tid2);
+    assert!(row.contains("failed") && row.contains("launch"), "{row}");
+
+    // a nonzero exit still fails with its reason and the successful path is intact
+    let (cmd, _) = capture_agent(tmp.path(), "fine");
+    ket(&ket_dir, &["agent", "register", "fine", "--command", &cmd]);
+    let tid3 = ket_json(&ket_dir, &["task", "create", "works", "--by", "review"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid3, "fine"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid3]);
+    assert!(ok, "{err}");
+    assert!(task_row(&ket_dir, &tid3).contains("done"));
 }
