@@ -829,6 +829,41 @@ impl DoltDb {
             .filter(|s| !s.is_empty()))
     }
 
+    /// The agent a task was assigned to, if any — so `run` executes the task
+    /// through its stored assignee instead of a hard-coded default (#20).
+    pub fn task_assignee(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT assigned_to FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| csv_field(l.trim()))
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// The task's title — the content the assigned agent is asked to work on,
+    /// which `run` resolves into the invocation rather than a fixed sentence (#20).
+    pub fn task_title(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT title FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv.lines().nth(1).map(|l| csv_field(l.trim())))
+    }
+
+    /// Record free-form JSON on the task row (`tasks.meta`): used to keep the
+    /// reason a task failed next to its status (#21).
+    pub fn set_task_meta(&self, id: &str, meta: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = '{}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(meta),
+            escape_sql(id)
+        ))
+    }
+
     /// The registered invocation command for an agent, if any — so `run`
     /// honors what `ket agent register` stored instead of a hard-coded argv.
     pub fn agent_command(&self, name: &str) -> Result<Option<String>, SqlError> {
@@ -1467,6 +1502,16 @@ fn parse_count(csv: &str) -> u64 {
 
 fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Decode one single-column CSV row as `dolt sql -r csv` prints it: a value
+/// containing commas, quotes or newlines is double-quoted with `""` escapes.
+fn csv_field(raw: &str) -> String {
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1].replace("\"\"", "\"")
+    } else {
+        raw.to_string()
+    }
 }
 
 /// Strip ANSI colour escapes. `dolt log` colourises its output, and those

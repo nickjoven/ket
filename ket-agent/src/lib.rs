@@ -221,25 +221,67 @@ impl<'a> Orchestrator<'a> {
             prompt.to_string()
         };
 
-        // Spawn the process
-        let output = tokio::process::Command::new(&program)
+        // Spawn the process. A launch failure (missing executable, permission
+        // denied) used to propagate before the status update, leaving the task
+        // `running` forever (#21): every exit from here on records a reason.
+        let output = match tokio::process::Command::new(&program)
             .args(&args[..args.len() - 1])
             .arg(&full_prompt)
             .output()
             .await
-            .map_err(|e| AgentError::InvocationFailed(format!("{program}: {e}")))?;
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let reason = format!("{program}: {e}");
+                self.fail_task(task_id, "launch", &reason)?;
+                return Err(AgentError::InvocationFailed(reason));
+            }
+        };
 
         let result = if output.status.success() {
             String::from_utf8_lossy(&output.stdout).into_owned()
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            self.db
-                .update_task_status(task_id, TaskStatus::Failed.as_str())?;
-            return Err(AgentError::InvocationFailed(format!(
-                "{program} failed: {stderr}"
-            )));
+            let reason = format!("{program} failed ({}): {stderr}", output.status);
+            self.fail_task(task_id, "exit", &reason)?;
+            return Err(AgentError::InvocationFailed(reason));
         };
 
+        // The agent finished; storing its result is a separate step, and a
+        // storage failure must not read as "still running" either. The task
+        // fails with a reason that says the output existed.
+        match self.store_result(task_id, &result, agent_name) {
+            Ok(cid) => Ok(cid),
+            Err(e) => {
+                self.fail_task(
+                    task_id,
+                    "store",
+                    &format!("agent exited 0 but its result could not be stored: {e}"),
+                )?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Move a task to `failed` and keep why on its row (`tasks.meta`).
+    fn fail_task(&self, task_id: &str, phase: &str, reason: &str) -> Result<(), AgentError> {
+        self.db
+            .update_task_status(task_id, TaskStatus::Failed.as_str())?;
+        let meta = serde_json::json!({
+            "failed": { "phase": phase, "reason": reason, "at": chrono::Utc::now().to_rfc3339() }
+        });
+        self.db.set_task_meta(task_id, &meta.to_string())?;
+        Ok(())
+    }
+
+    /// Seal an agent's output as a Reasoning node, project it, and close the
+    /// task with the node it produced.
+    fn store_result(
+        &self,
+        task_id: &str,
+        result: &str,
+        agent_name: &str,
+    ) -> Result<Cid, AgentError> {
         // Store result as DAG node. If the task was created against a context
         // blob that is itself a node, parent the result to it so the result
         // has lineage back to what it was reasoning over. (Tasks live in Dolt,
