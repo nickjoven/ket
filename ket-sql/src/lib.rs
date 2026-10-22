@@ -850,7 +850,13 @@ impl DoltDb {
             "SELECT title FROM tasks WHERE id = '{}'",
             escape_sql(id)
         ))?;
-        Ok(csv.lines().nth(1).map(|l| csv_field(l.trim())))
+        // One column, at most one row: everything after the header is the
+        // field. A title may span lines (dolt quotes it), so it is not read
+        // line-by-line, which would hand the agent only its first line.
+        Ok(csv
+            .split_once('\n')
+            .filter(|(_, row)| !row.is_empty())
+            .map(|(_, row)| csv_field(row.trim_end_matches(['\r', '\n']))))
     }
 
     /// Record free-form JSON on the task row (`tasks.meta`): used to keep the

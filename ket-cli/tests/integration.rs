@@ -1881,3 +1881,31 @@ fn run_marks_the_task_failed_when_the_agent_cannot_launch() {
     assert!(ok, "{err}");
     assert!(task_row(&ket_dir, &tid3).contains("done"));
 }
+
+#[test]
+fn run_passes_a_multi_line_title_whole() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-multiline-title");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    // dolt quotes a multi-line value across CSV lines; reading the first
+    // line only would hand the agent `"first line` and drop the rest
+    let title = "first line, with a comma\nsecond line with \"quotes\"";
+    let tid = ket_json(&ket_dir, &["task", "create", title, "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let seen = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        seen.contains(title),
+        "whole title in the invocation: {seen}"
+    );
+}
