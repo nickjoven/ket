@@ -1909,3 +1909,41 @@ fn run_passes_a_multi_line_title_whole() {
         "whole title in the invocation: {seen}"
     );
 }
+
+#[test]
+fn a_successful_retry_drops_the_earlier_failure_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-retry");
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "missing",
+            "--command",
+            "/definitely-not-installed-review-agent",
+        ],
+    );
+    let (cmd, _) = capture_agent(tmp.path(), "fine");
+    ket(&ket_dir, &["agent", "register", "fine", "--command", &cmd]);
+    let tid = ket_json(&ket_dir, &["task", "create", "retry me", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "missing"]);
+    let (ok, _, _) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(task_row(&ket_dir, &tid).contains("launch"));
+
+    // reassigned and rerun: the row must not read `done` next to a failure
+    ket(&ket_dir, &["task", "assign", &tid, "fine"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let row = task_row(&ket_dir, &tid);
+    assert!(
+        row.contains("done") && !row.contains("failed"),
+        "stale failure reason on a done task: {row}"
+    );
+}

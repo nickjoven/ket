@@ -180,6 +180,9 @@ impl<'a> Orchestrator<'a> {
         }
         self.db
             .update_task_status(task_id, TaskStatus::Running.as_str())?;
+        // A retry starts clean: the reason a previous attempt failed belongs
+        // to that attempt, not to this one's outcome.
+        self.db.clear_task_meta(task_id)?;
 
         // Prefer the command `ket agent register` stored for this agent; the
         // prompt is appended as the final argument. Fall back to the built-in

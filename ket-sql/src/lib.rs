@@ -870,6 +870,16 @@ impl DoltDb {
         ))
     }
 
+    /// Drop the task's `meta`, so a new run attempt does not carry the
+    /// failure reason of an earlier one onto a row that later reads `done`.
+    pub fn clear_task_meta(&self, id: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = NULL, updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(id)
+        ))
+    }
+
     /// The registered invocation command for an agent, if any — so `run`
     /// honors what `ket agent register` stored instead of a hard-coded argv.
     pub fn agent_command(&self, name: &str) -> Result<Option<String>, SqlError> {
