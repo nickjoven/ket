@@ -1588,16 +1588,15 @@ fn cmd_run(
     let title = db
         .task_title(task_id)?
         .ok_or_else(|| format!("task {task_id} not found"))?;
-    // The context's bytes: a DAG node's content or a plain blob, passed to
-    // the agent's stdin unmodified. A context that cannot be read fails the
-    // task with the reason recorded, instead of exiting with the task left
-    // `assigned` and no trace of why.
-    let context = orch.task_context(task_id)?;
+    // The context's bytes (a DAG node's content or a plain blob) are
+    // resolved inside `run_task`, after it has checked the task, the agent
+    // and the program: a context that cannot be read fails the task with the
+    // reason recorded, but only for a run that would otherwise go ahead.
     let instructions = prompt.unwrap_or("Complete the assigned task");
     let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent, context.as_deref()))?;
+    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent))?;
 
     // Log the run, naming the agent that actually ran and how it was chosen
     let log_path = base.join("log");

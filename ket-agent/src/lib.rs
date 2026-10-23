@@ -233,7 +233,6 @@ impl<'a> Orchestrator<'a> {
         task_id: &str,
         prompt: &str,
         agent_name: &str,
-        context: Option<&[u8]>,
     ) -> Result<Cid, AgentError> {
         // Refuse an unknown task or agent instead of running and minting an
         // orphan node.
@@ -290,6 +289,13 @@ impl<'a> Orchestrator<'a> {
                     }
                 }
         };
+
+        // The context is resolved last, once the run is known to go ahead:
+        // a context that cannot be read fails the task (`task_context`), and
+        // a run refused above for an unknown task, an unknown agent or no
+        // program must leave the task as it was, not rewrite it to `failed`.
+        let context = self.task_context(task_id)?;
+        let context = context.as_deref();
 
         // From here on the task reads `running`, so every exit that is not
         // success goes through `fail_task` and records why.

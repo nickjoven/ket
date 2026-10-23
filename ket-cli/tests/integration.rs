@@ -2420,3 +2420,74 @@ fn a_context_node_whose_content_is_gone_fails_the_task_with_a_reason() {
         "the agent must not run without its context"
     );
 }
+
+#[test]
+fn a_refused_run_leaves_an_assigned_task_with_a_dangling_context_assigned() {
+    if !has_dolt() {
+        return;
+    }
+    // An unknown agent is refused before anything runs; the task's context
+    // is not even looked at, so a dangling context must not fail the task.
+    let (ket_dir, tmp) = fresh_ket("run-refused-dangling-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let missing = "0".repeat(64);
+    let tid = new_task(&ket_dir, "read nothing", &["--context", &missing]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid, "--agent", "rdd"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "assigned",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(err.contains("agent rdd"), "{err}");
+    assert!(!capture.exists(), "nothing must run");
+}
+
+#[test]
+fn a_refused_run_leaves_a_done_task_done_even_if_its_context_is_gone() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-refused-done-task");
+    let (cmd, _capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, b"material that will vanish");
+    let tid = new_task(&ket_dir, "read once", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+    let result = sql_value(
+        &ket_dir,
+        &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+    );
+    assert!(!result.is_empty());
+
+    std::fs::remove_file(ket_dir.join("cas").join(&ctx)).unwrap();
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid, "--agent", "nosuch"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "done",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(err.contains("agent nosuch"), "{err}");
+    assert_eq!(
+        sql_value(
+            &ket_dir,
+            &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+        ),
+        result,
+        "the finished result must survive a refused re-run"
+    );
+}
