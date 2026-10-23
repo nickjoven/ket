@@ -1840,6 +1840,8 @@ fn run_marks_the_task_failed_when_the_agent_cannot_launch() {
         row.contains("launch") && row.contains("definitely-not-installed"),
         "reason kept on the row: {row}"
     );
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "launch", "{meta}");
 
     // permission denied: a real file that is not executable
     let noexec = tmp.path().join("noexec-agent");
@@ -1877,8 +1879,11 @@ fn run_marks_the_task_failed_when_the_agent_cannot_launch() {
     assert!(!ok, "{err}");
     let row = task_row(&ket_dir, &tid2);
     assert!(row.contains("failed") && row.contains("launch"), "{row}");
+    assert_eq!(task_meta(&ket_dir, &tid2)["failed"]["phase"], "launch");
 
-    // a nonzero exit still fails with its reason and the successful path is intact
+    // the successful path is intact. (Nonzero exits and storage failures have
+    // their own tests: a_nonzero_exit_keeps_a_reason_with_quotes_and_backslashes_as_json,
+    // a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase.)
     let (cmd, _) = capture_agent(tmp.path(), "fine");
     ket(&ket_dir, &["agent", "register", "fine", "--command", &cmd]);
     let tid3 = ket_json(&ket_dir, &["task", "create", "works", "--by", "review"])["id"]
