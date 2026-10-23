@@ -2180,3 +2180,48 @@ fn a_context_node_reaches_the_agent_as_its_content() {
         "not the node's JSON wrapper: {seen}"
     );
 }
+
+#[test]
+fn context_is_delivered_on_stdin_whatever_its_size_or_shape() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-context-stdin");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+
+    // larger than one argv element may be (128 KiB on Linux)
+    let big = "y".repeat(200 * 1024);
+    let ctx = put_blob(&ket_dir, big.as_bytes());
+    let tid = new_task(&ket_dir, "read a lot", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{}", &err[..err.len().min(500)]);
+    assert_eq!(
+        std::fs::read_to_string(capture.with_extension("stdin")).unwrap(),
+        big
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+
+    // a context that looks like a flag never becomes an argument
+    let ctx = put_blob(&ket_dir, b"--model=evil\nthen the real material");
+    let tid = new_task(&ket_dir, "read a flag", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let argv = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        !argv.contains("--model=evil"),
+        "context leaked into argv: {argv}"
+    );
+    assert!(
+        argv.starts_with(&format!("Task {tid}: read a flag")),
+        "the prompt is the only argument: {argv}"
+    );
+    assert!(std::fs::read_to_string(capture.with_extension("stdin"))
+        .unwrap()
+        .starts_with("--model=evil"));
+}

@@ -211,7 +211,8 @@ impl<'a> Orchestrator<'a> {
         // stuck `running` with nothing executing.
         //
         // Prefer the command `ket agent register` stored for this agent; the
-        // prompt is appended as the final argument. Fall back to the built-in
+        // prompt is appended as the final argument (and the context, if any,
+        // is written to stdin, below). Fall back to the built-in
         // presets, then error. (Simple whitespace splitting: agent commands
         // are flags, not shell.) This is the fix for `run` ignoring the
         // registered `cli_command`.
@@ -261,29 +262,63 @@ impl<'a> Orchestrator<'a> {
             return Err(self.fail_task(task_id, "launch", &reason, e.into()));
         }
 
-        // Build full prompt with context
-        let full_prompt = if let Some(ctx) = context {
-            format!("{ctx}\n\n---\n\n{prompt}")
-        } else {
-            prompt.to_string()
-        };
-
         // Spawn the process. A launch failure (missing executable, permission
         // denied) used to propagate before the status update, leaving the task
         // `running` forever (#21): every exit from here on records a reason.
-        let output = match tokio::process::Command::new(&program)
-            .args(&args[..args.len() - 1])
-            .arg(&full_prompt)
-            .output()
-            .await
-        {
-            Ok(output) => output,
+        //
+        // The prompt (task line and instructions) is the final argument; the
+        // task's context, which can be any size and any shape, goes to the
+        // agent's stdin. As an argument it could exceed the per-argument
+        // limit (128 KiB on Linux, E2BIG) and, coming first, a context that
+        // began with `--` read as a flag. Both presets take piped input
+        // alongside a prompt argument: `claude -p` reads stdin as input to
+        // the prompt, `codex exec` appends it as a `<stdin>` block.
+        let mut command = tokio::process::Command::new(&program);
+        command
+            .args(&args)
+            .stdin(if context.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
             Err(e) => {
                 let reason = format!("{program}: {e}");
                 let err = AgentError::InvocationFailed(reason.clone());
                 return Err(self.fail_task(task_id, "launch", &reason, err));
             }
         };
+        // Feed stdin while collecting output, so neither side can fill a pipe
+        // and block the other. An agent that exits without reading all of its
+        // context closes the pipe; that is its choice, not a ket failure.
+        let stdin = child.stdin.take();
+        let feed = async move {
+            if let (Some(ctx), Some(mut stdin)) = (context, stdin) {
+                use tokio::io::AsyncWriteExt;
+                match stdin.write_all(ctx.as_bytes()).await {
+                    Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e),
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+        let (fed, output) = tokio::join!(feed, child.wait_with_output());
+        let output = match output {
+            Ok(output) => output,
+            Err(e) => {
+                let reason = format!("{program}: waiting for it failed: {e}");
+                let err = AgentError::InvocationFailed(reason.clone());
+                return Err(self.fail_task(task_id, "exit", &reason, err));
+            }
+        };
+        if let Err(e) = fed {
+            let reason = format!("{program}: could not write the task context to its stdin: {e}");
+            let err = AgentError::InvocationFailed(reason.clone());
+            return Err(self.fail_task(task_id, "launch", &reason, err));
+        }
 
         let result = if output.status.success() {
             String::from_utf8_lossy(&output.stdout).into_owned()

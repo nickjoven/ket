@@ -749,7 +749,8 @@ enum AgentAction {
         /// --command is given
         name: String,
         /// Invocation command for a custom agent; the prompt is appended as
-        /// the final argument. Overrides the preset for this name.
+        /// the final argument and the task's context, if any, is written to
+        /// its stdin. Overrides the preset for this name.
         #[arg(long)]
         command: Option<String>,
         /// Model identifier to record (optional)
