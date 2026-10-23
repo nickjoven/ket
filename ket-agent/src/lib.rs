@@ -25,6 +25,8 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error("Max subtask depth ({0}) exceeded")]
     MaxDepth(u32),
+    #[error("Task context unavailable: {0}")]
+    ContextUnavailable(String),
 }
 
 /// Task status in the lifecycle.
@@ -185,6 +187,44 @@ impl<'a> Orchestrator<'a> {
             return Ok(true);
         }
         Ok(self.db.agent_command(agent)?.is_some())
+    }
+
+    /// The bytes a task's context names, for `run_task` to put on the
+    /// agent's stdin: `None` when the task has no context, the node's
+    /// content when the context is a DAG node (as `dag create --kind
+    /// context` makes), and the blob itself otherwise.
+    ///
+    /// A context that cannot be read (a dangling CID, a node whose content
+    /// is gone, a CAS read error) fails the task with phase `context` and a
+    /// reason naming the CID: running the agent without the material it was
+    /// asked to work on would be a wrong answer, not a degraded one. Only a
+    /// blob that does not parse as a node counts as "not a node"; a read
+    /// error is never mistaken for one.
+    pub fn task_context(&self, task_id: &str) -> Result<Option<Vec<u8>>, AgentError> {
+        let Some(ctx) = self.db.task_context_cid(task_id)? else {
+            return Ok(None);
+        };
+        let cid = Cid::from(ctx.as_str());
+        let resolved = self
+            .cas
+            .get(&cid)
+            .map_err(|e| format!("the task's context {cid} could not be read: {e}"))
+            .and_then(|bytes| match DagNode::from_bytes(&bytes) {
+                Ok(node) => self.cas.get(&node.output_cid).map_err(|e| {
+                    format!(
+                        "the task's context {cid} is a DAG node whose content {} could not be read: {e}",
+                        node.output_cid
+                    )
+                }),
+                Err(_) => Ok(bytes),
+            });
+        match resolved {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(reason) => {
+                let err = AgentError::ContextUnavailable(format!("task {task_id}: {reason}"));
+                Err(self.fail_task(task_id, "context", &reason, err))
+            }
+        }
     }
 
     /// Run a task by spawning the assigned agent.

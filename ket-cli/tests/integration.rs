@@ -2336,3 +2336,87 @@ fn a_binary_context_reaches_the_agent_byte_for_byte() {
     );
     assert_eq!(task_status(&ket_dir, &tid), "done");
 }
+
+/// A run whose context cannot be read must fail the task, say so in its
+/// meta (phase `context`, naming the CID), and say on stderr that it was
+/// the task's context, not some other content, that was missing.
+fn assert_context_failure(ket_dir: &Path, tid: &str, cid: &str, err: &str) {
+    assert!(err.contains("context") && err.contains(cid), "{err}");
+    assert_eq!(
+        task_status(ket_dir, tid),
+        "failed",
+        "{}",
+        task_row(ket_dir, tid)
+    );
+    let meta = task_meta(ket_dir, tid);
+    assert_eq!(meta["failed"]["phase"], "context", "{meta}");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(reason.contains(cid), "{meta}");
+}
+
+#[test]
+fn a_dangling_context_cid_fails_the_task_with_a_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-dangling-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let missing = "0".repeat(64);
+    let tid = new_task(&ket_dir, "read nothing", &["--context", &missing]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{out}");
+    assert_context_failure(&ket_dir, &tid, &missing, &err);
+    assert!(
+        !capture.exists(),
+        "the agent must not run without its context"
+    );
+}
+
+#[test]
+fn a_context_node_whose_content_is_gone_fails_the_task_with_a_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-dangling-node-content");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let created = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "material that will vanish",
+            "--kind",
+            "context",
+        ],
+    );
+    let node = created["node_cid"].as_str().unwrap().to_string();
+    let content = created["content_cid"].as_str().unwrap().to_string();
+    std::fs::remove_file(ket_dir.join("cas").join(&content)).unwrap();
+    let tid = new_task(&ket_dir, "read a node", &["--context", &node]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{out}");
+    assert_context_failure(&ket_dir, &tid, &node, &err);
+    // the reason also names the content that is missing
+    let meta = task_meta(&ket_dir, &tid);
+    assert!(
+        meta["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&content),
+        "{meta}"
+    );
+    assert!(
+        !capture.exists(),
+        "the agent must not run without its context"
+    );
+}

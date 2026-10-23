@@ -1588,21 +1588,11 @@ fn cmd_run(
     let title = db
         .task_title(task_id)?
         .ok_or_else(|| format!("task {task_id} not found"))?;
-    // A context that is a DAG node (as `dag create --kind context` makes)
-    // means that node's content, not its JSON wrapper; the result is
-    // parented to the node either way. A plain blob is passed as is, byte for
-    // byte: it goes to the agent's stdin, which carries bytes, not text.
-    let context = match db.task_context_cid(task_id)? {
-        Some(cid) => {
-            let cid = ket_cas::Cid::from(cid.as_str());
-            let content_cid = match ket_dag::Dag::new(&cas).get_node(&cid) {
-                Ok(node) => node.output_cid,
-                Err(_) => cid,
-            };
-            Some(cas.get(&content_cid)?)
-        }
-        None => None,
-    };
+    // The context's bytes: a DAG node's content or a plain blob, passed to
+    // the agent's stdin unmodified. A context that cannot be read fails the
+    // task with the reason recorded, instead of exiting with the task left
+    // `assigned` and no trace of why.
+    let context = orch.task_context(task_id)?;
     let instructions = prompt.unwrap_or("Complete the assigned task");
     let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
