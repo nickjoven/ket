@@ -1640,16 +1640,18 @@ fn dolt_history_advances_on_repair() {
 // --- #20 / #21: run routes through the stored assignee with the task's
 // content, and every launch failure leaves a failed task with its reason ---
 
-/// A stand-in agent: a shell script that records its argv and stdin-free
-/// prompt to `capture` and prints a JSON line. Returns the registered command.
+/// A stand-in agent: a shell script that records its argv to `capture`
+/// (`<name>.argv`) and its stdin to `<name>.stdin`, and prints a JSON line.
+/// Returns the registered command.
 fn capture_agent(tmp: &Path, name: &str) -> (String, PathBuf) {
     let script = tmp.join(format!("{name}.sh"));
     let capture = tmp.join(format!("{name}.argv"));
     std::fs::write(
         &script,
         format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n---\\n' \"$@\" > '{}'\necho '{{\"ok\":true}}'\n",
-            capture.display()
+            "#!/usr/bin/env bash\nprintf '%s\\n---\\n' \"$@\" > '{}'\ncat > '{}'\necho '{{\"ok\":true}}'\n",
+            capture.display(),
+            capture.with_extension("stdin").display()
         ),
     )
     .unwrap();
@@ -1659,6 +1661,13 @@ fn capture_agent(tmp: &Path, name: &str) -> (String, PathBuf) {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     (format!("bash {}", script.display()), capture)
+}
+
+/// Everything a `capture_agent` was handed: its argv, then its stdin.
+fn seen_by(capture: &Path) -> String {
+    let argv = std::fs::read_to_string(capture).unwrap();
+    let stdin = std::fs::read_to_string(capture.with_extension("stdin")).unwrap_or_default();
+    format!("{argv}{stdin}")
 }
 
 fn task_row(ket_dir: &Path, tid: &str) -> String {
@@ -1727,7 +1736,7 @@ fn run_uses_the_stored_assignee_and_passes_the_task_content() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["agent"], "review-agent");
     assert_eq!(v["agent_source"], "assigned");
-    let seen = std::fs::read_to_string(&capture).unwrap();
+    let seen = seen_by(&capture);
     assert!(
         seen.contains("review the parser, carefully"),
         "title in the invocation: {seen}"
@@ -1946,4 +1955,96 @@ fn a_successful_retry_drops_the_earlier_failure_reason() {
         row.contains("done") && !row.contains("failed"),
         "stale failure reason on a done task: {row}"
     );
+}
+
+// --- Review fixes on #20/#21: no exit leaves `running`, the failure reason
+// round-trips as JSON, and context reaches the agent as content on stdin ---
+
+/// A registered agent whose behaviour is the given bash body.
+fn script_agent(tmp: &Path, name: &str, body: &str) -> String {
+    let script = tmp.join(format!("{name}.sh"));
+    std::fs::write(&script, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    format!("bash {}", script.display())
+}
+
+/// A single-column, single-row value from `ket sql`, decoded from dolt's CSV.
+fn sql_value(ket_dir: &Path, sql: &str) -> String {
+    let (ok, out, err) = ket(ket_dir, &["sql", sql]);
+    assert!(ok, "{sql}: {err}");
+    let row = out
+        .split_once('\n')
+        .map(|(_, r)| r.trim_end_matches(['\r', '\n']))
+        .unwrap_or("");
+    if row.len() >= 2 && row.starts_with('"') && row.ends_with('"') {
+        row[1..row.len() - 1].replace("\"\"", "\"")
+    } else {
+        row.to_string()
+    }
+}
+
+fn task_status(ket_dir: &Path, tid: &str) -> String {
+    sql_value(
+        ket_dir,
+        &format!("SELECT status FROM tasks WHERE id='{tid}'"),
+    )
+}
+
+/// `tasks.meta`, which must always be valid JSON when set.
+fn task_meta(ket_dir: &Path, tid: &str) -> serde_json::Value {
+    let raw = sql_value(ket_dir, &format!("SELECT meta FROM tasks WHERE id='{tid}'"));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("meta is not JSON ({e}): {raw:?}"))
+}
+
+fn new_task(ket_dir: &Path, title: &str, extra: &[&str]) -> String {
+    let mut args = vec!["task", "create", title, "--by", "human"];
+    args.extend_from_slice(extra);
+    ket_json(ket_dir, &args)["id"].as_str().unwrap().to_string()
+}
+
+fn put_blob(ket_dir: &Path, bytes: &[u8]) -> String {
+    use std::io::Write;
+    let mut child = Command::new(ket_bin())
+        .args(["--home", ket_dir.to_str().unwrap(), "put", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn an_agent_with_no_runnable_command_does_not_leave_the_task_running() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("run-unresolvable");
+    // copilot is a known preset name (assign accepts it) but has no built-in
+    // invocation unless registered
+    let tid = new_task(&ket_dir, "suggest something", &[]);
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "copilot"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "nothing could run");
+    assert!(err.contains("copilot"), "{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "assigned", "never started");
+
+    // a registered command that is only whitespace has no program
+    ket(
+        &ket_dir,
+        &["agent", "register", "blank", "--command", "   "],
+    );
+    let tid2 = new_task(&ket_dir, "blank agent", &[]);
+    ket(&ket_dir, &["task", "assign", &tid2, "blank"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid2]);
+    assert!(!ok);
+    assert!(err.contains("blank"), "{err}");
+    assert_eq!(task_status(&ket_dir, &tid2), "assigned", "never started");
 }

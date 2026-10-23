@@ -178,28 +178,30 @@ impl<'a> Orchestrator<'a> {
                 "agent {agent_name} (register it first, or use a preset: claude/codex/copilot)"
             )));
         }
-        self.db
-            .update_task_status(task_id, TaskStatus::Running.as_str())?;
-        // A retry starts clean: the reason a previous attempt failed belongs
-        // to that attempt, not to this one's outcome.
-        self.db.clear_task_meta(task_id)?;
-
+        // Resolve what to execute before the task is marked `running`: every
+        // way this can fail (an agent with no command, a blank registered
+        // command, a database error) leaves the task as it was instead of
+        // stuck `running` with nothing executing.
+        //
         // Prefer the command `ket agent register` stored for this agent; the
         // prompt is appended as the final argument. Fall back to the built-in
         // presets, then error. (Simple whitespace splitting: agent commands
         // are flags, not shell.) This is the fix for `run` ignoring the
         // registered `cli_command`.
-        let (program, args): (String, Vec<String>) =
-            if let Some(cmd) = self.db.agent_command(agent_name)? {
-                let mut parts = cmd.split_whitespace().map(str::to_string);
-                let program = parts
-                    .next()
-                    .ok_or_else(|| AgentError::NotFound(agent_name.to_string()))?;
-                let mut args: Vec<String> = parts.collect();
-                args.push(prompt.to_string());
-                (program, args)
-            } else {
-                match agent_name {
+        let (program, args): (String, Vec<String>) = if let Some(cmd) =
+            self.db.agent_command(agent_name)?
+        {
+            let mut parts = cmd.split_whitespace().map(str::to_string);
+            let program = parts.next().ok_or_else(|| {
+                    AgentError::NotFound(format!(
+                        "agent {agent_name} has a blank registered command; `ket agent register {agent_name} --command <cmd>`"
+                    ))
+                })?;
+            let mut args: Vec<String> = parts.collect();
+            args.push(prompt.to_string());
+            (program, args)
+        } else {
+            match agent_name {
                     "claude" => (
                         "claude".to_string(),
                         vec![
@@ -213,9 +215,25 @@ impl<'a> Orchestrator<'a> {
                         "codex".to_string(),
                         vec!["exec".to_string(), prompt.to_string()],
                     ),
-                    _ => return Err(AgentError::NotFound(agent_name.to_string())),
+                    _ => {
+                        return Err(AgentError::NotFound(format!(
+                            "agent {agent_name} has no registered command and no built-in invocation; `ket agent register {agent_name}` first"
+                        )))
+                    }
                 }
-            };
+        };
+
+        // From here on the task reads `running`, so every exit that is not
+        // success goes through `fail_task` and records why.
+        self.db
+            .update_task_status(task_id, TaskStatus::Running.as_str())?;
+        // A retry starts clean: the reason a previous attempt failed belongs
+        // to that attempt, not to this one's outcome.
+        if let Err(e) = self.db.clear_task_meta(task_id) {
+            let reason = format!("could not clear the previous attempt's meta: {e}");
+            self.fail_task(task_id, "launch", &reason)?;
+            return Err(e.into());
+        }
 
         // Build full prompt with context
         let full_prompt = if let Some(ctx) = context {
