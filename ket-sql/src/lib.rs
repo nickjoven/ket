@@ -829,6 +829,57 @@ impl DoltDb {
             .filter(|s| !s.is_empty()))
     }
 
+    /// The agent a task was assigned to, if any — so `run` executes the task
+    /// through its stored assignee instead of a hard-coded default (#20).
+    pub fn task_assignee(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT assigned_to FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| csv_field(l.trim()))
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// The task's title — the content the assigned agent is asked to work on,
+    /// which `run` resolves into the invocation rather than a fixed sentence (#20).
+    pub fn task_title(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT title FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        // One column, at most one row: everything after the header is the
+        // field. A title may span lines (dolt quotes it), so it is not read
+        // line-by-line, which would hand the agent only its first line.
+        Ok(csv
+            .split_once('\n')
+            .filter(|(_, row)| !row.is_empty())
+            .map(|(_, row)| csv_field(row.trim_end_matches(['\r', '\n']))))
+    }
+
+    /// Record free-form JSON on the task row (`tasks.meta`): used to keep the
+    /// reason a task failed next to its status (#21).
+    pub fn set_task_meta(&self, id: &str, meta: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = '{}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(meta),
+            escape_sql(id)
+        ))
+    }
+
+    /// Drop the task's `meta`, so a new run attempt does not carry the
+    /// failure reason of an earlier one onto a row that later reads `done`.
+    pub fn clear_task_meta(&self, id: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = NULL, updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(id)
+        ))
+    }
+
     /// The registered invocation command for an agent, if any — so `run`
     /// honors what `ket agent register` stored instead of a hard-coded argv.
     pub fn agent_command(&self, name: &str) -> Result<Option<String>, SqlError> {
@@ -1465,8 +1516,22 @@ fn parse_count(csv: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Quote a value for a single-quoted SQL string literal. Dolt, like MySQL,
+/// reads backslash escapes inside literals (`\"`, `\n`, `\\`), so a value
+/// with backslashes, a JSON document especially, came back altered and could
+/// stop being valid JSON. Backslashes are doubled first, then quotes.
 fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
+    s.replace('\\', "\\\\").replace('\'', "''")
+}
+
+/// Decode one single-column CSV row as `dolt sql -r csv` prints it: a value
+/// containing commas, quotes or newlines is double-quoted with `""` escapes.
+fn csv_field(raw: &str) -> String {
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1].replace("\"\"", "\"")
+    } else {
+        raw.to_string()
+    }
 }
 
 /// Strip ANSI colour escapes. `dolt log` colourises its output, and those
@@ -1577,6 +1642,13 @@ fn expected_nodes_from_cas(cas: &ket_cas::Store) -> Result<Vec<NodeRow>, SqlErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_sql_doubles_backslashes_before_quotes() {
+        assert_eq!(escape_sql("it's"), "it''s");
+        assert_eq!(escape_sql(r#"a\"b\n\\c"#), r#"a\\"b\\n\\\\c"#);
+        assert_eq!(escape_sql(r"\'"), r"\\''");
+    }
 
     fn edge(parent: &str, child: &str, ord: i64, kind: &str) -> EdgeRow {
         EdgeRow {
