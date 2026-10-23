@@ -2225,3 +2225,88 @@ fn context_is_delivered_on_stdin_whatever_its_size_or_shape() {
         .unwrap()
         .starts_with("--model=evil"));
 }
+
+// --- Second review round: the stdin feed tolerates an agent that ignores
+// its context, and cannot deadlock against one that talks first ---
+
+/// `ket run <tid>` with a deadline: a run that has not finished in `secs` is
+/// killed and reported as a timeout, so a deadlock fails the test instead
+/// of hanging it. ket's own output goes to files, never a pipe nobody reads.
+fn ket_run_within(ket_dir: &Path, tid: &str, secs: u64) -> Result<(bool, String), String> {
+    let out_dir = tempfile::tempdir().unwrap();
+    let stdout = out_dir.path().join("stdout");
+    let stderr = out_dir.path().join("stderr");
+    let mut child = Command::new(ket_bin())
+        .args(["--home", ket_dir.to_str().unwrap(), "run", tid])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut text = std::fs::read_to_string(&stdout).unwrap_or_default();
+            let err = std::fs::read(&stderr).unwrap_or_default();
+            text.push_str(&String::from_utf8_lossy(&err[..err.len().min(2000)]));
+            return Ok((status.success(), text));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("`ket run {tid}` did not finish within {secs}s"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn an_agent_that_exits_without_reading_its_context_still_completes() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-unread-context");
+    // exits at once: ket's write of a context far larger than a pipe buffer
+    // meets a closed pipe (EPIPE), which is the agent's choice, not a failure
+    let cmd = script_agent(tmp.path(), "ignorer", "echo '{\"ok\":true}'\nexit 0");
+    ket(
+        &ket_dir,
+        &["agent", "register", "ignorer", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, &vec![b'c'; 4 * 1024 * 1024]);
+    let tid = new_task(&ket_dir, "ignore the context", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "ignorer"]);
+    let (ok, out) = ket_run_within(&ket_dir, &tid, 60).unwrap();
+    assert!(ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "done",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+}
+
+#[test]
+fn an_agent_that_writes_megabytes_before_reading_stdin_does_not_deadlock() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-chatty-agent");
+    // ~5 MB to each of stdout and stderr before touching stdin: if ket fed
+    // stdin before collecting output, both sides would block on a full pipe
+    let cmd = script_agent(
+        tmp.path(),
+        "chatty",
+        "head -c 5000000 /dev/zero | tr '\\0' o\nhead -c 5000000 /dev/zero | tr '\\0' e >&2\ncat > /dev/null\nexit 0",
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "chatty", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, &vec![b'c'; 4 * 1024 * 1024]);
+    let tid = new_task(&ket_dir, "talk first", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "chatty"]);
+    let (ok, out) = ket_run_within(&ket_dir, &tid, 60).unwrap();
+    assert!(ok, "{out}");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+}
