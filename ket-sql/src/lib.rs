@@ -1516,8 +1516,12 @@ fn parse_count(csv: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Quote a value for a single-quoted SQL string literal. Dolt, like MySQL,
+/// reads backslash escapes inside literals (`\"`, `\n`, `\\`), so a value
+/// with backslashes, a JSON document especially, came back altered and could
+/// stop being valid JSON. Backslashes are doubled first, then quotes.
 fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
+    s.replace('\\', "\\\\").replace('\'', "''")
 }
 
 /// Decode one single-column CSV row as `dolt sql -r csv` prints it: a value
@@ -1638,6 +1642,13 @@ fn expected_nodes_from_cas(cas: &ket_cas::Store) -> Result<Vec<NodeRow>, SqlErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_sql_doubles_backslashes_before_quotes() {
+        assert_eq!(escape_sql("it's"), "it''s");
+        assert_eq!(escape_sql(r#"a\"b\n\\c"#), r#"a\\"b\\n\\\\c"#);
+        assert_eq!(escape_sql(r"\'"), r"\\''");
+    }
 
     fn edge(parent: &str, child: &str, ord: i64, kind: &str) -> EdgeRow {
         EdgeRow {

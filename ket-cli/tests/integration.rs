@@ -2048,3 +2048,74 @@ fn an_agent_with_no_runnable_command_does_not_leave_the_task_running() {
     assert!(err.contains("blank"), "{err}");
     assert_eq!(task_status(&ket_dir, &tid2), "assigned", "never started");
 }
+
+#[test]
+fn a_nonzero_exit_keeps_a_reason_with_quotes_and_backslashes_as_json() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-exit-reason");
+    let stderr = r#"bad "thing" happened\path\n"#;
+    let cmd = script_agent(
+        tmp.path(),
+        "grumpy",
+        &format!("printf '%s' '{stderr}' >&2\nexit 3"),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "grumpy", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "fail loudly", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "grumpy"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(
+        err.contains(stderr),
+        "the agent's error reaches the user: {err}"
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "exit", "{meta}");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("exit status: 3") && reason.ends_with(stderr),
+        "exact reason kept: {reason:?}"
+    );
+}
+
+#[test]
+fn a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-store-failure");
+    // the agent exits 0, but takes the projection table away first, so
+    // sealing its result into SQL fails after it finished
+    let db = ket_dir.join("ket.db");
+    let cmd = script_agent(
+        tmp.path(),
+        "saboteur",
+        &format!(
+            "cd '{}' && dolt sql -q 'RENAME TABLE dag_nodes TO dag_nodes_gone' >/dev/null\necho '{{\"ok\":1}}'",
+            db.display()
+        ),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "saboteur", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "finish, then fail to store", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "saboteur"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "store", "{meta}");
+    assert!(
+        meta["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("exited 0"),
+        "{meta}"
+    );
+}
