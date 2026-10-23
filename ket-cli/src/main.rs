@@ -1590,7 +1590,8 @@ fn cmd_run(
         .ok_or_else(|| format!("task {task_id} not found"))?;
     // A context that is a DAG node (as `dag create --kind context` makes)
     // means that node's content, not its JSON wrapper; the result is
-    // parented to the node either way. A plain blob is passed as is.
+    // parented to the node either way. A plain blob is passed as is, byte for
+    // byte: it goes to the agent's stdin, which carries bytes, not text.
     let context = match db.task_context_cid(task_id)? {
         Some(cid) => {
             let cid = ket_cas::Cid::from(cid.as_str());
@@ -1598,8 +1599,7 @@ fn cmd_run(
                 Ok(node) => node.output_cid,
                 Err(_) => cid,
             };
-            let bytes = cas.get(&content_cid)?;
-            Some(String::from_utf8_lossy(&bytes).into_owned())
+            Some(cas.get(&content_cid)?)
         }
         None => None,
     };

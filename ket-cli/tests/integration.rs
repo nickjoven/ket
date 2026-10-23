@@ -2310,3 +2310,29 @@ fn an_agent_that_writes_megabytes_before_reading_stdin_does_not_deadlock() {
     assert!(ok, "{out}");
     assert_eq!(task_status(&ket_dir, &tid), "done");
 }
+
+#[test]
+fn a_binary_context_reaches_the_agent_byte_for_byte() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-binary-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    // not UTF-8: a lossy decode would turn ff, fe and 80 into U+FFFD
+    let bytes: &[u8] = b"\xff\xfe\x00\x01binary\x80";
+    let ctx = put_blob(&ket_dir, bytes);
+    let tid = new_task(&ket_dir, "read bytes", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(
+        std::fs::read(capture.with_extension("stdin")).unwrap(),
+        bytes,
+        "the context must arrive unmodified"
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+}

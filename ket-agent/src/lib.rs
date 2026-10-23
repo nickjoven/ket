@@ -193,7 +193,7 @@ impl<'a> Orchestrator<'a> {
         task_id: &str,
         prompt: &str,
         agent_name: &str,
-        context: Option<&str>,
+        context: Option<&[u8]>,
     ) -> Result<Cid, AgentError> {
         // Refuse an unknown task or agent instead of running and minting an
         // orphan node.
@@ -294,11 +294,13 @@ impl<'a> Orchestrator<'a> {
         // Feed stdin while collecting output, so neither side can fill a pipe
         // and block the other. An agent that exits without reading all of its
         // context closes the pipe; that is its choice, not a ket failure.
+        // The context is written byte for byte: it is content, not text, and
+        // a binary blob must arrive as stored.
         let stdin = child.stdin.take();
         let feed = async move {
             if let (Some(ctx), Some(mut stdin)) = (context, stdin) {
                 use tokio::io::AsyncWriteExt;
-                match stdin.write_all(ctx.as_bytes()).await {
+                match stdin.write_all(ctx).await {
                     Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e),
                     _ => {}
                 }
