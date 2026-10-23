@@ -2084,6 +2084,38 @@ fn a_nonzero_exit_keeps_a_reason_with_quotes_and_backslashes_as_json() {
 }
 
 #[test]
+fn a_huge_stderr_is_bounded_on_the_row_and_the_agent_error_survives() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-huge-stderr");
+    let cmd = script_agent(
+        tmp.path(),
+        "noisy",
+        "{ printf 'HEAD-MARK'; head -c 300000 /dev/zero | tr '\\0' x; printf 'TAIL-MARK'; } >&2\nexit 1",
+    );
+    ket(&ket_dir, &["agent", "register", "noisy", "--command", &cmd]);
+    let tid = new_task(&ket_dir, "fail at length", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "noisy"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(
+        err.contains("exit status: 1") && err.contains("HEAD-MARK"),
+        "the agent's failure, not a storage error, is reported: {}",
+        &err[..err.len().min(500)]
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "exit");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(reason.len() < 16 * 1024, "bounded: {} bytes", reason.len());
+    assert!(
+        reason.contains("HEAD-MARK") && reason.contains("TAIL-MARK"),
+        "both ends of the output kept"
+    );
+}
+
+#[test]
 fn a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase() {
     if !has_dolt() {
         return;

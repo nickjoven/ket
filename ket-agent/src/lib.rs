@@ -92,6 +92,33 @@ impl AgentConfig {
     }
 }
 
+/// Upper bound on the failure reason kept in `tasks.meta`.
+const MAX_REASON_BYTES: usize = 8 * 1024;
+
+/// `s` if it fits in `max` bytes, else its head and tail (where an error
+/// message and a stack trace's last line usually are) around a marker
+/// saying how much was dropped. Cuts land on char boundaries.
+fn bounded(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let half = max / 2;
+    let mut head = half;
+    while !s.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = s.len() - half;
+    while !s.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n[... {} bytes elided ...]\n{}",
+        &s[..head],
+        tail - head,
+        &s[tail..]
+    )
+}
+
 /// The agent orchestrator.
 pub struct Orchestrator<'a> {
     cas: &'a CasStore,
@@ -231,8 +258,7 @@ impl<'a> Orchestrator<'a> {
         // to that attempt, not to this one's outcome.
         if let Err(e) = self.db.clear_task_meta(task_id) {
             let reason = format!("could not clear the previous attempt's meta: {e}");
-            self.fail_task(task_id, "launch", &reason)?;
-            return Err(e.into());
+            return Err(self.fail_task(task_id, "launch", &reason, e.into()));
         }
 
         // Build full prompt with context
@@ -254,8 +280,8 @@ impl<'a> Orchestrator<'a> {
             Ok(output) => output,
             Err(e) => {
                 let reason = format!("{program}: {e}");
-                self.fail_task(task_id, "launch", &reason)?;
-                return Err(AgentError::InvocationFailed(reason));
+                let err = AgentError::InvocationFailed(reason.clone());
+                return Err(self.fail_task(task_id, "launch", &reason, err));
             }
         };
 
@@ -264,8 +290,8 @@ impl<'a> Orchestrator<'a> {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let reason = format!("{program} failed ({}): {stderr}", output.status);
-            self.fail_task(task_id, "exit", &reason)?;
-            return Err(AgentError::InvocationFailed(reason));
+            let err = AgentError::InvocationFailed(reason.clone());
+            return Err(self.fail_task(task_id, "exit", &reason, err));
         };
 
         // The agent finished; storing its result is a separate step, and a
@@ -274,25 +300,39 @@ impl<'a> Orchestrator<'a> {
         match self.store_result(task_id, &result, agent_name) {
             Ok(cid) => Ok(cid),
             Err(e) => {
-                self.fail_task(
-                    task_id,
-                    "store",
-                    &format!("agent exited 0 but its result could not be stored: {e}"),
-                )?;
-                Err(e)
+                let reason = format!("agent exited 0 but its result could not be stored: {e}");
+                Err(self.fail_task(task_id, "store", &reason, e))
             }
         }
     }
 
-    /// Move a task to `failed` and keep why on its row (`tasks.meta`).
-    fn fail_task(&self, task_id: &str, phase: &str, reason: &str) -> Result<(), AgentError> {
-        self.db
-            .update_task_status(task_id, TaskStatus::Failed.as_str())?;
-        let meta = serde_json::json!({
-            "failed": { "phase": phase, "reason": reason, "at": chrono::Utc::now().to_rfc3339() }
-        });
-        self.db.set_task_meta(task_id, &meta.to_string())?;
-        Ok(())
+    /// Move a task to `failed`, keep why on its row (`tasks.meta`), and hand
+    /// back the error that caused it. The stored reason is bounded (an
+    /// agent's stderr can be arbitrarily long, and the SQL carrying it is a
+    /// single argv element), and a failure to record it never replaces the
+    /// agent's own error: the caller always gets `err`, extended with the
+    /// recording failure only when there was one.
+    fn fail_task(&self, task_id: &str, phase: &str, reason: &str, err: AgentError) -> AgentError {
+        let recorded = self
+            .db
+            .update_task_status(task_id, TaskStatus::Failed.as_str())
+            .and_then(|()| {
+                let meta = serde_json::json!({
+                    "failed": {
+                        "phase": phase,
+                        "reason": bounded(reason, MAX_REASON_BYTES),
+                        "at": chrono::Utc::now().to_rfc3339(),
+                    }
+                });
+                self.db.set_task_meta(task_id, &meta.to_string())
+            });
+        match recorded {
+            Ok(()) => err,
+            Err(e) => AgentError::InvocationFailed(format!(
+                "{err} (and the task could not be marked failed: {})",
+                bounded(&e.to_string(), MAX_REASON_BYTES)
+            )),
+        }
     }
 
     /// Seal an agent's output as a Reasoning node, project it, and close the
@@ -403,5 +443,23 @@ impl<'a> Orchestrator<'a> {
     /// List all agents.
     pub fn list_agents(&self) -> Result<String, AgentError> {
         Ok(self.db.list_agents()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded;
+
+    #[test]
+    fn bounded_keeps_short_text_and_both_ends_of_long_text() {
+        assert_eq!(bounded("short", 16), "short");
+        let long = format!("HEAD{}TAIL", "x".repeat(1000));
+        let b = bounded(&long, 64);
+        assert!(b.starts_with("HEAD") && b.ends_with("TAIL"), "{b}");
+        assert!(b.len() < 128, "{}", b.len());
+        // never splits a multi-byte char
+        let wide = "é".repeat(100);
+        let b = bounded(&wide, 33);
+        assert!(b.contains("elided"));
     }
 }
