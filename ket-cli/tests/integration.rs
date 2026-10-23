@@ -2156,3 +2156,27 @@ fn a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase() {
         "{meta}"
     );
 }
+
+#[test]
+fn a_context_node_reaches_the_agent_as_its_content() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-context-node");
+    let ctx = create_node(&ket_dir, "the source material", &["--kind", "context"]);
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "read it", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let seen = seen_by(&capture);
+    assert!(seen.contains("the source material"), "content: {seen}");
+    assert!(
+        !seen.contains("output_cid"),
+        "not the node's JSON wrapper: {seen}"
+    );
+}

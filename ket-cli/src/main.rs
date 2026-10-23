@@ -1587,9 +1587,17 @@ fn cmd_run(
     let title = db
         .task_title(task_id)?
         .ok_or_else(|| format!("task {task_id} not found"))?;
+    // A context that is a DAG node (as `dag create --kind context` makes)
+    // means that node's content, not its JSON wrapper; the result is
+    // parented to the node either way. A plain blob is passed as is.
     let context = match db.task_context_cid(task_id)? {
         Some(cid) => {
-            let bytes = cas.get(&ket_cas::Cid::from(cid.as_str()))?;
+            let cid = ket_cas::Cid::from(cid.as_str());
+            let content_cid = match ket_dag::Dag::new(&cas).get_node(&cid) {
+                Ok(node) => node.output_cid,
+                Err(_) => cid,
+            };
+            let bytes = cas.get(&content_cid)?;
             Some(String::from_utf8_lossy(&bytes).into_owned())
         }
         None => None,
