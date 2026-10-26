@@ -188,10 +188,12 @@ Examples:
     Run {
         /// Task ID to run
         task_id: String,
-        /// Agent to use (claude, codex)
-        #[arg(long, default_value = "claude")]
-        agent: String,
-        /// Prompt for the agent (default: 'Complete the assigned task')
+        /// Agent to run as. Overrides the task's stored assignee; without it
+        /// the assignee is used and an unassigned task is refused.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Extra instructions for the agent, appended after the task title
+        /// (default: 'Complete the assigned task')
         #[arg(long)]
         prompt: Option<String>,
     },
@@ -747,7 +749,8 @@ enum AgentAction {
         /// --command is given
         name: String,
         /// Invocation command for a custom agent; the prompt is appended as
-        /// the final argument. Overrides the preset for this name.
+        /// the final argument and the task's context, if any, is written to
+        /// its stdin. Overrides the preset for this name.
         #[arg(long)]
         command: Option<String>,
         /// Model identifier to record (optional)
@@ -905,7 +908,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             task_id,
             agent,
             prompt,
-        } => cmd_run(&base, &task_id, &agent, prompt.as_deref(), cli.json),
+        } => cmd_run(
+            &base,
+            &task_id,
+            agent.as_deref(),
+            prompt.as_deref(),
+            cli.json,
+        ),
         Commands::Scan { path } => cmd_scan(&base, &path, cli.json),
         Commands::Cdom { query, path } => cmd_cdom(&base, &query, path.as_deref(), cli.json),
         Commands::Log { n } => cmd_log(&base, n, cli.json),
@@ -1550,7 +1559,7 @@ fn cmd_agent(
 fn cmd_run(
     base: &PathBuf,
     task_id: &str,
-    agent: &str,
+    agent: Option<&str>,
     prompt: Option<&str>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1558,14 +1567,44 @@ fn cmd_run(
     let db = open_db(base)?;
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
-    let prompt = prompt.unwrap_or("Complete the assigned task");
+    // The agent: an explicit --agent is an override; otherwise the task's
+    // stored assignee runs it, and a task nobody was assigned to is refused
+    // rather than routed to a default (#20).
+    let (agent, agent_source) = match agent {
+        Some(a) => (a.to_string(), "override"),
+        None => match db.task_assignee(task_id)? {
+            Some(a) => (a, "assigned"),
+            None => {
+                return Err(format!(
+                    "task {task_id} is not assigned to any agent; `ket task assign {task_id} <agent>` first, or pass --agent"
+                )
+                .into())
+            }
+        },
+    };
+
+    // The task content: its title and the context it was created against are
+    // part of the invocation, not something inferred from lineage afterwards.
+    let title = db
+        .task_title(task_id)?
+        .ok_or_else(|| format!("task {task_id} not found"))?;
+    // The context's bytes (a DAG node's content or a plain blob) are
+    // resolved inside `run_task`, after it has checked the task, the agent
+    // and the program: a context that cannot be read fails the task with the
+    // reason recorded, but only for a run that would otherwise go ahead.
+    let instructions = prompt.unwrap_or("Complete the assigned task");
+    let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result_cid = rt.block_on(orch.run_task(task_id, prompt, agent, None))?;
+    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent))?;
 
-    // Log the run
+    // Log the run, naming the agent that actually ran and how it was chosen
     let log_path = base.join("log");
-    log_event(&log_path, "run", &format!("{task_id} -> {result_cid}"));
+    log_event(
+        &log_path,
+        "run",
+        &format!("{task_id} -> {result_cid} (agent {agent}, {agent_source})"),
+    );
 
     if json {
         println!(
@@ -1573,6 +1612,7 @@ fn cmd_run(
             serde_json::to_string_pretty(&serde_json::json!({
                 "task_id": task_id,
                 "agent": agent,
+                "agent_source": agent_source,
                 "result_cid": result_cid.as_str(),
             }))?
         );
@@ -2110,7 +2150,11 @@ fn cmd_migrate(
         println!("Schema is current. No migration needed.");
     } else {
         let verb = if dry_run { "would apply" } else { "applying" };
-        println!("Migration plan ({} step{}):", steps.len(), if steps.len() == 1 { "" } else { "s" });
+        println!(
+            "Migration plan ({} step{}):",
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        );
         for step in &steps {
             println!("  {verb}: {}", step.describe());
         }
@@ -2122,11 +2166,7 @@ fn cmd_migrate(
             println!("\nMigration applied. Run `ket repair` next if CAS contains nodes that failed to index under the old schema.");
         }
         let log_path = base.join("log");
-        log::append(
-            &log_path,
-            "migrate",
-            &format!("applied={}", steps.len()),
-        )?;
+        log::append(&log_path, "migrate", &format!("applied={}", steps.len()))?;
     }
 
     Ok(())
