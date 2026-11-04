@@ -602,7 +602,10 @@ mod tests {
     fn non_support_edges_are_not_followed() {
         let fx = Fx::new("nonsupport");
         let a = fx.node("a", &[]);
-        for (i, k) in [Proposes, Confirms, Refutes, Supersedes].into_iter().enumerate() {
+        for (i, k) in [Proposes, Confirms, Refutes, Supersedes]
+            .into_iter()
+            .enumerate()
+        {
             let n = fx.node(&format!("n{i}"), &[(&a, k)]);
             let below = fx.node(&format!("below{i}"), &[(&n, Derives)]);
             let r = fx.run(&a, all());
@@ -670,7 +673,10 @@ mod tests {
         // Reached via y; x's own (invalidated) status still counts as a parent.
         assert_eq!(r.status_of(&dep), Some(Status::Invalidated));
         let nd = r.nodes.iter().find(|n| n.cid == dep.as_str()).unwrap();
-        assert_eq!(nd.witness_path, vec![a.0.clone(), y.0.clone(), dep.0.clone()]);
+        assert_eq!(
+            nd.witness_path,
+            vec![a.0.clone(), y.0.clone(), dep.0.clone()]
+        );
     }
 
     #[test]
@@ -780,7 +786,11 @@ mod tests {
             assert_eq!(r.status_of(&Cid(n.cid.clone())), Some(n.status));
         }
         assert_eq!(r.status_of(&unrelated), None);
-        let reasons: BTreeSet<_> = r.projection_mismatch.iter().map(|m| m.reason.as_str()).collect();
+        let reasons: BTreeSet<_> = r
+            .projection_mismatch
+            .iter()
+            .map(|m| m.reason.as_str())
+            .collect();
         assert!(reasons.contains("child_missing"));
         assert!(reasons.contains("no_such_parent_link"));
         assert_eq!(r.index, "forged");

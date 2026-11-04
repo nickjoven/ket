@@ -741,22 +741,21 @@ impl DoltDb {
             "SELECT parent_cid, child_cid, ordinal, edge_kind FROM dag_edges \
              ORDER BY child_cid, ordinal",
         )?;
-        let mut rows = Vec::new();
-        for line in csv.lines().skip(1) {
-            // CSV: parent_cid,child_cid,ordinal,edge_kind. CIDs are hex and
-            // kinds are bare words, so a plain split is safe here.
-            let f: Vec<&str> = line.split(',').collect();
-            if f.len() != 4 {
-                continue;
-            }
-            rows.push(EdgeRow {
-                parent_cid: f[0].to_string(),
-                child_cid: f[1].to_string(),
-                ordinal: f[2].parse().unwrap_or(0),
-                edge_kind: f[3].to_string(),
-            });
+        Ok(parse_edge_rows(&csv))
+    }
+
+    /// Typed one-level downstream lookup: every `dag_edges` row whose parent
+    /// is `cid`, edge kind included. A malformed CID matches nothing (it is
+    /// never interpolated into SQL).
+    pub fn children_typed(&self, cid: &str) -> Result<Vec<EdgeRow>, SqlError> {
+        if !ket_cas::Cid(cid.to_string()).is_well_formed() {
+            return Ok(Vec::new());
         }
-        Ok(rows)
+        let csv = self.query(&format!(
+            "SELECT parent_cid, child_cid, ordinal, edge_kind FROM dag_edges \
+             WHERE parent_cid = '{cid}' ORDER BY child_cid, ordinal"
+        ))?;
+        Ok(parse_edge_rows(&csv))
     }
 
     /// Audit the `dag_edges` projection against the CAS/DAG — the source of
@@ -1333,6 +1332,45 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Parse `parent_cid,child_cid,ordinal,edge_kind` CSV (with header) into rows.
+/// CIDs are hex and kinds are bare words, so a plain split is safe here.
+fn parse_edge_rows(csv: &str) -> Vec<EdgeRow> {
+    let mut rows = Vec::new();
+    for line in csv.lines().skip(1) {
+        let f: Vec<&str> = line.split(',').collect();
+        if f.len() != 4 {
+            continue;
+        }
+        rows.push(EdgeRow {
+            parent_cid: f[0].to_string(),
+            child_cid: f[1].to_string(),
+            ordinal: f[2].parse().unwrap_or(0),
+            edge_kind: f[3].to_string(),
+        });
+    }
+    rows
+}
+
+/// The projection as a candidate `ChildIndex` for invalidation propagation.
+/// The engine re-reads every candidate from CAS, so the projected edge kinds
+/// here only narrow the lookup; they never decide a verdict.
+pub struct SqlChildIndex<'a>(pub &'a DoltDb);
+
+impl ket_dag::propagate::ChildIndex for SqlChildIndex<'_> {
+    fn children(&self, parent: &ket_cas::Cid) -> Result<Vec<ket_cas::Cid>, String> {
+        let rows = self
+            .0
+            .children_typed(parent.as_str())
+            .map_err(|e| e.to_string())?;
+        let mut cids: Vec<String> = rows.into_iter().map(|r| r.child_cid).collect();
+        cids.dedup();
+        Ok(cids.into_iter().map(ket_cas::Cid).collect())
+    }
+    fn label(&self) -> String {
+        "projection".into()
+    }
+}
+
 /// Validate and normalize an edge kind string.
 ///
 /// Valid edge kinds:
@@ -1426,6 +1464,81 @@ mod tests {
             ordinal: ord,
             edge_kind: kind.into(),
         }
+    }
+
+    #[test]
+    fn parse_edge_rows_keeps_kinds_and_skips_malformed() {
+        let csv = "parent_cid,child_cid,ordinal,edge_kind\n\
+                   p,c1,0,grounds\n\
+                   garbage\n\
+                   p,c2,1,supersedes\n";
+        assert_eq!(
+            parse_edge_rows(csv),
+            vec![
+                edge("p", "c1", 0, "grounds"),
+                edge("p", "c2", 1, "supersedes")
+            ]
+        );
+    }
+
+    #[test]
+    fn children_typed_rejects_malformed_cid_without_querying() {
+        // A db path with no Dolt behind it: any query would error, so Ok(empty)
+        // proves the malformed CID never reached SQL.
+        let db = DoltDb {
+            db_path: std::env::temp_dir().join("ket-sql-no-such-db"),
+        };
+        assert!(db.children_typed("x' OR '1'='1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn sql_child_index_matches_cas_scan_verdicts() {
+        use ket_dag::propagate::{invalidated, CasChildIndex, PropagateOptions};
+        use ket_dag::{Dag, DagNode, EdgeKind, NodeKind};
+        if Command::new("dolt").arg("version").output().is_err() {
+            eprintln!("dolt not installed; skipping");
+            return;
+        }
+        let root = std::env::temp_dir().join("ket-sql-child-index");
+        let _ = std::fs::remove_dir_all(&root);
+        let cas = ket_cas::Store::init(&root.join("cas")).unwrap();
+        let db = DoltDb::init(&root.join("dolt")).unwrap();
+        let dag = Dag::new(&cas);
+        let mk = |label: &str, parents: Vec<(ket_cas::Cid, EdgeKind)>| {
+            let out = cas.put(label.as_bytes()).unwrap();
+            let node = DagNode::new_typed(NodeKind::Reasoning, parents.clone(), out, "test");
+            let cid = dag.put_node(&node).unwrap();
+            for (i, (p, k)) in parents.iter().enumerate() {
+                db.insert_dag_edge(p.as_str(), cid.as_str(), i as i32, k.as_str())
+                    .unwrap();
+            }
+            cid
+        };
+        let a = mk("a", vec![]);
+        let ext = mk("ext", vec![]);
+        let b = mk("b", vec![(a.clone(), EdgeKind::Grounds)]);
+        let _w = mk(
+            "w",
+            vec![(a.clone(), EdgeKind::Derives), (ext, EdgeKind::Derives)],
+        );
+        let _c = mk("c", vec![(b.clone(), EdgeKind::Derives)]);
+        let _r = mk("b-v2", vec![(b, EdgeKind::Supersedes)]);
+
+        let opts = PropagateOptions {
+            include_intact: true,
+            ..Default::default()
+        };
+        let via_sql = invalidated(&dag, &SqlChildIndex(&db), &a, &opts).unwrap();
+        let via_cas = invalidated(&dag, &CasChildIndex::build(&cas).unwrap(), &a, &opts).unwrap();
+        assert_eq!(via_sql.index, "projection");
+        let strip = |r: &ket_dag::propagate::InvalidationReport| {
+            let mut v = serde_json::to_value(r).unwrap();
+            v["index"] = serde_json::Value::Null;
+            v
+        };
+        assert_eq!(strip(&via_sql), strip(&via_cas));
+        assert!(via_sql.projection_mismatch.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
