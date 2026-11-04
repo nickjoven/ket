@@ -1,0 +1,107 @@
+{
+  "baseline_comparisons": [
+    {
+      "compared_paper_statuses": 177,
+      "mismatches": 0,
+      "report_sha256": "4f1b7ca6e9b3e47c962797b4704564863aa5ac287ea79f824f90c24060b567d8",
+      "seed": "https://openalex.org/W2160675481"
+    },
+    {
+      "compared_paper_statuses": 176,
+      "mismatches": 0,
+      "report_sha256": "b0495d0a78d59b2a0536e0dc93ca19c30b926a6aaf209c6d03551f2926fe642d",
+      "seed": "https://openalex.org/W2026087575"
+    }
+  ],
+  "capture_manifest_sha256": "3b8fee0b018faadb39b7dae8565e673a27093196837c2c0a5a997f0ee36ab121",
+  "cycle_order_diagnostic": {
+    "deterministic_orders_tested": 12,
+    "distinct_cut_sets": 4,
+    "scope": "Conservative source-ID verdicts on this dataset only; no general invariance theorem or CID invariance claimed.",
+    "status_differences": []
+  },
+  "diagnostic": "source-level model checks, not independent scientific validation",
+  "graph_map_sha256": "afdf9d999ebe65516b2b2544d55bc6e56df21ddc60151d41524753651ead3bd7",
+  "missingness_controls": {
+    "captured_reference_count": 2,
+    "pnas_query_current": "unknown",
+    "pnas_query_remove_science_reference": "invalidated",
+    "science_query_add_one_unknown_reference": "unknown",
+    "science_query_current": "invalidated",
+    "science_query_remove_science_reference": "invalidated",
+    "scope_note": "Controls alter the source graph, not captured evidence or certified engine output. Removing one already-lost parent does not by itself rescue an all-support-lost node.",
+    "target": "https://openalex.org/W2156452911"
+  },
+  "paper_count": 177,
+  "policy": "legacy all-support-lost, any-unknown precedence, no empty-support invalidation; grounds and derives treated alike; no supersedes boundaries in this paper dataset",
+  "scenarios": {
+    "W2026087575:closure_recorded": {
+      "all_reached": {
+        "refuted": 1,
+        "unknown": 175
+      },
+      "cohort_only": {
+        "unknown": 175
+      }
+    },
+    "W2026087575:seed_only": {
+      "all_reached": {
+        "refuted": 1,
+        "unknown": 175
+      }
+    },
+    "W2160675481:closure_recorded": {
+      "all_reached": {
+        "invalidated": 1,
+        "refuted": 2,
+        "unknown": 174
+      },
+      "cohort_only": {
+        "invalidated": 1,
+        "unknown": 174
+      }
+    },
+    "W2160675481:seed_only": {
+      "all_reached": {
+        "refuted": 1,
+        "unknown": 176
+      }
+    },
+    "explicit_joint_seeds": {
+      "all_reached": {
+        "invalidated": 1,
+        "refuted": 2,
+        "unknown": 174
+      },
+      "cohort_only": {
+        "invalidated": 1,
+        "unknown": 174
+      }
+    }
+  },
+  "schema_version": 1,
+  "selected_cohort_count": 175,
+  "selection": {
+    "all_selected_papers_directly_cite_both_seeds": true,
+    "independently_isolates_multihop_impact": false,
+    "reason": "All cohort papers have a one-hop support path from either seed by selection. Longer paths exist, but the reported depth-1 reachability does not isolate multihop impact from direct seed citations."
+  },
+  "self_tests": [
+    "one lost parent plus intact parent remains weakened",
+    "unknown overrides partial loss",
+    "unknown propagates",
+    "unrelated branch excluded",
+    "deliberately wrong oracle comparison rejected",
+    "outside recorded seed not silently applied",
+    "explicit joint seed scope changes verdict"
+  ],
+  "shared_inputs": "Pinned captured citations and declared cycle cuts are shared with the POC. Python synchronous fixed point and source IDs are independent of CAS construction/Rust topological traversal. Agreement validates this implementation/model pair, not scientific truth or novelty.",
+  "unvalidated": [
+    "citation intent and whether listed citations are necessary/alternative support",
+    "human correctness labels and empirical precision/recall",
+    "all cohort retractions",
+    "general AND/OR justification semantics",
+    "global or simultaneous refutation support in the public CLI",
+    "performance superiority or algorithmic novelty"
+  ]
+}
