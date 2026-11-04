@@ -12,8 +12,10 @@
 //! verdict either. Because a node's CID covers its parent
 //! list, the CAS support graph is acyclic; the closure is therefore evaluated
 //! once in topological order, which is the exact (least) fixed point and
-//! handles diamonds without revisits. A cycle can only come from a forged
-//! index and its nodes are reported `unknown`, never invalidated.
+//! handles diamonds without revisits. Every CAS read verifies the exact bytes
+//! against their CID before parsing; tampered blobs fail with an integrity
+//! error. Cycle guards additionally keep an internally inconsistent graph
+//! from manufacturing invalidation or looping forever.
 //!
 //! The result is the shared `ket.invalidated/v1` report used by the CLI, MCP
 //! and the retraction-POC report.
@@ -45,7 +47,8 @@ pub trait ChildIndex {
     fn label(&self) -> String;
 }
 
-/// Child index built from one scan of every DAG node in a CAS store.
+/// Child index built from one scan of a CAS store. All bytes are hash-verified
+/// before non-node content is filtered out.
 pub struct CasChildIndex {
     children: HashMap<Cid, Vec<Cid>>,
 }
@@ -54,7 +57,7 @@ impl CasChildIndex {
     pub fn build(cas: &CasStore) -> Result<Self, DagError> {
         let mut children: HashMap<Cid, BTreeSet<String>> = HashMap::new();
         for cid in cas.list()? {
-            let bytes = cas.get(&cid)?;
+            let bytes = read_verified_bytes(cas, &cid)?;
             let Ok(node) = DagNode::from_bytes(&bytes) else {
                 continue;
             };
@@ -223,13 +226,8 @@ pub fn invalidated(
     seed: &Cid,
     opts: &PropagateOptions,
 ) -> Result<InvalidationReport, PropagateError> {
-    let seed_node = match dag.get_node(seed) {
-        Ok(n) => n,
-        Err(DagError::Cas(ket_cas::CasError::NotFound(_))) | Err(DagError::Serde(_)) => {
-            return Err(PropagateError::SeedNotFound(seed.as_str().to_string()));
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let seed_node = read_node(dag, seed)?
+        .ok_or_else(|| PropagateError::SeedNotFound(seed.as_str().to_string()))?;
     // Checking only returned candidates cannot detect an omitted leaf,
     // refutation notice or superseding replacement. Union with a CAS scan
     // before applying support and resolution semantics. The POC deliberately
@@ -559,12 +557,30 @@ struct Upward {
     missing: BTreeSet<String>,
 }
 
-/// Missing or non-node blobs are epistemic gaps. Actual storage failures are
-/// errors, so an unreadable replacement can never disappear from a verdict.
+/// Check the exact bytes that will be parsed, rather than verify then re-read
+/// a potentially changed file. A readable corrupt replacement must not be
+/// mistaken for an ordinary non-node blob and omitted from the child index.
+fn read_verified_bytes(cas: &CasStore, cid: &Cid) -> Result<Vec<u8>, ket_cas::CasError> {
+    let bytes = cas.get(cid)?;
+    if ket_cas::hash_bytes(&bytes) != *cid {
+        return Err(ket_cas::CasError::IntegrityError {
+            cid: cid.as_str().to_string(),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Missing or valid non-node blobs are epistemic gaps. Storage failures and
+/// corrupt bytes are errors, so replacement evidence cannot silently vanish.
 fn read_node(dag: &Dag, cid: &Cid) -> Result<Option<DagNode>, DagError> {
-    match dag.get_node(cid) {
+    let bytes = match read_verified_bytes(dag.cas, cid) {
+        Ok(bytes) => bytes,
+        Err(ket_cas::CasError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match DagNode::from_bytes(&bytes) {
         Ok(node) => Ok(Some(node)),
-        Err(DagError::Cas(ket_cas::CasError::NotFound(_))) | Err(DagError::Serde(_)) => Ok(None),
+        Err(DagError::Serde(_)) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -912,6 +928,90 @@ mod tests {
     }
 
     #[test]
+    fn readable_corrupt_replacement_is_rejected_before_non_node_filtering() {
+        let fx = Fx::new("readable-corrupt-replacement");
+        let a = fx.node("a", &[]);
+        let _b = fx.node("b", &[(&a, Grounds)]);
+        let replacement = fx.node("replacement", &[(&a, Supersedes)]);
+        let index = CasChildIndex::build(&fx.cas).unwrap();
+        fs::write(
+            fx.cas.root().join(replacement.as_str()),
+            b"readable corrupt bytes",
+        )
+        .unwrap();
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::IntegrityError { cid })))
+                if cid == replacement.0
+        ));
+    }
+
+    #[test]
+    fn corrupted_seed_is_rejected_before_parsing() {
+        let fx = Fx::new("corrupt-seed");
+        let a = fx.node("a", &[]);
+        let index = CasChildIndex::build(&fx.cas).unwrap();
+        fs::write(fx.cas.root().join(a.as_str()), b"corrupt seed").unwrap();
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::IntegrityError { cid })))
+                if cid == a.0
+        ));
+    }
+
+    #[test]
+    fn valid_non_node_evidence_is_unknown_support_not_corruption() {
+        let fx = Fx::new("external-evidence");
+        let a = fx.node("a", &[]);
+        let evidence = fx.cas.put(b"external citation evidence").unwrap();
+        let b = fx.node("b", &[(&a, Grounds), (&evidence, Grounds)]);
+        let r = fx.run(&a, all());
+        assert_eq!(r.status_of(&b), Some(Status::Unknown));
+        assert_eq!(r.missing, vec![evidence.0]);
+        assert!(!r.complete);
+    }
+
+    #[test]
+    fn replacement_corrupted_after_scan_is_rejected_on_discovery_read() {
+        let fx = Fx::new("post-scan-corruption");
+        let a = fx.node("a", &[]);
+        let _b = fx.node("b", &[(&a, Grounds)]);
+        let replacement = fx.node("replacement", &[(&a, Supersedes)]);
+        struct CorruptAfterScan<'a> {
+            cas: &'a CasStore,
+            seed: Cid,
+            replacement: Cid,
+        }
+        impl ChildIndex for CorruptAfterScan<'_> {
+            fn children(&self, parent: &Cid) -> Result<Vec<Cid>, String> {
+                if parent == &self.seed {
+                    fs::write(
+                        self.cas.root().join(self.replacement.as_str()),
+                        b"corrupt after scan",
+                    )
+                    .unwrap();
+                    Ok(vec![self.replacement.clone()])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            fn label(&self) -> String {
+                "corrupt-after-scan".into()
+            }
+        }
+        let index = CorruptAfterScan {
+            cas: &fx.cas,
+            seed: a.clone(),
+            replacement: replacement.clone(),
+        };
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::IntegrityError { cid })))
+                if cid == replacement.0
+        ));
+    }
+
+    #[test]
     fn candidate_read_io_failure_is_not_a_missing_child() {
         let fx = Fx::new("candidate-io");
         let a = fx.node("a", &[]);
@@ -947,20 +1047,21 @@ mod tests {
     }
 
     #[test]
-    fn external_corrupt_support_cycle_is_unknown_and_incomplete() {
+    fn external_corrupt_support_cycle_is_rejected_by_integrity_check() {
         let fx = Fx::new("external-cycle");
         let a = fx.node("a", &[]);
         let x = fx.node("x", &[]);
         let y = fx.node("y", &[(&x, Derives)]);
+        let _d = fx.node("d", &[(&a, Grounds), (&x, Grounds)]);
+        let index = CasChildIndex::build(&fx.cas).unwrap();
         let out = fx.cas.put(b"tampered-x").unwrap();
         let forged = DagNode::new(NodeKind::Reasoning, vec![y.clone()], out, "test");
         fs::write(fx.cas.root().join(x.as_str()), forged.to_bytes().unwrap()).unwrap();
-        let d = fx.node("d", &[(&a, Grounds), (&x, Grounds)]);
-        let r = fx.run(&a, all());
-        assert_eq!(r.status_of(&d), Some(Status::Unknown));
-        assert!(!r.complete);
-        let d = r.nodes.iter().find(|n| n.cid == d.0).unwrap();
-        assert_eq!(d.support_unresolved, vec![x.0]);
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::IntegrityError { cid })))
+                if cid == x.0
+        ));
     }
 
     #[test]
@@ -1025,16 +1126,13 @@ mod tests {
 
     #[test]
     fn cycle_cut_answers_are_not_memoized() {
-        // Tampered store: A's parents are [F, B] and B's are [A]. Asking about
-        // A first visits B while A is on the stack; B must not be cached as
-        // "no" just because the cut hid A's answer.
+        // Simulate a cycle in the private ancestry cache; real forged CAS
+        // blobs now fail integrity checking first. A visits B while A is on
+        // the stack; B must not be cached as "no" because the cut hid A.
         let fx = Fx::new("cycle-memo");
         let f = fx.node("f", &[]);
         let b = fx.node("b", &[]);
         let a = fx.node("a", &[(&f, Derives), (&b, Derives)]);
-        let out = fx.cas.put(b"b-forged").unwrap();
-        let forged = DagNode::new(NodeKind::Reasoning, vec![a.clone()], out, "test");
-        fs::write(fx.cas.root().join(b.as_str()), forged.to_bytes().unwrap()).unwrap();
         let mut found = BTreeMap::new();
         found.insert(
             f.0.clone(),
@@ -1048,6 +1146,7 @@ mod tests {
         );
         let dag = fx.dag();
         let mut up = Upward::default();
+        up.parents.insert(b.0.clone(), Some(vec![a.0.clone()]));
         assert_eq!(
             reaches_closure(&dag, &a.0, &found, &mut up).unwrap(),
             Reach::Yes
@@ -1077,21 +1176,23 @@ mod tests {
     }
 
     #[test]
-    fn tampered_blob_cycle_terminates_unknown() {
+    fn tampered_blob_cycle_is_rejected_by_integrity_check() {
         // A sound CAS cannot hold a parent cycle; overwrite one blob so its
-        // bytes name a child as parent, then check the engine terminates and
-        // calls the cycle unknown rather than invalidating it.
+        // bytes name a child as parent. Reject it rather than manufacture a
+        // verdict from bytes that no longer match their content identity.
         let fx = Fx::new("tampered-cycle");
         let a = fx.node("a", &[]);
         let c = fx.node("c", &[]);
         let b = fx.node("b", &[(&a, Derives), (&c, Derives)]);
+        let index = CasChildIndex::build(&fx.cas).unwrap();
         let out = fx.cas.put(b"c-forged").unwrap();
         let forged = DagNode::new(NodeKind::Reasoning, vec![b.clone()], out, "test");
         fs::write(fx.cas.root().join(c.as_str()), forged.to_bytes().unwrap()).unwrap();
-        let r = fx.run(&a, all());
-        assert_eq!(r.status_of(&b), Some(Status::Unknown));
-        assert_eq!(r.status_of(&c), Some(Status::Unknown));
-        assert!(!r.complete);
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::IntegrityError { cid })))
+                if cid == c.0
+        ));
     }
 
     #[test]
