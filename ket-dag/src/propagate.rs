@@ -7,8 +7,9 @@
 //!
 //! The downstream lookup is a `ChildIndex` — a projection or a CAS scan — and
 //! is only ever a *candidate* source. Every candidate is re-read from CAS and
-//! its typed parents there decide the edge, so a stale or forged index can add
-//! work but never change a verdict. Because a node's CID covers its parent
+//! its typed parents there decide the edge. Candidate lookups are unioned
+//! with a CAS scan, so omitted support or resolution edges cannot change a
+//! verdict either. Because a node's CID covers its parent
 //! list, the CAS support graph is acyclic; the closure is therefore evaluated
 //! once in topological order, which is the exact (least) fixed point and
 //! handles diamonds without revisits. A cycle can only come from a forged
@@ -53,7 +54,7 @@ impl CasChildIndex {
     pub fn build(cas: &CasStore) -> Result<Self, DagError> {
         let mut children: HashMap<Cid, BTreeSet<String>> = HashMap::new();
         for cid in cas.list()? {
-            let Ok(bytes) = cas.get(&cid) else { continue };
+            let bytes = cas.get(&cid)?;
             let Ok(node) = DagNode::from_bytes(&bytes) else {
                 continue;
             };
@@ -161,7 +162,8 @@ pub struct BlockedChild {
 pub struct ProjectionMismatch {
     pub parent: String,
     pub child: String,
-    /// `child_missing` or `no_such_parent_link`.
+    /// `child_missing`, `no_such_parent_link` or `child_omitted` (repaired
+    /// from the authoritative CAS scan).
     pub reason: String,
 }
 
@@ -175,7 +177,8 @@ pub struct InvalidationReport {
     /// False when the closure was truncated, any support or support ancestor
     /// was missing, a support parent turned out to descend from the seed
     /// without having been walked (`undiscovered`), or a supersedes halt held
-    /// support children back (`blocked`). A caller that reads only this flag
+    /// support children back (`blocked`), or a corrupt support cycle leaves
+    /// any node unresolved. A caller that reads only this flag
     /// never mistakes a partial answer for "nothing else is affected".
     pub complete: bool,
     pub frontier: Vec<String>,
@@ -227,6 +230,11 @@ pub fn invalidated(
         }
         Err(e) => return Err(e.into()),
     };
+    // Checking only returned candidates cannot detect an omitted leaf,
+    // refutation notice or superseding replacement. Union with a CAS scan
+    // before applying support and resolution semantics. The POC deliberately
+    // pays for this scan even when the caller supplied a CasChildIndex.
+    let authoritative = CasChildIndex::build(dag.cas)?;
 
     // --- Discovery: BFS over CAS-verified support edges --------------------
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
@@ -250,6 +258,19 @@ pub fn invalidated(
             break;
         }
         let mut candidates = index.children(&cid).map_err(PropagateError::Index)?;
+        let cas_children = authoritative
+            .children(&cid)
+            .map_err(PropagateError::Index)?;
+        for child in &cas_children {
+            if !candidates.contains(child) {
+                mismatches.insert((
+                    cid.as_str().to_string(),
+                    child.as_str().to_string(),
+                    "child_omitted",
+                ));
+            }
+        }
+        candidates.extend(cas_children);
         candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         candidates.dedup();
 
@@ -257,9 +278,12 @@ pub fn invalidated(
         let mut superseded_by = BTreeSet::new();
         let mut refuted_by = BTreeSet::new();
         for child in candidates {
-            let entry = child_cache
-                .entry(child.as_str().to_string())
-                .or_insert_with(|| dag.get_node(&child).ok());
+            let entry = match child_cache.entry(child.as_str().to_string()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(read_node(dag, &child)?)
+                }
+            };
             let Some(child_node) = entry.clone() else {
                 mismatches.insert((
                     cid.as_str().to_string(),
@@ -409,11 +433,11 @@ pub fn invalidated(
                 // from the seed; the index cannot vouch for that (it may have
                 // omitted rows, or the walk halted or truncated), so check the
                 // authoritative CAS parents upward.
-                if up.support_parents(dag, p).is_none() {
+                if up.support_parents(dag, p)?.is_none() {
                     miss.push(p.clone());
                     missing.insert(p.clone());
                 } else {
-                    match reaches_closure(dag, p, &found, &mut up) {
+                    match reaches_closure(dag, p, &found, &mut up)? {
                         Reach::Yes => {
                             unresolved.push(p.clone());
                             undiscovered.insert(p.clone());
@@ -464,7 +488,10 @@ pub fn invalidated(
         && missing.is_empty()
         && cyclic.is_empty()
         && undiscovered.is_empty()
-        && blocked.is_empty();
+        && blocked.is_empty()
+        && reports
+            .values()
+            .all(|node| node.support_unresolved.is_empty());
     let nodes = reports
         .into_values()
         .filter(|n| opts.include_intact || n.status != Status::Intact || n.cid == seed.as_str())
@@ -507,8 +534,8 @@ enum Reach {
     Yes,
     /// Every support ancestor was read from CAS and none is in the closure.
     No,
-    /// No closure ancestor found, but some ancestor is missing from CAS, so
-    /// "no" cannot be proven.
+    /// No closure ancestor found, but an ancestor is missing from CAS or a
+    /// corrupt support cycle prevented proof of unaffected support.
     Gap,
 }
 
@@ -532,33 +559,42 @@ struct Upward {
     missing: BTreeSet<String>,
 }
 
+/// Missing or non-node blobs are epistemic gaps. Actual storage failures are
+/// errors, so an unreadable replacement can never disappear from a verdict.
+fn read_node(dag: &Dag, cid: &Cid) -> Result<Option<DagNode>, DagError> {
+    match dag.get_node(cid) {
+        Ok(node) => Ok(Some(node)),
+        Err(DagError::Cas(ket_cas::CasError::NotFound(_))) | Err(DagError::Serde(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 impl Upward {
-    fn support_parents(&mut self, dag: &Dag, cid: &str) -> Option<Vec<String>> {
-        self.parents
-            .entry(cid.to_string())
-            .or_insert_with(|| {
-                dag.get_node(&Cid(cid.to_string())).ok().map(|n| {
-                    n.parent_links()
-                        .filter(|(_, k)| is_support(*k))
-                        .map(|(p, _)| p.as_str().to_string())
-                        .collect()
-                })
-            })
-            .clone()
+    fn support_parents(&mut self, dag: &Dag, cid: &str) -> Result<Option<Vec<String>>, DagError> {
+        if !self.parents.contains_key(cid) {
+            let parents = read_node(dag, &Cid(cid.to_string()))?.map(|n| {
+                n.parent_links()
+                    .filter(|(_, k)| is_support(*k))
+                    .map(|(p, _)| p.as_str().to_string())
+                    .collect()
+            });
+            self.parents.insert(cid.to_string(), parents);
+        }
+        Ok(self.parents[cid].clone())
     }
 }
 
 /// Whether `start` (present in CAS) has a support ancestor in the walked
 /// closure, i.e. descends from the seed. Walks CAS parents upward — no index
 /// involved — so it is bounded by the store's ancestry, not by `max_nodes`.
-/// A missing ancestor yields `Gap`, never `No`. A cycle in a corrupt store is
+/// A missing ancestor or corrupt cycle yields `Gap`, never `No`. Cycles are
 /// cut by the on-stack guard; answers that depended on a cut are not memoized.
 fn reaches_closure(
     dag: &Dag,
     start: &str,
     found: &BTreeMap<String, Found>,
     up: &mut Upward,
-) -> Reach {
+) -> Result<Reach, DagError> {
     struct Frame {
         cid: String,
         todo: Vec<String>,
@@ -566,11 +602,11 @@ fn reaches_closure(
         cut: bool,
     }
     if let Some(&r) = up.memo.get(start) {
-        return r;
+        return Ok(r);
     }
     let mut on_stack: BTreeSet<String> = BTreeSet::new();
     on_stack.insert(start.to_string());
-    let todo = up.support_parents(dag, start).unwrap_or_default();
+    let todo = up.support_parents(dag, start)?.unwrap_or_default();
     let mut stack = vec![Frame {
         cid: start.to_string(),
         todo,
@@ -588,13 +624,16 @@ fn reaches_closure(
                 top.reach = top.reach.join(r);
             } else if on_stack.contains(&p) {
                 top.cut = true;
+                // A corrupt support cycle cannot prove unaffected support.
+                // A later concrete closure ancestor still wins via join(Yes).
+                top.reach = top.reach.join(Reach::Gap);
             } else {
                 descend = Some(p);
                 break;
             }
         }
         if let Some(p) = descend {
-            match up.support_parents(dag, &p) {
+            match up.support_parents(dag, &p)? {
                 None => {
                     up.missing.insert(p.clone());
                     up.memo.insert(p, Reach::Gap);
@@ -622,7 +661,7 @@ fn reaches_closure(
                 parent.reach = parent.reach.join(done.reach);
                 parent.cut |= done.cut && done.reach != Reach::Yes;
             }
-            None => return done.reach,
+            None => return Ok(done.reach),
         }
     }
 }
@@ -784,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_index_omission_is_unresolved_not_intact() {
+    fn stale_index_omission_is_repaired_from_cas() {
         let fx = Fx::new("stale-omit");
         let a = fx.node("a", &[]);
         let c = fx.node("c", &[(&a, Derives)]);
@@ -795,11 +834,133 @@ mod tests {
             child: c.clone(),
         };
         let r = invalidated(&fx.dag(), &index, &a, &all()).unwrap();
+        assert_eq!(r.status_of(&d), Some(Status::Invalidated));
+        assert!(r.complete);
+        assert!(r.undiscovered.is_empty());
+        assert!(r
+            .projection_mismatch
+            .iter()
+            .any(|m| { m.parent == a.0 && m.child == c.0 && m.reason == "child_omitted" }));
+        // Repaired projection and honest index get the same verdict.
+        assert_eq!(fx.run(&a, all()).status_of(&d), Some(Status::Invalidated));
+    }
+
+    #[test]
+    fn omitted_leaf_replacement_and_refutation_are_recovered() {
+        let fx = Fx::new("omitted-resolution");
+        let a = fx.node("a", &[]);
+        let b = fx.node("b", &[(&a, Grounds)]);
+        let index = Omitting {
+            inner: CasChildIndex::build(&fx.cas).unwrap(),
+            parent: a.clone(),
+            child: b.clone(),
+        };
+        let r = invalidated(&fx.dag(), &index, &a, &all()).unwrap();
+        assert_eq!(r.status_of(&b), Some(Status::Invalidated));
+        assert!(r.complete, "a repaired omission is a complete answer");
+
+        let notice = fx.node("notice", &[(&b, Refutes)]);
+        let index = Omitting {
+            inner: CasChildIndex::build(&fx.cas).unwrap(),
+            parent: b.clone(),
+            child: notice.clone(),
+        };
+        let opts = PropagateOptions {
+            scope: SeedScope::WithRecordedRefutations,
+            ..all()
+        };
+        let r = invalidated(&fx.dag(), &index, &a, &opts).unwrap();
+        assert_eq!(r.status_of(&b), Some(Status::Refuted));
+        assert!(r
+            .nodes
+            .iter()
+            .find(|n| n.cid == b.0)
+            .unwrap()
+            .refuted_by
+            .contains(&notice.0));
+
+        let replacement = fx.node("replacement", &[(&a, Supersedes)]);
+        let index = Omitting {
+            inner: CasChildIndex::build(&fx.cas).unwrap(),
+            parent: a.clone(),
+            child: replacement.clone(),
+        };
+        let r = invalidated(&fx.dag(), &index, &a, &all()).unwrap();
+        assert_eq!(r.status_of(&b), None, "omitted supersedes must still halt");
+        assert!(!r.complete);
+        assert_eq!(
+            r.replacement_boundaries,
+            vec![ReplacementBoundary {
+                superseded: a.0,
+                by: replacement.0
+            }]
+        );
+    }
+
+    #[test]
+    fn cas_scan_propagates_io_failure_instead_of_hiding_replacement() {
+        let fx = Fx::new("scan-io");
+        let a = fx.node("a", &[]);
+        let _b = fx.node("b", &[(&a, Grounds)]);
+        let replacement = fx.node("replacement", &[(&a, Supersedes)]);
+        fs::remove_file(fx.cas.root().join(replacement.as_str())).unwrap();
+        fs::create_dir(fx.cas.root().join(replacement.as_str())).unwrap();
+        assert!(matches!(
+            CasChildIndex::build(&fx.cas),
+            Err(DagError::Cas(ket_cas::CasError::Io(_)))
+        ));
+    }
+
+    #[test]
+    fn candidate_read_io_failure_is_not_a_missing_child() {
+        let fx = Fx::new("candidate-io");
+        let a = fx.node("a", &[]);
+        struct Unreadable<'a> {
+            cas: &'a CasStore,
+            seed: Cid,
+            child: Cid,
+        }
+        impl ChildIndex for Unreadable<'_> {
+            fn children(&self, parent: &Cid) -> Result<Vec<Cid>, String> {
+                if parent == &self.seed {
+                    // Created after the authoritative scan: exercise the
+                    // discovery read rather than the initial scan read.
+                    fs::create_dir(self.cas.root().join(self.child.as_str())).unwrap();
+                    Ok(vec![self.child.clone()])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            fn label(&self) -> String {
+                "io-after-scan".into()
+            }
+        }
+        let index = Unreadable {
+            cas: &fx.cas,
+            seed: a.clone(),
+            child: Cid("e".repeat(64)),
+        };
+        assert!(matches!(
+            invalidated(&fx.dag(), &index, &a, &all()),
+            Err(PropagateError::Dag(DagError::Cas(ket_cas::CasError::Io(_))))
+        ));
+    }
+
+    #[test]
+    fn external_corrupt_support_cycle_is_unknown_and_incomplete() {
+        let fx = Fx::new("external-cycle");
+        let a = fx.node("a", &[]);
+        let x = fx.node("x", &[]);
+        let y = fx.node("y", &[(&x, Derives)]);
+        let out = fx.cas.put(b"tampered-x").unwrap();
+        let forged = DagNode::new(NodeKind::Reasoning, vec![y.clone()], out, "test");
+        fs::write(fx.cas.root().join(x.as_str()), forged.to_bytes().unwrap()).unwrap();
+        let d = fx.node("d", &[(&a, Grounds), (&x, Grounds)]);
+        let r = fx.run(&a, all());
         assert_eq!(r.status_of(&d), Some(Status::Unknown));
         assert!(!r.complete);
-        assert_eq!(r.undiscovered, vec![c.0.clone()]);
-        // The honest index still gets the exact answer.
-        assert_eq!(fx.run(&a, all()).status_of(&d), Some(Status::Invalidated));
+        let d = r.nodes.iter().find(|n| n.cid == d.0).unwrap();
+        assert_eq!(d.support_unresolved, vec![x.0]);
     }
 
     #[test]
@@ -887,8 +1048,14 @@ mod tests {
         );
         let dag = fx.dag();
         let mut up = Upward::default();
-        assert_eq!(reaches_closure(&dag, &a.0, &found, &mut up), Reach::Yes);
-        assert_eq!(reaches_closure(&dag, &b.0, &found, &mut up), Reach::Yes);
+        assert_eq!(
+            reaches_closure(&dag, &a.0, &found, &mut up).unwrap(),
+            Reach::Yes
+        );
+        assert_eq!(
+            reaches_closure(&dag, &b.0, &found, &mut up).unwrap(),
+            Reach::Yes
+        );
     }
 
     #[test]
