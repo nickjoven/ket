@@ -255,6 +255,8 @@ all-support-loss verdict.
 
 For the paper POC, citation edges approximate support: a flagged paper has lost
 support under that model, which is not a finding that its conclusions are false.
+See the [synthetic acceptance report](docs/retraction-poc/synthetic-acceptance.md)
+for an offline reproduction command, a short results table, and full CID evidence.
 
 ## Design Principles
 
