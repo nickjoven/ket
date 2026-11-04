@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+  "nodes": {
+    "retracted-ground": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+    "incomplete-paper": "2535f1945dffdc86e600f506db62b0a68bafabd2dedbb58f58b91db9ddf37c09",
+    "child-of-unknown": "dbe3c931e124a866dd9b6363cabe45ecfa8c2c00d759b3e936bf276303819f95"
+  },
+  "expected": {
+    "retracted-ground": "refuted",
+    "incomplete-paper": "unknown",
+    "child-of-unknown": "unknown"
+  },
+  "expected_absent": [],
+  "external_references": {
+    "absent": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

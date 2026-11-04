@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "cases": [
+    {
+      "case": "support-loss",
+      "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+      "status_assertions": 7,
+      "absence_assertions": 5,
+      "report_sha256": "65345c7a771dd96d190125d7d59e0c9021a82f92f0864340e02103fc3f16d07c",
+      "complete": false
+    },
+    {
+      "case": "missing-support",
+      "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+      "status_assertions": 3,
+      "absence_assertions": 0,
+      "report_sha256": "aee8124106abe900351f565a66ce16cf190387d9f1a1ac27304a95462c523996",
+      "complete": false
+    },
+    {
+      "case": "external-reference",
+      "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+      "status_assertions": 3,
+      "absence_assertions": 0,
+      "report_sha256": "3fc6a86430a892e7f26473c17d573ceea838e64f7cedd363e354334f5be8d1b5",
+      "complete": false
+    }
+  ]
+}
