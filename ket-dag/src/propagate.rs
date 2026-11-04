@@ -90,7 +90,8 @@ pub enum SeedScope {
     #[default]
     SeedOnly,
     /// The seed, plus any node inside the seed's downstream closure that has a
-    /// recorded `refutes` child. Never a global walk.
+    /// recorded `refutes` child. Never a global walk: a co-parent *outside*
+    /// the closure with a recorded refutation is not consulted.
     WithRecordedRefutations,
 }
 
@@ -112,8 +113,9 @@ pub enum Status {
     Invalidated,
     /// Some support lost, some not. Does not propagate.
     Weakened,
-    /// A support parent is missing, unresolved (truncated) or itself unknown.
-    /// Takes precedence over weakened/intact. Does not propagate.
+    /// A support parent is missing, unresolved (truncated, undiscovered or on
+    /// a corrupt-store cycle) or itself unknown. Takes precedence over
+    /// weakened/intact, and children of an unknown node are unknown too.
     Unknown,
     Intact,
 }
@@ -128,7 +130,8 @@ pub struct NodeReport {
     /// Support parents absent from CAS (or not DAG nodes).
     pub support_missing: Vec<String>,
     /// Support parents whose status is undetermined: unexpanded frontier
-    /// nodes, `unknown` parents, or nodes left on a forged cycle.
+    /// nodes, `unknown` parents, undiscovered descendants of the seed, or
+    /// nodes left on a corrupt-store cycle.
     pub support_unresolved: Vec<String>,
     /// Shortest support-path length from the seed (seed = 0).
     pub depth: usize,
@@ -147,6 +150,13 @@ pub struct ReplacementBoundary {
     pub by: String,
 }
 
+/// A support child left unexpanded because its parent `at` is superseded.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BlockedChild {
+    pub at: String,
+    pub child: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProjectionMismatch {
     pub parent: String,
@@ -162,12 +172,20 @@ pub struct InvalidationReport {
     pub scope: SeedScope,
     pub index: String,
     pub refuted: Vec<String>,
-    /// False when the closure was truncated or any support was missing.
+    /// False when the closure was truncated, any support was missing, or a
+    /// support parent turned out to descend from the seed without having been
+    /// walked (`undiscovered`). A supersedes halt alone does not clear it;
+    /// what the halt held back is in `blocked`.
     pub complete: bool,
     pub frontier: Vec<String>,
     pub missing: Vec<String>,
+    /// Support parents that descend from the seed (proven from CAS parents)
+    /// but were never walked: omitted by a stale index, behind a supersedes
+    /// halt, or past truncation.
+    pub undiscovered: Vec<String>,
     pub nodes: Vec<NodeReport>,
     pub replacement_boundaries: Vec<ReplacementBoundary>,
+    pub blocked: Vec<BlockedChild>,
     pub projection_mismatch: Vec<ProjectionMismatch>,
 }
 
@@ -212,6 +230,7 @@ pub fn invalidated(
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     let mut mismatches: BTreeSet<(String, String, &'static str)> = BTreeSet::new();
     let mut boundaries: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut blocked: BTreeSet<(String, String)> = BTreeSet::new();
     let mut frontier: BTreeSet<String> = BTreeSet::new();
     let mut queued: BTreeSet<String> = BTreeSet::new();
     let mut queue: VecDeque<(Cid, DagNode, usize, Option<Cid>)> = VecDeque::new();
@@ -220,7 +239,8 @@ pub fn invalidated(
     let mut child_cache: HashMap<String, Option<DagNode>> = HashMap::new();
 
     while let Some((cid, node, depth, pred)) = queue.pop_front() {
-        if opts.max_nodes.is_some_and(|m| found.len() >= m) {
+        // The seed is always walked, even with max_nodes = 0.
+        if opts.max_nodes.is_some_and(|m| found.len() >= m.max(1)) {
             frontier.insert(cid.as_str().to_string());
             for (c, ..) in queue.drain(..) {
                 frontier.insert(c.as_str().to_string());
@@ -281,6 +301,9 @@ pub fn invalidated(
         } else {
             for by in &superseded_by {
                 boundaries.insert((cid.as_str().to_string(), by.clone()));
+            }
+            for (child, _) in support_children {
+                blocked.insert((cid.as_str().to_string(), child.as_str().to_string()));
             }
         }
 
@@ -346,7 +369,8 @@ pub fn invalidated(
             }
         }
     }
-    // Anything left sits on a cycle only a forged index could produce.
+    // Anything left sits on a cycle. A sound CAS cannot hold one (the CID
+    // covers the parents), but a tampered blob can; terminate, never invalidate.
     let cyclic: BTreeSet<&str> = indegree
         .iter()
         .filter(|(_, d)| **d > 0)
@@ -357,6 +381,8 @@ pub fn invalidated(
     let mut missing: BTreeSet<String> = BTreeSet::new();
     let mut reports: BTreeMap<String, NodeReport> = BTreeMap::new();
     let mut presence: HashMap<String, bool> = HashMap::new();
+    let mut undiscovered: BTreeSet<String> = BTreeSet::new();
+    let mut reach_memo: HashMap<String, bool> = HashMap::new();
 
     for c in order.iter().copied().chain(cyclic.iter().copied()) {
         let parents = &support[c];
@@ -378,18 +404,19 @@ pub fn invalidated(
                 // In closure but not yet evaluated: only possible on a cycle.
                 unresolved.push(p.clone());
             } else {
-                // Outside the closure: in a complete walk, not downstream of
-                // the seed, so its standing is unaffected — provided it
-                // exists. After truncation it may be an undiscovered
-                // descendant, so it cannot be assumed unaffected.
+                // Outside the closure. Unaffected only if it does not descend
+                // from the seed; the index cannot vouch for that (it may have
+                // omitted rows, or the walk halted or truncated), so check the
+                // authoritative CAS parents upward.
                 let present = *presence
                     .entry(p.clone())
                     .or_insert_with(|| dag.get_node(&Cid(p.clone())).is_ok());
                 if !present {
                     miss.push(p.clone());
                     missing.insert(p.clone());
-                } else if !frontier.is_empty() {
+                } else if reaches_closure(dag, p, &found, &mut reach_memo) {
                     unresolved.push(p.clone());
+                    undiscovered.insert(p.clone());
                 }
             }
         }
@@ -424,7 +451,8 @@ pub fn invalidated(
         );
     }
 
-    let complete = frontier.is_empty() && missing.is_empty() && cyclic.is_empty();
+    let complete =
+        frontier.is_empty() && missing.is_empty() && cyclic.is_empty() && undiscovered.is_empty();
     let nodes = reports
         .into_values()
         .filter(|n| opts.include_intact || n.status != Status::Intact || n.cid == seed.as_str())
@@ -439,10 +467,15 @@ pub fn invalidated(
         complete,
         frontier: frontier.into_iter().collect(),
         missing: missing.into_iter().collect(),
+        undiscovered: undiscovered.into_iter().collect(),
         nodes,
         replacement_boundaries: boundaries
             .into_iter()
             .map(|(superseded, by)| ReplacementBoundary { superseded, by })
+            .collect(),
+        blocked: blocked
+            .into_iter()
+            .map(|(at, child)| BlockedChild { at, child })
             .collect(),
         projection_mismatch: mismatches
             .into_iter()
@@ -453,6 +486,66 @@ pub fn invalidated(
             })
             .collect(),
     })
+}
+
+/// Whether `start` has a support ancestor in the walked closure, i.e. it
+/// descends from the seed. Walks CAS parents upward (no index involved),
+/// memoized across calls. Missing ancestors contribute nothing; a cycle in a
+/// corrupt store is cut by the on-stack guard.
+fn reaches_closure(
+    dag: &Dag,
+    start: &str,
+    found: &BTreeMap<String, Found>,
+    memo: &mut HashMap<String, bool>,
+) -> bool {
+    let mut on_stack: BTreeSet<String> = BTreeSet::new();
+    // (cid, parents still to visit, reached so far)
+    let mut stack: Vec<(String, Vec<String>, bool)> = Vec::new();
+    let parents_of = |c: &str| -> Vec<String> {
+        dag.get_node(&Cid(c.to_string()))
+            .map(|n| {
+                n.parent_links()
+                    .filter(|(_, k)| is_support(*k))
+                    .map(|(p, _)| p.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if let Some(&r) = memo.get(start) {
+        return r;
+    }
+    on_stack.insert(start.to_string());
+    stack.push((start.to_string(), parents_of(start), false));
+    loop {
+        let top = stack.last_mut().unwrap();
+        let mut descend = None;
+        while let Some(p) = top.1.pop() {
+            if found.contains_key(&p) {
+                top.2 = true;
+            } else if let Some(&r) = memo.get(&p) {
+                top.2 |= r;
+            } else if !on_stack.contains(&p) {
+                descend = Some(p);
+                break;
+            }
+            if top.2 {
+                top.1.clear();
+            }
+        }
+        if let Some(p) = descend {
+            on_stack.insert(p.clone());
+            let ps = parents_of(&p);
+            stack.push((p, ps, false));
+            continue;
+        }
+        let (c, _, r) = stack.pop().unwrap();
+        on_stack.remove(&c);
+        memo.insert(c, r);
+        match stack.last_mut() {
+            Some(parent) => parent.2 |= r,
+            None => return r,
+        }
+    }
 }
 
 fn witness(found: &BTreeMap<String, Found>, cid: &str) -> Vec<String> {
@@ -592,14 +685,118 @@ mod tests {
         assert_eq!(nd.depth, 1);
     }
 
+    /// An index that drops one parent → child row: the usual stale projection.
+    struct Omitting {
+        inner: CasChildIndex,
+        parent: Cid,
+        child: Cid,
+    }
+    impl ChildIndex for Omitting {
+        fn children(&self, p: &Cid) -> Result<Vec<Cid>, String> {
+            let mut v = self.inner.children(p)?;
+            if p == &self.parent {
+                v.retain(|c| c != &self.child);
+            }
+            Ok(v)
+        }
+        fn label(&self) -> String {
+            "omitting".into()
+        }
+    }
+
     #[test]
-    fn no_support_never_invalidates_vacuously() {
-        let fx = Fx::new("nosupport");
+    fn stale_index_omission_is_unresolved_not_intact() {
+        let fx = Fx::new("stale-omit");
         let a = fx.node("a", &[]);
-        let hyp = fx.node("hyp", &[(&a, Proposes)]);
+        let c = fx.node("c", &[(&a, Derives)]);
+        let d = fx.node("d", &[(&a, Derives), (&c, Derives)]);
+        let index = Omitting {
+            inner: CasChildIndex::build(&fx.cas).unwrap(),
+            parent: a.clone(),
+            child: c.clone(),
+        };
+        let r = invalidated(&fx.dag(), &index, &a, &all()).unwrap();
+        assert_eq!(r.status_of(&d), Some(Status::Unknown));
+        assert!(!r.complete);
+        assert_eq!(r.undiscovered, vec![c.0.clone()]);
+        // The honest index still gets the exact answer.
+        assert_eq!(fx.run(&a, all()).status_of(&d), Some(Status::Invalidated));
+    }
+
+    #[test]
+    fn descendants_behind_a_supersedes_halt_are_not_assumed_intact() {
+        let fx = Fx::new("halt-grandchild");
+        let a = fx.node("a", &[]);
+        let x = fx.node("x", &[(&a, Derives)]);
+        let _rep = fx.node("x-v2", &[(&x, Supersedes)]);
+        let m = fx.node("m", &[(&x, Derives)]);
+        let y = fx.node("y", &[(&a, Derives)]);
+        let d = fx.node("d", &[(&y, Derives), (&m, Derives)]);
         let r = fx.run(&a, all());
-        // Reached only through a non-support edge: not in the closure at all.
-        assert_eq!(r.status_of(&hyp), None);
+        assert_eq!(r.status_of(&m), None, "halt holds: m is not walked");
+        assert_eq!(r.status_of(&d), Some(Status::Unknown));
+        assert_eq!(r.undiscovered, vec![m.0.clone()]);
+        assert!(!r.complete);
+        assert_eq!(
+            r.blocked,
+            vec![BlockedChild {
+                at: x.0.clone(),
+                child: m.0.clone()
+            }]
+        );
+    }
+
+    #[test]
+    fn superseded_seed_lists_what_the_halt_held_back() {
+        let fx = Fx::new("seed-superseded");
+        let a = fx.node("a", &[]);
+        let _rep = fx.node("a-v2", &[(&a, Supersedes)]);
+        let b = fx.node("b", &[(&a, Derives)]);
+        let r = fx.run(&a, all());
+        assert_eq!(r.nodes.len(), 1);
+        assert_eq!(
+            r.blocked,
+            vec![BlockedChild {
+                at: a.0.clone(),
+                child: b.0.clone()
+            }]
+        );
+    }
+
+    #[test]
+    fn max_nodes_zero_still_walks_the_seed() {
+        let fx = Fx::new("max-zero");
+        let a = fx.node("a", &[]);
+        let b = fx.node("b", &[(&a, Derives)]);
+        let r = fx.run(
+            &a,
+            PropagateOptions {
+                max_nodes: Some(0),
+                include_intact: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status_of(&a), Some(Status::Refuted));
+        assert_eq!(r.frontier, vec![b.0.clone()]);
+        assert!(!r.complete);
+    }
+
+    #[test]
+    fn tampered_blob_cycle_terminates_unknown() {
+        // A sound CAS cannot hold a parent cycle; overwrite one blob so its
+        // bytes name a child as parent, then check the engine terminates and
+        // calls the cycle unknown rather than invalidating it.
+        let fx = Fx::new("tampered-cycle");
+        let a = fx.node("a", &[]);
+        let c = fx.node("c", &[]);
+        let b = fx.node("b", &[(&a, Derives), (&c, Derives)]);
+        let out = fx.cas.put(b"c-forged").unwrap();
+        let forged = DagNode::new(NodeKind::Reasoning, vec![b.clone()], out, "test");
+        fs::write(fx.cas.root().join(c.as_str()), forged.to_bytes().unwrap()).unwrap();
+        let r = fx.run(&a, all());
+        assert_eq!(r.status_of(&b), Some(Status::Unknown));
+        assert_eq!(r.status_of(&c), Some(Status::Unknown));
+        assert!(!r.complete);
     }
 
     #[test]
