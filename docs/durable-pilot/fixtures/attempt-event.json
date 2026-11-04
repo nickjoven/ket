@@ -1,0 +1,18 @@
+{
+  "attempt_id": "attempt-1",
+  "effect_id": null,
+  "event": "started",
+  "fixture": true,
+  "idempotency_key": "synthetic-run-1:step-1",
+  "input_manifest_cid": "1111111111111111111111111111111111111111111111111111111111111111",
+  "logical_run_key": "1111111111111111111111111111111111111111111111111111111111111111",
+  "outcome_cid": null,
+  "previous_event_cid": null,
+  "reason": null,
+  "reconciliation": "not_required",
+  "request_id": "request-1",
+  "schema": "qkl.attempt-event/v1",
+  "schema_version": 1,
+  "sequence": 0,
+  "step_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

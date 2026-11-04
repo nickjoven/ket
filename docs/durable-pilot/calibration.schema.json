@@ -1,0 +1,50 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/calibration.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fixture": {
+      "const": true
+    },
+    "gate_verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "known_answer_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "limitation": {
+      "const": "Synthetic known-answer calibration only."
+    },
+    "observed_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema": {
+      "const": "qkl.calibration/v1"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "context_cid",
+    "gate_verdict",
+    "known_answer_cid",
+    "observed_cid",
+    "limitation"
+  ],
+  "title": "qkl1 calibration",
+  "type": "object"
+}

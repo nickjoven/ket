@@ -1,0 +1,10 @@
+{
+  "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+  "fixture": true,
+  "gate_verdict": "pass",
+  "known_answer_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+  "limitation": "Synthetic known-answer calibration only.",
+  "observed_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+  "schema": "qkl.calibration/v1",
+  "schema_version": 1
+}

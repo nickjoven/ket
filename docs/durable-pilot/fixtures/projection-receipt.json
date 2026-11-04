@@ -1,0 +1,15 @@
+{
+  "dolt_commit": "00000000000000000000000000000000",
+  "dolt_format": "dolt-hash32",
+  "fixture": true,
+  "projected_tables": [
+    "dag_nodes",
+    "dag_edges"
+  ],
+  "query": "SELECT cid FROM dag_nodes AS OF '00000000000000000000000000000000'",
+  "run_manifest_cid": "6666666666666666666666666666666666666666666666666666666666666666",
+  "run_manifest_node_cid": "7777777777777777777777777777777777777777777777777777777777777777",
+  "schema": "qkl.projection-receipt/v1",
+  "schema_version": 1,
+  "verification_evidence_cid": "8888888888888888888888888888888888888888888888888888888888888888"
+}

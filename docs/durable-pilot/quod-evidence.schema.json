@@ -1,0 +1,145 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/quod-evidence.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "context_cid": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "evidence_cid": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "gate_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "required": {
+            "const": true
+          },
+          "verdict": {
+            "enum": [
+              "pass",
+              "fail",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "gate_id",
+          "required",
+          "verdict",
+          "evidence_cid",
+          "context_cid"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "corpus": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "shard_cids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "manifest_cid",
+        "shard_cids"
+      ],
+      "type": "object"
+    },
+    "fixture": {
+      "const": true
+    },
+    "gate_verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "limitation": {
+      "const": "Synthetic software fixture; not a Lean proof, numerical result, or scientific validity claim."
+    },
+    "producer": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_code_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "env_lock_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_commit",
+        "adapter_code_cid",
+        "env_lock_cid"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "qkl.quod-evidence/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "subject": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "synthetic_fixture"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "producer",
+    "subject",
+    "corpus",
+    "context_cid",
+    "gate_verdict",
+    "checks",
+    "limitation"
+  ],
+  "title": "qkl1 quod-evidence",
+  "type": "object"
+}

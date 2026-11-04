@@ -1,0 +1,388 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/input-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "code_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "env_lock_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fixture": {
+      "const": true
+    },
+    "operation": {
+      "const": "lemma.fixture_eval/v1"
+    },
+    "policy_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "roles": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "code": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "config": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "corpus_manifest": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "corpus_shards": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "env_lock": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "quod_evidence": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "split_manifest": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "tokenizer": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "cid": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "blob",
+                  "dag_node"
+                ]
+              },
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "cid",
+              "required",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "quod_evidence",
+        "corpus_manifest",
+        "corpus_shards",
+        "split_manifest",
+        "tokenizer",
+        "config",
+        "checkpoint",
+        "code",
+        "env_lock"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "qkl.input-manifest/v1"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "operation",
+    "code_cid",
+    "policy_cid",
+    "env_lock_cid",
+    "context_cid",
+    "roles"
+  ],
+  "title": "qkl1 input-manifest",
+  "type": "object"
+}

@@ -1,0 +1,241 @@
+{
+  "$defs": {
+    "binding": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "cid": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "node_cid": {
+                "type": "null"
+              },
+              "unavailable_reason": {
+                "minLength": 1,
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "blob",
+            "dag_node"
+          ]
+        },
+        "node_cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cid",
+        "node_cid",
+        "required",
+        "kind",
+        "unavailable_reason"
+      ],
+      "type": "object"
+    },
+    "cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "context": {
+      "additionalProperties": false,
+      "properties": {
+        "corpus_manifest_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "gate_impl_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "mathlib_pin": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "split_manifest_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "tokenizer_cid": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mathlib_pin",
+        "tokenizer_cid",
+        "split_manifest_cid",
+        "corpus_manifest_cid",
+        "gate_impl_cid"
+      ],
+      "type": "object"
+    },
+    "gate_check": {
+      "additionalProperties": false,
+      "properties": {
+        "context_cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gate": {
+          "enum": [
+            "quod",
+            "calibration"
+          ]
+        },
+        "integrity": {
+          "enum": [
+            "verified",
+            "missing",
+            "corrupt",
+            "unverified"
+          ]
+        },
+        "required": {
+          "const": true
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "gate",
+        "required",
+        "evidence_cid",
+        "context_cid",
+        "integrity",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "input_check": {
+      "additionalProperties": false,
+      "properties": {
+        "cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node_cid": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "role": {
+          "enum": [
+            "quod_evidence",
+            "corpus_manifest",
+            "corpus_shards",
+            "split_manifest",
+            "tokenizer",
+            "config",
+            "checkpoint",
+            "code",
+            "env_lock",
+            "calibration",
+            "metrics"
+          ]
+        },
+        "status": {
+          "enum": [
+            "verified",
+            "missing",
+            "corrupt",
+            "unverified"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "index",
+        "cid",
+        "node_cid",
+        "required",
+        "status"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.ket.local/qkl1/common.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

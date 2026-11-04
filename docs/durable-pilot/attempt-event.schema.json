@@ -1,0 +1,143 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/attempt-event.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "outcome_stored",
+              "acknowledged"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outcome_cid": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "effect_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "event": {
+      "enum": [
+        "started",
+        "outcome_stored",
+        "acknowledged",
+        "interrupted",
+        "reconciliation_required",
+        "reconciled",
+        "failed"
+      ]
+    },
+    "fixture": {
+      "const": true
+    },
+    "idempotency_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "input_manifest_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "logical_run_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "outcome_cid": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "previous_event_cid": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reconciliation": {
+      "enum": [
+        "not_required",
+        "required",
+        "found",
+        "absent"
+      ]
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "const": "qkl.attempt-event/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "sequence": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "step_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "logical_run_key",
+    "step_key",
+    "attempt_id",
+    "sequence",
+    "previous_event_cid",
+    "event",
+    "input_manifest_cid",
+    "outcome_cid",
+    "request_id",
+    "idempotency_key",
+    "effect_id",
+    "reconciliation",
+    "reason"
+  ],
+  "title": "qkl1 attempt-event",
+  "type": "object"
+}
