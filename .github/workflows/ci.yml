@@ -28,6 +28,16 @@ jobs:
         run: |
           cargo test --workspace --lib
           cargo test -p ket-sql
+      - name: CLI and MCP support-loss parity
+        run: cargo test -p ket-cli --test invalidated
+      - name: Offline support-loss artifact checks
+        run: |
+          python3 docs/retraction-poc/acceptance_report.py \
+            --ket target/debug/ket --output "$RUNNER_TEMP/ket24-acceptance" \
+            --check-against docs/retraction-poc/acceptance-fixtures
+          python3 scripts/retraction-poc/publication_check.py \
+            --output "$RUNNER_TEMP/ket24-publication.json" \
+            --check-against docs/retraction-poc/publication/evaluation.json
       - name: Lint (informational, non-blocking)
         continue-on-error: true
         run: |

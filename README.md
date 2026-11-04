@@ -259,6 +259,8 @@ See the [177-paper XMRV/CFS report](docs/retraction-poc/paper-report.md) for the
 pinned OpenAlex/Crossref inputs, results table, CID evidence, scope limits, and
 offline replay command. The [synthetic acceptance report](docs/retraction-poc/synthetic-acceptance.md)
 separately demonstrates weakening, diamonds, and replacement boundaries.
+The [publication protocol and diagnostic](docs/retraction-poc/publication/README.md)
+record the remaining research gates; the current POC is not publication-validated.
 
 ## Design Principles
 
