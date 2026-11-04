@@ -20,6 +20,8 @@ pub enum McpError {
     Cas(#[from] ket_cas::CasError),
     #[error("DAG error: {0}")]
     Dag(#[from] ket_dag::DagError),
+    #[error("Propagation error: {0}")]
+    Propagate(#[from] ket_dag::propagate::PropagateError),
     #[error("SQL error: {0}")]
     Sql(#[from] ket_sql::SqlError),
     #[error("Agent error: {0}")]
@@ -137,6 +139,21 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     "cid": { "type": "string", "description": "Node CID to trace from" }
                 },
                 "required": ["cid"]
+            }),
+        },
+        ToolDescriptor {
+            name: "ket_invalidated".into(),
+            description: "Treat a node as refuted and report downstream support loss. Returns ket.invalidated/v1 from authoritative CAS: invalidated, weakened, unknown, CID witness paths and completeness. Only grounds/derives count; supersedes halts expansion. Defaults to the explicit seed only; recorded refutations are opt-in. This is dependency analysis, not a claim that cited papers are false.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "with_recorded_refutations": { "type": "boolean", "default": false },
+                    "max_nodes": { "type": "integer", "minimum": 0, "description": "Downstream discovery limit; seed is always included. Does not bound the initial CAS scan or support ancestry checks." },
+                    "include_intact": { "type": "boolean", "default": false }
+                },
+                "required": ["cid"],
+                "additionalProperties": false
             }),
         },
         ToolDescriptor {
@@ -577,6 +594,66 @@ pub fn handle_tool_call(
                 })
                 .collect();
             Ok(serde_json::json!({ "lineage": nodes }))
+        }
+        "ket_invalidated" => {
+            use ket_dag::propagate::{invalidated, CasChildIndex, PropagateOptions, SeedScope};
+            let params = params
+                .as_object()
+                .ok_or_else(|| McpError::InvalidParams("arguments must be an object".into()))?;
+            for key in params.keys() {
+                if !matches!(
+                    key.as_str(),
+                    "cid" | "with_recorded_refutations" | "max_nodes" | "include_intact"
+                ) {
+                    return Err(McpError::InvalidParams(format!("unknown argument: {key}")));
+                }
+            }
+            let cid = params
+                .get("cid")
+                .and_then(Value::as_str)
+                .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
+            if !ket_cas::Cid::from(cid).is_well_formed() {
+                return Err(McpError::InvalidParams(
+                    "cid must be 64 lowercase hexadecimal characters".into(),
+                ));
+            }
+            let boolean = |key: &str| -> Result<bool, McpError> {
+                match params.get(key) {
+                    None => Ok(false),
+                    Some(value) => value
+                        .as_bool()
+                        .ok_or_else(|| McpError::InvalidParams(format!("{key} must be boolean"))),
+                }
+            };
+            let max_nodes = params
+                .get("max_nodes")
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or_else(|| {
+                            McpError::InvalidParams(
+                                "max_nodes must be a nonnegative integer within usize range".into(),
+                            )
+                        })
+                })
+                .transpose()?;
+            let options = PropagateOptions {
+                scope: if boolean("with_recorded_refutations")? {
+                    SeedScope::WithRecordedRefutations
+                } else {
+                    SeedScope::SeedOnly
+                },
+                max_nodes,
+                include_intact: boolean("include_intact")?,
+            };
+            let dag = ket_dag::Dag::new(cas);
+            let index = CasChildIndex::build(cas)?;
+            Ok(serde_json::to_value(invalidated(
+                &dag,
+                &index,
+                &ket_cas::Cid::from(cid),
+                &options,
+            )?)?)
         }
         "ket_check_drift" => {
             let path = params["path"]

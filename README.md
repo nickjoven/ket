@@ -45,7 +45,7 @@ The same pages are published at <https://nickjoven.github.io/ket/>.
 | **ket-cas** | BLAKE3 content-addressed blob store (`.ket/cas/<hash>`) |
 | **ket-dag** | Merkle DAG for provenance — parent chains, soft links, export/import bundles |
 | **ket-sql** | Dolt SQL wrapper — 9 tables, versioned commits, lineage queries |
-| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 19 tools for Claude and other agents. Dolt is optional — CAS-only tools work without it. |
+| **ket-mcp** | MCP server (stdio JSON-RPC) exposing 20 tools for Claude and other agents. Dolt is optional — CAS-only tools work without it. |
 | **ket-agent** | Multi-agent orchestration — task lifecycle, subprocess spawning, context injection |
 | **ket-score** | Scoring engine — correctness, efficiency, style, completeness — with auto-scoring via `cargo build/test/clippy` |
 | **ket-opt** | WQS binary search optimizer — Lagrangian relaxation for compute tier allocation across DAG nodes |
@@ -59,7 +59,7 @@ Three tiers — start minimal, add capabilities when you need them.
 
 ### Tier 1: Just ket (no dependencies beyond Rust)
 
-Everything you need for content-addressed agent memory: store, DAG, lineage, a stateless drift check, MCP server. **14 of 19 MCP tools work at this tier.**
+Everything you need for content-addressed agent memory: store, DAG, lineage, a stateless drift check, MCP server. **15 of 20 MCP tools work at this tier.**
 
 ```sh
 # Install (puts `ket` on your PATH)
@@ -93,7 +93,7 @@ ket mcp
 
 ### Tier 2: Add Docker (scoring, tasks, SQL queries)
 
-Docker runs Dolt in a container — you never install it directly. This unlocks scoring, task delegation, SQL queries, and calibration. **All 19 MCP tools.**
+Docker runs Dolt in a container — you never install it directly. This unlocks scoring, task delegation, SQL queries, and calibration. **All 20 MCP tools.**
 
 ```sh
 # Start the Dolt sidecar
@@ -147,6 +147,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket dag create <content>` — Create node (`--kind`, `--parent <cid>[:<kind>]`, `--agent`, `--edge-kind grounds|derives|proposes|confirms|refutes|supersedes`, `--content-file <path|->` for large or dash-shaped content). Parents must exist in the store.
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
+- `ket dag invalidated <cid>` — Treat a node as refuted and report downstream support loss as versioned JSON (`--with-recorded-refutations`, `--include-intact`, `--max-nodes N`). Works with CAS alone.
 - `ket dag drift <path> <cid>` — Detect file drift
 - `ket link create <from> <to> <rel>` / `ket link ls <cid>` — Soft links (supersedes, contradicts, etc.)
 - `ket merge <content> --parents <cid>[:<kind>]...` — Multi-parent merge node (`--edge-kind`, `--content-file`)
@@ -193,9 +194,9 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 
 ## MCP Integration
 
-Ket exposes 19 tools over MCP (Model Context Protocol) for agent integration.
+Ket exposes 20 tools over MCP (Model Context Protocol) for agent integration.
 
-**Dolt is optional.** The MCP server starts with CAS alone — 14 of 19 tools work without Dolt. Only scoring, tasks, calibration, and soft links require it.
+**Dolt is optional.** The MCP server starts with CAS alone — 15 of 20 tools work without Dolt. Only scoring, tasks, calibration, and soft links require it.
 
 | Tool | What it does | Needs Dolt? |
 |------|-------------|-------------|
@@ -204,6 +205,7 @@ Ket exposes 19 tools over MCP (Model Context Protocol) for agent integration.
 | `ket_verify` | Check CID integrity | No |
 | `ket_dag_link` | Create DAG node with provenance | No |
 | `ket_dag_lineage` | Trace ancestry chain | No |
+| `ket_invalidated` | Downstream support loss, CID witnesses and completeness | No |
 | `ket_dag_ls` | List/filter DAG nodes | No |
 | `ket_check_drift` | Detect file changes | No |
 | `ket_search` | Full-text content search | No |
@@ -231,6 +233,28 @@ Add to your Claude MCP config:
   }
 }
 ```
+
+## Retraction propagation
+
+`ket dag invalidated <cid>` and the MCP tool `ket_invalidated` treat the given
+node as refuted and return the same `ket.invalidated/v1` JSON report. Only
+`grounds` and `derives` parents count as support. Losing every support parent
+invalidates a node; losing some weakens it. Weakening alone does not propagate.
+Missing or unresolved support yields `unknown`, rather than a false verdict.
+
+Both interfaces scan CAS for downstream candidates; no Dolt database is needed.
+The default is a hypothetical single-seed query. Pass
+`--with-recorded-refutations` (MCP: `with_recorded_refutations: true`) to include
+recorded refutations within that seed's downstream closure. A `supersedes`
+replacement halts expansion at the replaced node. Held-back children, missing
+support, and truncated discovery are exposed in the report with
+`complete: false`. Always inspect that flag before interpreting an empty result.
+`--max-nodes` bounds downstream discovery, not the CAS scan or ancestry checks.
+CID witness paths show one route; the listed lost support parents justify an
+all-support-loss verdict.
+
+For the paper POC, citation edges approximate support: a flagged paper has lost
+support under that model, which is not a finding that its conclusions are false.
 
 ## Design Principles
 
