@@ -2,7 +2,7 @@
 //!
 //! Exposes Ket operations as MCP tools over stdio JSON-RPC.
 //! Tools: ket_put, ket_get, ket_verify, ket_dag_link, ket_dag_lineage,
-//!        ket_check_drift, ket_query_cdom, ket_store_reasoning,
+//!        ket_invalidated, ket_check_drift, ket_query_cdom, ket_store_reasoning,
 //!        ket_create_subtask, ket_get_reasoning, ket_score,
 //!        ket_schema_stats, ket_dag_ls, ket_status, ket_search,
 //!        decay_status.

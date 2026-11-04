@@ -254,9 +254,8 @@ Examples:
     #[command(long_about = "\
 Start the MCP server on stdin/stdout using JSON-RPC over line-delimited JSON.
 
-Exposes 11 tools: ket_put, ket_get, ket_verify, ket_dag_link,
-ket_dag_lineage, ket_check_drift, ket_query_cdom, ket_store_reasoning,
-ket_create_subtask, ket_get_reasoning, ket_score.
+Exposes CAS, DAG, support-loss, scoring and task tools, including
+ket_invalidated. Use MCP tools/list to discover their current schemas.
 
 Use with Claude or other MCP-capable agents:
   claude --mcp-config ket.json -p 'store a memory'

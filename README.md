@@ -22,7 +22,7 @@ The same pages are published at <https://nickjoven.github.io/ket/>.
 │           30+ commands, --json output               │
 ├──────────┬──────────┬───────────┬───────────────────┤
 │ ket-mcp  │ket-agent │ ket-score │     ket-cdom      │
-│ 19 tools │  tasks   │ 4 dims    │   tree-sitter     │
+│ 20 tools │  tasks   │ 4 dims    │   tree-sitter     │
 │ JSON-RPC │ routing  │ auto/peer │   Rust + Python   │
 ├──────────┼──────────┴───────────┴───────────────────┤
 │ ket-opt  │  WQS binary search · tier allocation     │
