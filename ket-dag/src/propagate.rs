@@ -378,14 +378,18 @@ pub fn invalidated(
                 // In closure but not yet evaluated: only possible on a cycle.
                 unresolved.push(p.clone());
             } else {
-                // Outside the closure: not downstream of the seed, so its
-                // standing is unaffected — provided it exists.
+                // Outside the closure: in a complete walk, not downstream of
+                // the seed, so its standing is unaffected — provided it
+                // exists. After truncation it may be an undiscovered
+                // descendant, so it cannot be assumed unaffected.
                 let present = *presence
                     .entry(p.clone())
                     .or_insert_with(|| dag.get_node(&Cid(p.clone())).is_ok());
                 if !present {
                     miss.push(p.clone());
                     missing.insert(p.clone());
+                } else if !frontier.is_empty() {
+                    unresolved.push(p.clone());
                 }
             }
         }
@@ -711,6 +715,31 @@ mod tests {
         assert!(!rec.refuted.contains(&z.0));
         let nb = rec.nodes.iter().find(|n| n.cid == b.as_str()).unwrap();
         assert_eq!(nb.refuted_by.len(), 1);
+    }
+
+    #[test]
+    fn truncation_leaves_undiscovered_parents_unresolved() {
+        // d is reached at depth 1, but its other parent x3 sits deep on a
+        // chain the truncated walk never reached. x3 is downstream of the seed,
+        // so d must not be judged on the assumption that x3 is unaffected.
+        let fx = Fx::new("truncate-deep");
+        let a = fx.node("a", &[]);
+        let x1 = fx.node("x1", &[(&a, Derives)]);
+        let x2 = fx.node("x2", &[(&x1, Derives)]);
+        let x3 = fx.node("x3", &[(&x2, Derives)]);
+        let d = fx.node("d", &[(&a, Derives), (&x3, Derives)]);
+        let r = fx.run(
+            &a,
+            PropagateOptions {
+                max_nodes: Some(3),
+                include_intact: true,
+                ..Default::default()
+            },
+        );
+        assert!(!r.complete);
+        assert_eq!(r.status_of(&d), Some(Status::Unknown));
+        let nd = r.nodes.iter().find(|n| n.cid == d.as_str()).unwrap();
+        assert_eq!(nd.support_unresolved, vec![x3.0.clone()]);
     }
 
     #[test]
