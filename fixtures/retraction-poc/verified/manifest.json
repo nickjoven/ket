@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-11-04T07:09:28.282099+00:00",
+  "sources": [
+    {
+      "file": "openalex-cohort.json",
+      "url": "https://api.openalex.org/works?filter=cites%3AW2160675481%2Ccites%3AW2026087575&per_page=200&sort=publication_date%3Aasc&select=id%2Cdoi%2Ctitle%2Cpublication_date%2Cpublication_year%2Creferenced_works%2Cis_retracted%2Cprimary_topic",
+      "status": 200,
+      "bytes": 522926,
+      "sha256": "de2ab9d69342cf9fb4ba4db6e319183d30dbb6eeca737f6a9e569c39090c130a"
+    },
+    {
+      "file": "openalex-W2160675481.json",
+      "url": "https://api.openalex.org/works/W2160675481?select=id,doi,title,publication_date,publication_year,referenced_works,is_retracted,primary_topic",
+      "status": 200,
+      "bytes": 1963,
+      "sha256": "3269671e7e1b4844500472646bf68917e4964242f56fa8c65dceb46ba696888c"
+    },
+    {
+      "file": "crossref-W2160675481-original.json",
+      "url": "https://api.crossref.org/works/10.1126%2Fscience.1179052",
+      "status": 200,
+      "bytes": 10197,
+      "sha256": "df029017815d54ea9e7ab892631da6ce710d78b59441c5ce658d6369969527ec"
+    },
+    {
+      "file": "crossref-W2160675481-updates.json",
+      "url": "https://api.crossref.org/works?filter=updates%3A10.1126%2Fscience.1179052&rows=100",
+      "status": 200,
+      "bytes": 4763,
+      "sha256": "99ac40342c89cdfe01613f95f28cfdd10a0c39cfb292b84b2228eee68b55b811"
+    },
+    {
+      "file": "openalex-W2026087575.json",
+      "url": "https://api.openalex.org/works/W2026087575?select=id,doi,title,publication_date,publication_year,referenced_works,is_retracted,primary_topic",
+      "status": 200,
+      "bytes": 1681,
+      "sha256": "26bd957e91135bb822934c5d7d78f85355479104e42d136913cfd0c27d34581a"
+    },
+    {
+      "file": "crossref-W2026087575-original.json",
+      "url": "https://api.crossref.org/works/10.1073%2Fpnas.1006901107",
+      "status": 200,
+      "bytes": 8993,
+      "sha256": "f5f637cc0f8f7b91b55d0d83f62c57ee02cdf65882b158a116d364c9be6e9f7c"
+    },
+    {
+      "file": "crossref-W2026087575-updates.json",
+      "url": "https://api.crossref.org/works?filter=updates%3A10.1073%2Fpnas.1006901107&rows=100",
+      "status": 200,
+      "bytes": 5060,
+      "sha256": "6d7edccb800d7446d965da22b84e7d07163f7f0642112e39aa2347e6fef555fd"
+    }
+  ]
+}
