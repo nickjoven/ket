@@ -288,6 +288,11 @@ On the isolated single-writer fixture store, use this explicit sequence:
 put the fixed artifact/node bytes; `ket rebuild-projection`; require a clean
 `ket verify-projection`; create an explicit Dolt history commit; obtain its
 actual hash; query and check the committed snapshot; finally seal the receipt.
+Use `dolt add -A` followed by `dolt commit --allow-empty -m qkl1-publication`
+for that explicit checkpoint, check both command results, and require its HEAD
+to differ from the rebuild command's incidental checkpoint. Rebuild can leave
+a clean working set; an ordinary commit would then fail with no changes.
+Do not ignore a failed commit and silently record the pre-verification HEAD.
 Hold the fixture writer lock across verification/checkpoint/snapshot checking.
 The rebuild command's incidental checkpoint does not replace this verified
 publication checkpoint. Do not run this repair sequence against an existing
@@ -308,6 +313,11 @@ Use tested table-scoped `SELECT ... FROM dag_nodes AS OF '<hash>'` syntax;
 do not append AS OF blindly after a WHERE/ORDER BY clause. Observation/commit
 times and domain effective dates remain separate. Existing SQLite recovery
 journals and durable solver adapters stay authoritative for their own state.
+
+Coordinator clarification C1: this explicit empty-checkpoint allowance resolves
+recovery finding 1078 without changing any v1 JSON schema or eligibility rule.
+Assessors must also validate gate cardinality and binding identities before
+aggregation; a missing/empty/duplicated gate set cannot acquire a vacuous pass.
 
 ## Checks, boundaries and rollback
 
