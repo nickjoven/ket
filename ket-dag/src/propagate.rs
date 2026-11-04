@@ -172,12 +172,14 @@ pub struct InvalidationReport {
     pub scope: SeedScope,
     pub index: String,
     pub refuted: Vec<String>,
-    /// False when the closure was truncated, any support was missing, or a
-    /// support parent turned out to descend from the seed without having been
-    /// walked (`undiscovered`). A supersedes halt alone does not clear it;
-    /// what the halt held back is in `blocked`.
+    /// False when the closure was truncated, any support or support ancestor
+    /// was missing, a support parent turned out to descend from the seed
+    /// without having been walked (`undiscovered`), or a supersedes halt held
+    /// support children back (`blocked`). A caller that reads only this flag
+    /// never mistakes a partial answer for "nothing else is affected".
     pub complete: bool,
     pub frontier: Vec<String>,
+    /// Support parents and support ancestors absent from CAS.
     pub missing: Vec<String>,
     /// Support parents that descend from the seed (proven from CAS parents)
     /// but were never walked: omitted by a stale index, behind a supersedes
@@ -380,9 +382,8 @@ pub fn invalidated(
     let mut status: BTreeMap<String, Status> = BTreeMap::new();
     let mut missing: BTreeSet<String> = BTreeSet::new();
     let mut reports: BTreeMap<String, NodeReport> = BTreeMap::new();
-    let mut presence: HashMap<String, bool> = HashMap::new();
     let mut undiscovered: BTreeSet<String> = BTreeSet::new();
-    let mut reach_memo: HashMap<String, bool> = HashMap::new();
+    let mut up = Upward::default();
 
     for c in order.iter().copied().chain(cyclic.iter().copied()) {
         let parents = &support[c];
@@ -408,15 +409,19 @@ pub fn invalidated(
                 // from the seed; the index cannot vouch for that (it may have
                 // omitted rows, or the walk halted or truncated), so check the
                 // authoritative CAS parents upward.
-                let present = *presence
-                    .entry(p.clone())
-                    .or_insert_with(|| dag.get_node(&Cid(p.clone())).is_ok());
-                if !present {
+                if up.support_parents(dag, p).is_none() {
                     miss.push(p.clone());
                     missing.insert(p.clone());
-                } else if reaches_closure(dag, p, &found, &mut reach_memo) {
-                    unresolved.push(p.clone());
-                    undiscovered.insert(p.clone());
+                } else {
+                    match reaches_closure(dag, p, &found, &mut up) {
+                        Reach::Yes => {
+                            unresolved.push(p.clone());
+                            undiscovered.insert(p.clone());
+                        }
+                        // An ancestor gap: cannot prove p is unaffected.
+                        Reach::Gap => unresolved.push(p.clone()),
+                        Reach::No => {}
+                    }
                 }
             }
         }
@@ -451,8 +456,15 @@ pub fn invalidated(
         );
     }
 
-    let complete =
-        frontier.is_empty() && missing.is_empty() && cyclic.is_empty() && undiscovered.is_empty();
+    missing.extend(up.missing);
+    // A child held back at a halt but walked through another path was
+    // evaluated after all; only the never-walked ones are blocked.
+    blocked.retain(|(_, child)| !found.contains_key(child));
+    let complete = frontier.is_empty()
+        && missing.is_empty()
+        && cyclic.is_empty()
+        && undiscovered.is_empty()
+        && blocked.is_empty();
     let nodes = reports
         .into_values()
         .filter(|n| opts.include_intact || n.status != Status::Intact || n.cid == seed.as_str())
@@ -488,62 +500,129 @@ pub fn invalidated(
     })
 }
 
-/// Whether `start` has a support ancestor in the walked closure, i.e. it
-/// descends from the seed. Walks CAS parents upward (no index involved),
-/// memoized across calls. Missing ancestors contribute nothing; a cycle in a
-/// corrupt store is cut by the on-stack guard.
+/// Whether a node outside the closure descends from the seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Some support ancestor is in the walked closure.
+    Yes,
+    /// Every support ancestor was read from CAS and none is in the closure.
+    No,
+    /// No closure ancestor found, but some ancestor is missing from CAS, so
+    /// "no" cannot be proven.
+    Gap,
+}
+
+impl Reach {
+    fn join(self, other: Reach) -> Reach {
+        match (self, other) {
+            (Reach::Yes, _) | (_, Reach::Yes) => Reach::Yes,
+            (Reach::Gap, _) | (_, Reach::Gap) => Reach::Gap,
+            _ => Reach::No,
+        }
+    }
+}
+
+/// Upward lookups shared by every `reaches_closure` call in one run: support
+/// parents per CID read from CAS once (`None` = missing or not a DAG node),
+/// settled answers, and the missing ancestors met on the way.
+#[derive(Default)]
+struct Upward {
+    parents: HashMap<String, Option<Vec<String>>>,
+    memo: HashMap<String, Reach>,
+    missing: BTreeSet<String>,
+}
+
+impl Upward {
+    fn support_parents(&mut self, dag: &Dag, cid: &str) -> Option<Vec<String>> {
+        self.parents
+            .entry(cid.to_string())
+            .or_insert_with(|| {
+                dag.get_node(&Cid(cid.to_string())).ok().map(|n| {
+                    n.parent_links()
+                        .filter(|(_, k)| is_support(*k))
+                        .map(|(p, _)| p.as_str().to_string())
+                        .collect()
+                })
+            })
+            .clone()
+    }
+}
+
+/// Whether `start` (present in CAS) has a support ancestor in the walked
+/// closure, i.e. descends from the seed. Walks CAS parents upward — no index
+/// involved — so it is bounded by the store's ancestry, not by `max_nodes`.
+/// A missing ancestor yields `Gap`, never `No`. A cycle in a corrupt store is
+/// cut by the on-stack guard; answers that depended on a cut are not memoized.
 fn reaches_closure(
     dag: &Dag,
     start: &str,
     found: &BTreeMap<String, Found>,
-    memo: &mut HashMap<String, bool>,
-) -> bool {
-    let mut on_stack: BTreeSet<String> = BTreeSet::new();
-    // (cid, parents still to visit, reached so far)
-    let mut stack: Vec<(String, Vec<String>, bool)> = Vec::new();
-    let parents_of = |c: &str| -> Vec<String> {
-        dag.get_node(&Cid(c.to_string()))
-            .map(|n| {
-                n.parent_links()
-                    .filter(|(_, k)| is_support(*k))
-                    .map(|(p, _)| p.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    if let Some(&r) = memo.get(start) {
+    up: &mut Upward,
+) -> Reach {
+    struct Frame {
+        cid: String,
+        todo: Vec<String>,
+        reach: Reach,
+        cut: bool,
+    }
+    if let Some(&r) = up.memo.get(start) {
         return r;
     }
+    let mut on_stack: BTreeSet<String> = BTreeSet::new();
     on_stack.insert(start.to_string());
-    stack.push((start.to_string(), parents_of(start), false));
+    let todo = up.support_parents(dag, start).unwrap_or_default();
+    let mut stack = vec![Frame {
+        cid: start.to_string(),
+        todo,
+        reach: Reach::No,
+        cut: false,
+    }];
     loop {
         let top = stack.last_mut().unwrap();
         let mut descend = None;
-        while let Some(p) = top.1.pop() {
+        while top.reach != Reach::Yes {
+            let Some(p) = top.todo.pop() else { break };
             if found.contains_key(&p) {
-                top.2 = true;
-            } else if let Some(&r) = memo.get(&p) {
-                top.2 |= r;
-            } else if !on_stack.contains(&p) {
+                top.reach = Reach::Yes;
+            } else if let Some(&r) = up.memo.get(&p) {
+                top.reach = top.reach.join(r);
+            } else if on_stack.contains(&p) {
+                top.cut = true;
+            } else {
                 descend = Some(p);
                 break;
             }
-            if top.2 {
-                top.1.clear();
-            }
         }
         if let Some(p) = descend {
-            on_stack.insert(p.clone());
-            let ps = parents_of(&p);
-            stack.push((p, ps, false));
+            match up.support_parents(dag, &p) {
+                None => {
+                    up.missing.insert(p.clone());
+                    up.memo.insert(p, Reach::Gap);
+                    top.reach = top.reach.join(Reach::Gap);
+                }
+                Some(todo) => {
+                    on_stack.insert(p.clone());
+                    stack.push(Frame {
+                        cid: p,
+                        todo,
+                        reach: Reach::No,
+                        cut: false,
+                    });
+                }
+            }
             continue;
         }
-        let (c, _, r) = stack.pop().unwrap();
-        on_stack.remove(&c);
-        memo.insert(c, r);
+        let done = stack.pop().unwrap();
+        on_stack.remove(&done.cid);
+        if done.reach == Reach::Yes || !done.cut {
+            up.memo.insert(done.cid, done.reach);
+        }
         match stack.last_mut() {
-            Some(parent) => parent.2 |= r,
-            None => return r,
+            Some(parent) => {
+                parent.reach = parent.reach.join(done.reach);
+                parent.cut |= done.cut && done.reach != Reach::Yes;
+            }
+            None => return done.reach,
         }
     }
 }
@@ -754,6 +833,7 @@ mod tests {
         let b = fx.node("b", &[(&a, Derives)]);
         let r = fx.run(&a, all());
         assert_eq!(r.nodes.len(), 1);
+        assert!(!r.complete, "a halt that held children back is partial");
         assert_eq!(
             r.blocked,
             vec![BlockedChild {
@@ -761,6 +841,54 @@ mod tests {
                 child: b.0.clone()
             }]
         );
+    }
+
+    #[test]
+    fn missing_ancestor_is_a_gap_not_proof_of_no() {
+        // a → g → p with g's blob gone; d rests on a and p. p cannot be shown
+        // unaffected, so d is unknown and g is reported missing.
+        let fx = Fx::new("ancestor-gap");
+        let a = fx.node("a", &[]);
+        let g = fx.node("g", &[(&a, Derives)]);
+        let p = fx.node("p", &[(&g, Derives)]);
+        let d = fx.node("d", &[(&a, Derives), (&p, Derives)]);
+        let index = CasChildIndex::build(&fx.cas).unwrap();
+        fs::remove_file(fx.cas.root().join(g.as_str())).unwrap();
+        let r = invalidated(&fx.dag(), &index, &a, &all()).unwrap();
+        assert_eq!(r.status_of(&d), Some(Status::Unknown));
+        assert!(r.missing.contains(&g.0));
+        assert!(!r.complete);
+        let nd = r.nodes.iter().find(|n| n.cid == d.as_str()).unwrap();
+        assert_eq!(nd.support_unresolved, vec![p.0.clone()]);
+    }
+
+    #[test]
+    fn cycle_cut_answers_are_not_memoized() {
+        // Tampered store: A's parents are [F, B] and B's are [A]. Asking about
+        // A first visits B while A is on the stack; B must not be cached as
+        // "no" just because the cut hid A's answer.
+        let fx = Fx::new("cycle-memo");
+        let f = fx.node("f", &[]);
+        let b = fx.node("b", &[]);
+        let a = fx.node("a", &[(&f, Derives), (&b, Derives)]);
+        let out = fx.cas.put(b"b-forged").unwrap();
+        let forged = DagNode::new(NodeKind::Reasoning, vec![a.clone()], out, "test");
+        fs::write(fx.cas.root().join(b.as_str()), forged.to_bytes().unwrap()).unwrap();
+        let mut found = BTreeMap::new();
+        found.insert(
+            f.0.clone(),
+            Found {
+                node: fx.dag().get_node(&f).unwrap(),
+                depth: 0,
+                pred: None,
+                superseded_by: BTreeSet::new(),
+                refuted_by: BTreeSet::new(),
+            },
+        );
+        let dag = fx.dag();
+        let mut up = Upward::default();
+        assert_eq!(reaches_closure(&dag, &a.0, &found, &mut up), Reach::Yes);
+        assert_eq!(reaches_closure(&dag, &b.0, &found, &mut up), Reach::Yes);
     }
 
     #[test]
@@ -878,6 +1006,11 @@ mod tests {
             nd.witness_path,
             vec![a.0.clone(), y.0.clone(), dep.0.clone()]
         );
+        assert!(
+            r.blocked.is_empty(),
+            "dep was walked via y, so nothing is held back"
+        );
+        assert!(r.complete);
     }
 
     #[test]
