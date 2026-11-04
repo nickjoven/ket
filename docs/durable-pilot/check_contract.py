@@ -93,8 +93,8 @@ def expected_assessment(manifest, assessment):
                or assessment['policy_cid'] != manifest['policy_cid'])
     eligibility = ('blocked' if domain == 'fail' else
                    'unknown' if missing or domain == 'unknown' else
-                   'needs_revalidation' if changed else
-                   'unknown' if assessment['execution'] != 'completed' else 'eligible')
+                   'unknown' if assessment['execution'] != 'completed' else
+                   'needs_revalidation' if changed else 'eligible')
     return domain, eligibility, changed
 
 
@@ -153,24 +153,33 @@ class ContractChecks(unittest.TestCase):
             ('stale_gate_context', 'unknown', 'unknown'),
             ('old_pass_new_context', 'pass', 'needs_revalidation'),
             ('old_fail_new_context', 'fail', 'blocked'),
+            ('interrupted_changed_context', 'pass', 'unknown'),
+            ('failed_changed_context', 'pass', 'unknown'),
+            ('interrupted_changed_context_failed_gate', 'fail', 'blocked'),
+            ('failed_changed_context_failed_gate', 'fail', 'blocked'),
         ]
         for name, domain, eligibility in cases:
             with self.subTest(name=name):
                 a = fixture('assessment')
-                if name in ['one_failed_required_gate', 'failed_gate_with_missing_metrics', 'old_fail_new_context']:
+                if name in ['one_failed_required_gate', 'failed_gate_with_missing_metrics', 'old_fail_new_context',
+                            'interrupted_changed_context_failed_gate', 'failed_changed_context_failed_gate']:
                     a['gates'][0]['verdict'] = 'fail'
                 if name in ['missing_metrics', 'failed_gate_with_missing_metrics', 'corrupt_checkpoint']:
                     role = 'checkpoint' if name == 'corrupt_checkpoint' else 'metrics'
                     next(c for c in a['inputs'] if c['role'] == role)['status'] = 'corrupt' if role == 'checkpoint' else 'missing'
                 if name == 'unknown_gate':
                     a['gates'][1]['verdict'] = 'unknown'
-                if name in ['changed_split', 'old_pass_new_context', 'old_fail_new_context']:
+                if name in ['changed_split', 'old_pass_new_context', 'old_fail_new_context',
+                            'interrupted_changed_context', 'failed_changed_context',
+                            'interrupted_changed_context_failed_gate', 'failed_changed_context_failed_gate']:
                     a['requested_context']['split_manifest_cid'] = 'e' * 64
                     a['requested_context_cid'] = 'f' * 64
                 if name == 'changed_policy':
                     a['policy_cid'] = 'e' * 64
-                if name == 'interrupted':
+                if name in ['interrupted', 'interrupted_changed_context', 'interrupted_changed_context_failed_gate']:
                     a['execution'] = 'interrupted'
+                if name in ['failed_changed_context', 'failed_changed_context_failed_gate']:
+                    a['execution'] = 'failed'
                 if name == 'stale_gate_context':
                     a['gates'][0]['context_cid'] = 'f' * 64
                     a['gates'][0]['verdict'] = 'fail'
@@ -178,6 +187,13 @@ class ContractChecks(unittest.TestCase):
                 a['reasons'] = [name]
                 self.assertEqual((a['domain_gate'], a['eligibility']), (domain, eligibility))
                 check_assessment(manifest, a)
+
+    def test_policy_schema_and_fixture_use_the_frozen_precedence(self):
+        expected = ['required_gate_fail', 'required_unknown', 'execution_not_completed',
+                    'context_or_policy_changed', 'eligible']
+        self.assertEqual(fixture('required-input-policy')['precedence'], expected)
+        self.assertEqual(SCHEMAS['required-input-policy.schema.json']['properties']['precedence']['const'], expected)
+        validate('required-input-policy', fixture('required-input-policy'))
 
     def test_false_gate_is_not_rescued_by_execution_success(self):
         m, a = fixture('run-manifest'), fixture('assessment')

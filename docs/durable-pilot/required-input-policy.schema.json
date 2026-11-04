@@ -19,8 +19,8 @@
       "const": [
         "required_gate_fail",
         "required_unknown",
-        "context_or_policy_changed",
         "execution_not_completed",
+        "context_or_policy_changed",
         "eligible"
       ]
     },
