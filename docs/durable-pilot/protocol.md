@@ -1,7 +1,7 @@
 # qkl1 interface contract, version 1
 
-Status: coordinator-review candidate. This commit provides the complete interface;
-the coordinator's bus freeze identifies the adopted commit. No code in this
+Status: coordinator-reviewed v1 contract; the coordinator's bus freeze identifies
+the adopted commit and transferred bytes. No code in this
 directory starts Lean, numerical solvers, training, services or network access.
 
 ## Inventory and migration
@@ -56,6 +56,12 @@ Create each step key by putting canonical
 where `STEP` is one of `quod_fixture`, `evaluate`, `calibrate`, `seal`, `project`.
 Record that returned CID as `step_key`. These objects are simple step-key records,
 not function-result memoization without verified input identities.
+
+For this pilot the producer creates its shard/manifest and gate receipt **before**
+the consumer's input manifest. The `quod_fixture` execution step verifies/imports
+that existing producer evidence; it does not create an evidence CID already
+needed to compute its own input identity. Producer preparation may have its own
+separate input identity/history. Do not introduce a producer/consumer hash cycle.
 
 The context contains exact `mathlib_pin`, tokenizer, split manifest, corpus
 manifest and gate implementation CIDs. Store its canonical bytes before the
@@ -137,6 +143,52 @@ that corpus and its gate checks without a hash cycle. Aggregate its required
 checks with fail/unknown/pass precedence; contradictory aggregate labels are
 invalid. A gate for some different corpus cannot validate this run.
 
+### Shared six-row fixture payloads
+
+Use raw `blob` bindings for the reference fixture inputs, including the two gate
+receipts. The following small payload contract fixes producer/consumer arithmetic
+without requiring Torch, a prover, or numerical integration:
+
+- One shard: `schema_version=1`, `schema=qkl.fixture-shard/v1`, `fixture=true`,
+  `rows=[{"id":"r0","x":0,"y":0}, {"id":"r1","x":1,"y":1},
+  {"id":"r2","x":2,"y":0}, {"id":"r3","x":3,"y":1},
+  {"id":"r4","x":4,"y":0}, {"id":"r5","x":5,"y":1}]`.
+- Corpus manifest: `schema_version=1`, `schema=qkl.fixture-corpus/v1`,
+  `fixture=true`, `row_count=6`, and ordered `shard_cids=[SHARD_CID]`.
+- Split manifest: `schema_version=1`, `schema=qkl.fixture-split/v1`,
+  `fixture=true`, `evaluation=["r0","r1","r2","r3","r4","r5"]`.
+- Checkpoint: `schema_version=1`, `schema=qkl.fixture-checkpoint/v1`,
+  `fixture=true`, `modulus=2`. Prediction is exactly `x % modulus`.
+- Metric payload: `schema_version=1`, `schema=qkl.fixture-metrics/v1`,
+  `fixture=true`, `rows=6`, `correct=6` for the baseline. Compute the actual
+  integer counts from the consumed rows/split/checkpoint; do not copy the expected
+  counts. No wall-clock value or attempt ID enters this semantic result.
+- Calibration's `observed_cid` is the actual metric payload CID;
+  `known_answer_cid` resolves to the baseline metric payload above. Recompute
+  both the metric and equality judgment. A changed metric cannot remain a pass
+  merely because the receipt string says pass.
+
+The producer's `fixture-known-answer` check recomputes the six-row shape, unique
+IDs, and parity labels from its committed shard. Its check evidence blob has
+`schema_version=1`, `schema=qkl.fixture-check/v1`, `fixture=true`,
+`gate_id=fixture-known-answer`, `corpus_manifest_cid`, ordered `shard_cids`,
+and `passed` equal to that recomputed Boolean. The emitted required check and
+aggregate gate verdict must agree with it. Negative test variants remain
+explicitly synthetic and preserve their own bytes/identities. The context's
+`mathlib_pin` is `synthetic-no-lean`; it makes no Lean-verification claim.
+
+Tokenizer/config/environment/code are independently sealed, disclosed fixture
+artifacts. The adapters may choose their internal payloads but must share and
+verify their actual CIDs in the context/role manifest. The baseline config must
+identify the integer-modulus rule. A cache hit does not waive these checks.
+
+For the Y40 source-capsule adapter, `producer.source_commit` names the verified
+upstream source `ee85c65422ed1fc673d5df6fcecfe6658657d30a`, not a claim that
+the adapter's own worktree has that HEAD. The producer's code artifact must
+explicitly bind the adapter source bytes, its actual repository base, and the
+capsule's source-manifest CID. Retain those bytes in CAS. This source inspection
+is not a new execution or validation of the numerical code in the capsule.
+
 Gate assertions count only when their evidence CID matches the declared role,
 its bytes and wrapper are verified, and its context matches the manifest's
 **original** context. A wrong-context or unverifiable assertion is `unknown`,
@@ -149,8 +201,8 @@ Apply the following **ordered** eligibility rules:
 |---|---|
 | Any verified, applicable required gate fails | `blocked` |
 | Any required input is missing/corrupt/unverified, or applicable gate unknown | `unknown` |
-| Requested context or policy differs from the manifest's | `needs_revalidation` |
 | Execution is not completed | `unknown` |
+| Requested context or policy differs from the manifest's | `needs_revalidation` |
 | All preceding conditions cleared | `eligible` |
 
 An old **pass** does not become a pass for a new gate implementation, corpus,
@@ -161,6 +213,10 @@ asking a new question cannot rescue failed evidence. A genuinely new evaluation
 has new inputs/context/run evidence and receives its own assessment. A gate
 whose evidence never matched the original run is instead unknown, not a valid
 old failure. These cases are covered by the reference truth-table checks.
+
+An interrupted or otherwise incomplete execution with no applicable failing
+gate remains `unknown` even under a changed requested context. A context change
+does not imply a completed result exists to revalidate.
 
 Keep four axes explicit: execution, input integrity, original-context domain
 gate and contextual eligibility. Retain metric values and historical assessments
@@ -183,6 +239,13 @@ The journal refers to the input manifest and output artifacts, never to a
 future run manifest; the final manifest can therefore bind the journal head
 without a circular identity. A provider effect with uncertain completion has
 no acknowledged result until it is reconciled.
+
+`attempt_journal_head_cid` seals a verified **prefix** through the acknowledged
+evaluation/calibration outcomes, before run-manifest publication. Subsequent
+`seal`/`project` events or a separate publication journal may refer to the now
+sealed manifest, but must not be folded back into that manifest's prefix head.
+The manifest remains unchanged. This ordering also prevents a seal-event/result
+CID cycle while retaining later operational history in receipts.
 
 1. After start but before outcome: preserve interrupted state. With no effect
    attempted, a new attempt may compute; otherwise check/reconcile effect state.
@@ -220,7 +283,17 @@ exactly-once execution in arbitrary external systems.
 
 ## Versioned SQL receipt
 
-CAS artifacts precede SQL publication. The projection must contain the expected
+CAS artifacts precede SQL publication. `ket put` alone does not project a node.
+On the isolated single-writer fixture store, use this explicit sequence:
+put the fixed artifact/node bytes; `ket rebuild-projection`; require a clean
+`ket verify-projection`; create an explicit Dolt history commit; obtain its
+actual hash; query and check the committed snapshot; finally seal the receipt.
+Hold the fixture writer lock across verification/checkpoint/snapshot checking.
+The rebuild command's incidental checkpoint does not replace this verified
+publication checkpoint. Do not run this repair sequence against an existing
+production/foreign run store.
+
+The projection must contain the expected
 manifest node/output CID and wrapper-parent edges. Verify, explicitly create a
 Dolt history checkpoint, read the actual commit hash and query that snapshot.
 The receipt names that commit and CAS verification evidence. A transaction

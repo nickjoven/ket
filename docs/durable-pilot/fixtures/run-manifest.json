@@ -3,7 +3,7 @@
   "context": {
     "corpus_manifest_cid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "gate_impl_cid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "mathlib_pin": "synthetic-mathlib-pin",
+    "mathlib_pin": "synthetic-no-lean",
     "split_manifest_cid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "tokenizer_cid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
