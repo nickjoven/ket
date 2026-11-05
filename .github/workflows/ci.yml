@@ -58,3 +58,7 @@ jobs:
           cargo test -p ket-cli --test integration -- \
             verify_projection_after_repair_is_clean \
             rebuild_projection_heals_and_is_idempotent
+      - name: Recover interrupted DAG creates without another node
+        run: |
+          cargo build -p ket-cli
+          python3 scripts/test_dag_recovery.py --ket target/debug/ket -v
