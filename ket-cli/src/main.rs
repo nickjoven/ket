@@ -1277,8 +1277,8 @@ fn cmd_dag(
                 println!("Timestamp:  {}", node.timestamp);
                 println!("Output CID: {}", node.output_cid);
                 println!("Parents:    {}", node.parents.len());
-                for (i, p) in node.parents.iter().enumerate() {
-                    println!("  [{i}] {p}");
+                for (i, (p, k)) in node.parent_links().enumerate() {
+                    println!("  [{i}] {p}  ({k})");
                 }
                 if let Some(ref s) = node.schema_cid {
                     println!("Schema:     {s}");
@@ -1357,31 +1357,89 @@ fn cmd_dag(
             }
         }
         DagAction::Lineage { cid } => {
-            let lineage = dag.lineage(&ket_cas::Cid::from(cid.as_str()))?;
+            let start = ket_cas::Cid::from(cid.as_str());
+            let report = dag.lineage_report(&start, None)?;
+            // A start CID that is absent (or is raw content) has no lineage
+            // to show; saying "none found" and exiting 0 would read as an
+            // answer about a node that was never looked at.
+            if report.entries.is_empty() {
+                let why = if report.missing.contains(&start) {
+                    "not in the store"
+                } else {
+                    "not a DAG node"
+                };
+                return Err(format!("no lineage: {cid} is {why}").into());
+            }
+            let absent = |c: &ket_cas::Cid| report.missing.contains(c);
             if json {
-                let items: Vec<serde_json::Value> = lineage
+                // Still one array of nodes. What the walk could not follow is
+                // reported on the node that references it (`missing_parents`),
+                // so an incomplete chain never looks like a complete one.
+                let items: Vec<serde_json::Value> = report
+                    .entries
                     .iter()
-                    .map(|(cid, node)| {
-                        serde_json::json!({
-                            "cid": cid.as_str(),
-                            "kind": node.kind.to_string(),
-                            "agent": node.agent,
-                            "timestamp": node.timestamp,
-                        })
+                    .map(|e| {
+                        let (parents, kinds): (Vec<&str>, Vec<&str>) = e
+                            .node
+                            .parent_links()
+                            .map(|(p, k)| (p.as_str(), k.as_str()))
+                            .unzip();
+                        let missing: Vec<&str> = e
+                            .node
+                            .parents
+                            .iter()
+                            .filter(|p| absent(p))
+                            .map(|p| p.as_str())
+                            .collect();
+                        let mut obj = serde_json::json!({
+                            "cid": e.cid.as_str(),
+                            "kind": e.node.kind.to_string(),
+                            "agent": e.node.agent,
+                            "timestamp": e.node.timestamp,
+                            "depth": e.depth,
+                            "parents": parents,
+                            "parent_kinds": kinds,
+                            "missing_parents": missing,
+                        });
+                        if let Some(sat) = e.node.saturation() {
+                            obj["saturation"] = serde_json::json!(sat);
+                        }
+                        obj
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
-            } else if lineage.is_empty() {
-                println!("No lineage found.");
             } else {
-                for (i, (cid, node)) in lineage.iter().enumerate() {
-                    let indent = "  ".repeat(i);
+                // Indent by distance from the start node, not by position in
+                // the breadth-first output: sibling parents sit at the same
+                // level instead of reading as a parent/grandparent chain.
+                for e in &report.entries {
+                    let indent = "  ".repeat(e.depth as usize);
+                    let sat = e
+                        .node
+                        .saturation()
+                        .map(|s| format!("  saturation:{s}"))
+                        .unwrap_or_default();
                     println!(
-                        "{indent}{}  {}  {}",
-                        &cid.as_str()[..12],
-                        node.kind,
-                        node.agent
+                        "{indent}{}  {}  {}{sat}",
+                        &e.cid.as_str()[..12],
+                        e.node.kind,
+                        e.node.agent
                     );
+                    for (p, k) in e.node.parent_links().filter(|(p, _)| absent(p)) {
+                        println!(
+                            "{indent}  {}  MISSING ({k} parent, not in this store)",
+                            p.as_str().get(..12).unwrap_or(p.as_str())
+                        );
+                    }
+                }
+                if !report.missing.is_empty() {
+                    println!(
+                        "INCOMPLETE: {} ancestor(s) not in this store:",
+                        report.missing.len()
+                    );
+                    for m in &report.missing {
+                        println!("  {m}");
+                    }
                 }
             }
         }

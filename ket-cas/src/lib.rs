@@ -170,6 +170,23 @@ impl Store {
         Ok(fs::read(&path)?)
     }
 
+    /// Retrieve content by CID and prove it: the bytes returned are the
+    /// bytes that were hashed. A blob whose content no longer matches its
+    /// CID is an `IntegrityError`, never handed to the caller.
+    ///
+    /// `get` stays unverified on purpose — it is the hot path for walks that
+    /// re-derive or re-hash anyway (gc, export, projection rebuild). Use this
+    /// wherever bytes cross a trust boundary to a reader that cannot hash
+    /// them itself (the MCP read tools). A separate `verify` followed by a
+    /// `get` is not equivalent: the blob can change between the two reads.
+    pub fn get_verified(&self, cid: &Cid) -> Result<Vec<u8>, CasError> {
+        let data = self.get(cid)?;
+        if hash_bytes(&data) != *cid {
+            return Err(CasError::IntegrityError { cid: cid.0.clone() });
+        }
+        Ok(data)
+    }
+
     /// Verify integrity: re-hash stored content, compare to CID.
     pub fn verify(&self, cid: &Cid) -> Result<bool, CasError> {
         let data = self.get(cid)?;

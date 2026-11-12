@@ -7,6 +7,26 @@ ket adheres to semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- **The MCP read tools return what the write tools record (#27).**
+  `ket_dag_lineage`, `ket_get_reasoning` and `ket_dag_ls` now return each
+  node's `parents` with an index-aligned `parent_kinds` (an untyped edge reads
+  as `derives`), plus `saturation` and the decay fields when the node declares
+  them. Before, an agent could seal "this only *proposes* its parent" and the
+  next reader could not tell a hypothesis from a derivation.
+- **`ket_get` and `ket_get_reasoning` verify on read.** The bytes returned are
+  re-hashed against the CID (`Store::get_verified`); a mismatch is an error,
+  and a successful result carries `verified: true`. Non-UTF-8 blobs come back
+  base64 with `encoding: "base64"` instead of a lossy decode.
+- **Lineage no longer hides a missing ancestor.** `Dag::lineage_report`
+  separates absent parents (`missing`) from raw-content parents (`non_node`).
+  `ket_dag_lineage` returns both with a `complete` flag (and an optional
+  `max_depth`); `ket dag lineage --json` adds `parents`, `parent_kinds`,
+  `depth` and `missing_parents` to each node; the text view marks a missing
+  parent, and a start CID that is not in the store is now an error rather
+  than "No lineage found." with exit 0.
+- `ket dag lineage` indents by depth, so sibling parents no longer render as
+  a parent/grandparent chain; `ket dag show` prints each parent's edge kind.
+- `ket_check_drift` returns `expected_cid` and `actual_cid` with `drifted`.
 - **Concurrent writers no longer lose projection rows.** `dolt sql` cannot
   take concurrent writers; ket ran them anyway and swallowed the error, so
   16 parallel `dag create`s left 3 of 17 node rows in SQL. Every Dolt access

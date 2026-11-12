@@ -145,6 +145,74 @@ fn dag_create_and_lineage() {
     assert_eq!(lineage_arr.len(), 2);
 }
 
+/// `dag lineage --json` returns what the node records (edge kinds, depth)
+/// and names an ancestor that is absent instead of returning a shorter chain.
+#[test]
+fn dag_lineage_reports_edge_kinds_and_missing_ancestors() {
+    let (ket_dir, _dir) = fresh_ket("dag-lineage-missing");
+    let mk = |content: &str, extra: &[&str]| {
+        let mut args = vec![
+            "dag",
+            "create",
+            content,
+            "--kind",
+            "reasoning",
+            "--agent",
+            "a",
+        ];
+        args.extend_from_slice(extra);
+        ket_json(&ket_dir, &args)["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let root = mk("root", &[]);
+    let left = mk("left", &["--parent", &root, "--edge-kind", "proposes"]);
+    let right = mk("right", &["--parent", &root]);
+    let merge = mk("merged", &["--parent", &left, "--parent", &right]);
+
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &merge]);
+    let arr = lineage.as_array().unwrap();
+    assert_eq!(arr.len(), 4);
+    let by_cid = |c: &str| arr.iter().find(|n| n["cid"] == c).unwrap().clone();
+    assert_eq!(
+        by_cid(&left)["parent_kinds"],
+        serde_json::json!(["proposes"])
+    );
+    assert_eq!(
+        by_cid(&right)["parent_kinds"],
+        serde_json::json!(["derives"])
+    );
+    // Siblings share a depth; the text view indents by it.
+    assert_eq!(by_cid(&left)["depth"], 1);
+    assert_eq!(by_cid(&right)["depth"], 1);
+    assert_eq!(by_cid(&root)["depth"], 2);
+    let (_, text, _) = ket(&ket_dir, &["dag", "lineage", &merge]);
+    let indents: Vec<usize> = text
+        .lines()
+        .map(|l| l.len() - l.trim_start().len())
+        .collect();
+    assert_eq!(indents, vec![0, 2, 2, 4], "{text}");
+
+    // Lose an ancestor: the chain says so.
+    std::fs::remove_file(ket_dir.join("cas").join(&left)).unwrap();
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &merge]);
+    let arr = lineage.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["missing_parents"], serde_json::json!([left]));
+    let (ok, text, _) = ket(&ket_dir, &["dag", "lineage", &merge]);
+    assert!(ok);
+    assert!(
+        text.contains("MISSING") && text.contains("INCOMPLETE"),
+        "{text}"
+    );
+
+    // A start CID that is not in the store is an error, not "none found".
+    let (ok, _, err) = ket(&ket_dir, &["dag", "lineage", &left]);
+    assert!(!ok);
+    assert!(err.contains("not in the store"), "{err}");
+}
+
 #[test]
 fn dag_drift_detection() {
     let (ket_dir, dir) = fresh_ket("dag-drift");
