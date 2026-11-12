@@ -9,6 +9,12 @@
 # deterministic function of the pinned corpus. See obsoleted/README.md.
 #
 # Needs `ket`, `curl` and `python3` on PATH. Dolt is not used.
+#
+#   ./docs/demos/obsoleted.sh          mechanics tier: scripted walkers, no API calls
+#   ./docs/demos/obsoleted.sh --live   live tier: Claude API walkers and reader; needs
+#                                      `pip install anthropic` and an API key, and
+#                                      prints a cost estimate and stops unless
+#                                      OBSOLETED_LIVE_YES=1 (see obsoleted/live.py)
 # The RFC texts are downloaded once from www.rfc-editor.org into
 # ${KET_DEMO_CACHE:-~/.cache/ket-demo}/rfc and checked against the BLAKE3
 # CIDs pinned in obsoleted/corpus.tsv before anything reads them.
@@ -40,7 +46,13 @@ grep -v '^#' "$HERE/obsoleted/corpus.tsv" | while IFS=$'\t' read -r n cid _bytes
 done
 
 mkdir -p "$WORK/run"
-python3 -I "$HERE/obsoleted/obsoleted.py" "$CACHE" "$WORK/run"
+if [ "${1:-}" = "--live" ]; then
+  # The live tier imports the Anthropic SDK (pip install anthropic), so it
+  # runs without -I, which would hide a user-site install.
+  python3 "$HERE/obsoleted/obsoleted.py" "$CACHE" "$WORK/run" --live
+else
+  python3 -I "$HERE/obsoleted/obsoleted.py" "$CACHE" "$WORK/run"
+fi
 if [ -n "${KEEP:-}" ]; then
   mkdir -p "$KEEP" && cp -r "$WORK/run/." "$KEEP/"
   printf '\033[2m   store and results copied to %s\033[0m\n' "$KEEP"

@@ -10,7 +10,8 @@ a naive chunk index, and a ket store. Then the same things go wrong in both,
 and 44 questions are answered from each and scored against an answer key.
 
 This is the **mechanics tier**: the walkers are scripts, so there is no LLM
-and no API key. Every score is a deterministic function of the pinned corpus,
+and no API key. The [live tier](#live-tier-claude-api-walkers-and-reader)
+runs the same demo with Claude as the walkers and the reader. Every score is a deterministic function of the pinned corpus,
 and two runs print the same numbers. Only node CIDs differ between runs,
 because nodes carry timestamps.
 
@@ -117,8 +118,55 @@ as an acceptance test for closing it:
 - [`../obsoleted.sh`](../obsoleted.sh): fetches and pins the corpus, then runs the demo
 - [`obsoleted.py`](obsoleted.py): both arms, the four events, the questions and scoring (Python standard library only)
 - [`extract.py`](extract.py): the deterministic claim extractor; its CID names the extractor in every extraction record
+- [`live.py`](live.py): the live tier's walkers and reader, cost gate and response cache
 - [`corpus.tsv`](corpus.tsv): RFC number, BLAKE3 CID, size, title, `obsoletes`
 - [`answers.tsv`](answers.tsv): the answer key from RFC 9110
 
-A live tier with LLM walkers (temperature 0, prompts and outputs stored by
-CID) would measure rates under real extraction noise. It is not built yet.
+## Live tier: Claude API walkers and reader
+
+```sh
+pip install anthropic                     # the SDK; any credential it resolves works
+export ANTHROPIC_API_KEY=...              # or an `ant auth login` profile
+./docs/demos/obsoleted.sh --live          # prints a cost estimate and stops
+OBSOLETED_LIVE_YES=1 ./docs/demos/obsoleted.sh --live      # makes the calls
+OBSOLETED_LIVE_REPLAY=1 ./docs/demos/obsoleted.sh --live   # cached responses only, free
+```
+
+The same corpus, events and scoring, with the two scripted parts replaced
+by [`live.py`](live.py):
+
+- **Walkers.** Claude reads each whole RFC and returns the status codes it
+  defines as structured JSON (code, reason phrase, section). Each claim is
+  then checked against the document's bytes. A phrase that does not appear
+  next to its code is kept, but with edge `proposes` instead of `grounds`,
+  so an extraction error cannot pass as a fact.
+- **Reader.** The naive arm gets a real generation step. Claude answers each
+  question from the retrieved chunks only and names the chunk it used.
+
+What the live tier measures that the mechanics tier cannot:
+
+- **Extraction errors.** How many extracted claims are not in the document,
+  and whether the grounding check keeps them out of answers.
+- **Model knowledge.** The reader may answer from what the model already
+  knows instead of from the passages. That is real RAG behaviour, and it
+  shows up as naive answers that no retrieved chunk supports.
+- **Re-extraction stability.** Whether the edited RFC 9110 yields
+  byte-identical claims (same CIDs) when re-extracted.
+
+**Reproducibility.** The current models take no sampling parameters, so a
+live run is not bit-reproducible. Instead, every request and response is
+stored by CID in the run's ket store, each extraction node names its
+request and response, and the audit prints them. Responses are also cached
+on disk (`$KET_DEMO_CACHE/live-cache/`, keyed by request CID). A second run
+with the same requests makes no API calls and re-scores exactly. The
+"extractor" CID is one blob holding the model, effort, prompt and schema,
+so changing any of them is a different derivation.
+
+**Cost.** The defaults are `claude-opus-5-5` at effort `low`, set with
+`OBSOLETED_MODEL` and `OBSOLETED_EFFORT`. The first run reads about 2.4 MB of
+RFC text, including the edited RFC 9110, and asks 44 questions. The built-in
+estimate is about $7 at list price; replays are free. Requests use the API's
+server-side refusal fallback (`fallbacks: "default"`), and the run counts
+any refusals.
+
+No live results are recorded here yet.

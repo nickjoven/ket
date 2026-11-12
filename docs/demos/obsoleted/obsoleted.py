@@ -23,7 +23,10 @@ three ways and scored against an answer key taken from RFC 9110:
                in a superseded document, proposals, and refuted claims are
                excluded; disagreement between current sources is reported
 
-Usage: obsoleted.py <corpus_dir> <work_dir>   (run via ../obsoleted.sh)
+With --live, the walkers and the naive arm's reader are Claude API calls
+(live.py); everything else is the same.
+
+Usage: obsoleted.py <corpus_dir> <work_dir> [--live]   (run via ../obsoleted.sh)
 """
 
 import collections
@@ -237,15 +240,28 @@ def naive_read(index, code, hits):
 # --------------------------------------------------------------------------
 # ket arm
 
+def verbatim(text, code, phrase):
+    """Does the document state this phrase next to this code? (Whitespace-
+    insensitive; tolerates the table layout '"413"  ; Section 10.4.14: ...'.)"""
+    flat = " ".join(text.split())
+    return re.search(rf"(?<!\d){code}(?!\d).{{0,40}}?{re.escape(phrase)}", flat) is not None
+
+
+def scripted_extract(text, rfc):
+    return extract(text), {}
+
+
 class KetArm:
-    def __init__(self, extractor_cid):
+    def __init__(self, extractor_cid, extract_fn=scripted_extract):
         self.extractor_cid = extractor_cid
+        self.extract_fn = extract_fn
         self.doc_node = {}         # rfc -> doc node cid
         self.memo = {}             # (doc cid, extractor cid) -> extraction node
         self.claims = collections.defaultdict(list)  # rfc -> [claim node cids]
         self.extractions_run = 0
         self.extractions_reused = 0
         self.bytes_processed = 0
+        self.unverified = []       # claims not found verbatim in their document
 
     def add_document(self, doc):
         parents = [(self.doc_node[o], "supersedes")
@@ -264,17 +280,23 @@ class KetArm:
         self.extractions_run += 1
         text = read(doc["path"])
         self.bytes_processed += len(text.encode())
+        triples, prov = self.extract_fn(text, doc["rfc"])
         ext, _ = create("context", agent, [(self.doc_node[doc["rfc"]], "derives")],
-                        content=canon({"extraction": {"doc": doc["cid"],
-                                                      "extractor": self.extractor_cid}}))
+                        content=canon({"extraction": dict(
+                            {"doc": doc["cid"], "extractor": self.extractor_cid}, **prov)}))
         self.memo[key] = ext
-        for code, phrase, section in extract(text):
+        for code, phrase, section in triples:
             claim = canon({"claim": "status-reason", "code": code,
                            "phrase": phrase, "rfc": doc["rfc"], "section": section})
+            # A claim the document does not state verbatim is kept, but only as
+            # a proposal: it is not grounded in the bytes it cites.
+            edge = "grounds" if verbatim(text, code, phrase) else "proposes"
             node, _ = create("reasoning", agent,
-                             [(self.doc_node[doc["rfc"]], "grounds"), (ext, "derives")],
+                             [(self.doc_node[doc["rfc"]], edge), (ext, "derives")],
                              content=claim)
             self.claims[doc["rfc"]].append(node)
+            if edge == "proposes":
+                self.unverified.append((doc["rfc"], code, phrase))
 
 
 class Projection:
@@ -367,6 +389,8 @@ def blind_answer(proj, code):
 # scoring
 
 def classify(answer, code, key, stale_phrases):
+    if isinstance(answer, str):
+        answer = " ".join(answer.split()).strip(" \"'`.") or None
     if answer is None:
         return "none"
     if answer == key[code]:
@@ -376,8 +400,17 @@ def classify(answer, code, key, stale_phrases):
     return "wrong"
 
 
+def annotate(text):
+    """Step 4's edit: someone adds a line near the top of the shared copy."""
+    lines = text.split("\n")
+    lines.insert(3, "   [local annotation: reviewed for the 2026 API guidelines]")
+    return "\n".join(lines)
+
+
 def main():
-    corpus_dir, work = sys.argv[1], sys.argv[2]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    live_mode = "--live" in sys.argv[1:]
+    corpus_dir, work = args[0], args[1]
     docs = load_corpus(corpus_dir)
     key = load_answers()
     os.environ["KET_HOME"] = os.path.join(work, ".ket")
@@ -399,8 +432,24 @@ def main():
             if code in key and phrase != key[code]:
                 stale_phrases[code].add(phrase)
 
-    extractor_cid = ket("put", os.path.join(HERE, "extract.py")).stdout.strip()
-    naive, arm = NaiveIndex(), KetArm(extractor_cid)
+    reader = naive_read
+    llm = None
+    if live_mode:
+        from live import Live
+        say("Live tier: LLM walkers extract claims; an LLM reader answers from retrieved chunks")
+        llm = Live(put_bytes, os.path.join(corpus_dir, "..", "live-cache"))
+        texts = [(n, read(d["path"])) for n, d in sorted(docs.items())]
+        texts.append((9110, annotate(read(docs[9110]["path"]))))
+        requests = [llm.extract_request(n, t) for n, t in texts]
+        llm.gate(requests, n_reads=len(key))
+        llm.prefetch(requests)
+        extractor_cid = llm.extractor_cid
+        arm = KetArm(extractor_cid, llm.extract)
+        reader = llm.read
+    else:
+        extractor_cid = ket("put", os.path.join(HERE, "extract.py")).stdout.strip()
+        arm = KetArm(extractor_cid)
+    naive = NaiveIndex()
 
     # ---- 1. build ----------------------------------------------------------
     early = sorted(n for n in docs if n not in LATE)
@@ -480,10 +529,8 @@ def main():
     say("4. Edit: someone annotates the shared working copy of rfc9110.txt")
     p9110 = docs[9110]["path"]
     original = read(p9110)
-    lines = original.split("\n")
-    lines.insert(3, "   [local annotation: reviewed for the 2026 API guidelines]")
     with open(p9110, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write(annotate(original))
     drift = ket_json("dag", "drift", p9110, docs[9110]["cid"])
     drifted = bool(drift["drifted"])
     basis = arm.doc_node[9110]
@@ -493,9 +540,9 @@ def main():
     dim(f"   ket:   drift on rfc9110.txt: {drifted}; claims grounded in it: "
         f"{len(dependent)} of {total_claims} flagged for re-check")
     old = {canon({"claim": "status-reason", "code": c, "phrase": p, "rfc": 9110, "section": s})
-           for c, p, s in extract(original)}
+           for c, p, s in arm.extract_fn(original, 9110)[0]}
     new = {canon({"claim": "status-reason", "code": c, "phrase": p, "rfc": 9110, "section": s})
-           for c, p, s in extract(read(p9110))}
+           for c, p, s in arm.extract_fn(read(p9110), 9110)[0]}
     dim(f"   ket:   re-extraction from the edited bytes: {len(old & new)} of {len(old)} "
         f"claims byte-identical (same CIDs), {len(new - old)} new, {len(old - new)} gone "
         f"-> cleared without review")
@@ -515,10 +562,13 @@ def main():
                "ket": collections.Counter()}
     from_rumour = 0
     rows = []
+    hits_for = {code: naive.search(f"What is the reason phrase for HTTP status code {code}?",
+                                   must=str(code)) for code in sorted(key)}
+    if llm:
+        llm.prefetch([llm.read_request(naive, c, h) for c, h in hits_for.items() if h])
     for code in sorted(key):
-        hits = naive.search(f"What is the reason phrase for HTTP status code {code}?",
-                            must=str(code))
-        n_ans, n_src = naive_read(naive, code, hits)
+        hits = hits_for[code]
+        n_ans, n_src = reader(naive, code, hits)
         n_cls = classify(n_ans, code, key, stale_phrases)
         results["naive"][n_cls] += 1
         if n_src and n_src.startswith("note:"):
@@ -575,6 +625,10 @@ def main():
         print(f"          <- claim {cid[:12]}, {node['agent']}, {node['timestamp'][:19]}Z, "
               f"RFC {c['rfc']} section {c['section']}")
         print(f"          <- derives: extraction {ext[:12]} by extractor {arm.extractor_cid[:12]}")
+        x = (proj.json_content(ext) or {}).get("extraction", {})
+        if x.get("request"):
+            print(f"             {x.get('model')}: request {x['request'][:12]}, response "
+                  f"{x['response'][:12]} (both stored in the run's ket store)")
         print(f"          <- grounds: RFC {c['rfc']}, bytes {doc_cid[:12]} (re-hashed: "
               f"{'OK' if ok else 'FAILED'})")
         frontier, seen = [doc], set()
@@ -586,8 +640,7 @@ def main():
                 print(f"             RFC {rfc_of[cur]} supersedes "
                       + ", ".join(f"RFC {rfc_of[o]}" for o in olds))
                 frontier += olds
-    hits = naive.search("What is the reason phrase for HTTP status code 413?", must="413")
-    _, src = naive_read(naive, 413, hits)
+    _, src = reader(naive, 413, hits_for[413])
     print(f"   naive: chunk '{src}' (" + (naive.chunks[src]["source"] if src else "no answer")
           + "); the index records no agent, no time, no version and no status")
 
@@ -597,10 +650,23 @@ def main():
     print(f"   ket    bytes read and extracted: {arm.bytes_processed:>7,}   "
           f"(extractions run {arm.extractions_run}, reused {arm.extractions_reused}: "
           f"same document CID + same extractor CID)")
+    if arm.unverified:
+        print(f"   ket    extracted claims not found verbatim in their RFC, kept as "
+              f"`proposes`: {len(arm.unverified)}")
+        for rfc, code, phrase in arm.unverified[:10]:
+            dim(f"          RFC {rfc}: {code} \"{phrase}\"")
+    if llm:
+        print(f"   llm    {llm.summary()}")
 
     report = {
         "corpus": {n: d["cid"] for n, d in sorted(docs.items())},
         "extractor_cid": extractor_cid,
+        "tier": "live" if llm else "mechanics",
+        "live": ({"model": llm.served_by and sorted(m for m in llm.served_by if m),
+                  "reader_cid": llm.reader_cid, "calls": llm.calls, "cached": llm.cached,
+                  "refusals": llm.refusals, "input_tokens": llm.input_tokens,
+                  "output_tokens": llm.output_tokens} if llm else None),
+        "unverified_claims": arm.unverified,
         "scores": {k: dict(v) for k, v in results.items()},
         "naive_answers_from_rumour": from_rumour,
         "rumour_refuted": len(refuted),
