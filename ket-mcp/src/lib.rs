@@ -1382,14 +1382,27 @@ mod tests {
         let err = call(&cas, "ket_dag_lineage", json!({ "cid": raw })).unwrap_err();
         assert!(err.to_string().contains("not a DAG node"), "{err}");
 
-        // A depth bound that cuts the walk is not a complete answer either.
+        // A depth bound that hides a node is not a complete answer either.
+        let tip = mk("tip", json!([grandparent]));
+        let bounded = call(
+            &cas,
+            "ket_dag_lineage",
+            json!({ "cid": tip, "max_depth": 0 }),
+        )
+        .unwrap();
+        assert_eq!(bounded["truncated"], json!(true));
+        assert_eq!(bounded["complete"], json!(false));
+        // Bounded at the child, the parents just past the bound are still
+        // accounted for: one absent, one raw content, nothing hidden.
         let bounded = call(
             &cas,
             "ket_dag_lineage",
             json!({ "cid": child, "max_depth": 0 }),
         )
         .unwrap();
-        assert_eq!(bounded["truncated"], json!(true));
+        assert_eq!(bounded["truncated"], json!(false));
+        assert_eq!(bounded["missing"], json!([parent]));
+        assert_eq!(bounded["non_node_parents"], json!([raw]));
         assert_eq!(bounded["complete"], json!(false));
 
         let _ = std::fs::remove_dir_all(&dir);
