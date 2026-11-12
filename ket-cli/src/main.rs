@@ -1657,11 +1657,13 @@ fn cmd_run(
     let db = open_db(base)?;
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
-    // An unknown task is "not found", whatever else is missing: without this
-    // a mistyped id with no --agent was reported as "not assigned".
-    if !db.task_exists(task_id)? {
-        return Err(format!("task {task_id} not found").into());
-    }
+    // The task content: its title and the context it was created against are
+    // part of the invocation, not something inferred from lineage afterwards.
+    // Looked up first, so an unknown id is "not found" whatever else is
+    // missing (a mistyped id with no --agent used to read "not assigned").
+    let title = db
+        .task_title(task_id)?
+        .ok_or_else(|| format!("task {task_id} not found"))?;
 
     // The agent: an explicit --agent is an override; otherwise the task's
     // stored assignee runs it, and a task nobody was assigned to is refused
@@ -1682,11 +1684,6 @@ fn cmd_run(
         },
     };
 
-    // The task content: its title and the context it was created against are
-    // part of the invocation, not something inferred from lineage afterwards.
-    let title = db
-        .task_title(task_id)?
-        .ok_or_else(|| format!("task {task_id} not found"))?;
     // The context's bytes (a DAG node's content or a plain blob) are
     // resolved inside `run_task`, after it has checked the task, the agent
     // and the program: a context that cannot be read fails the task with the

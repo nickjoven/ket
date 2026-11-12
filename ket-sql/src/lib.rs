@@ -317,6 +317,8 @@ pub enum RunClaim {
     Refused { status: String },
     /// No such task.
     NotFound,
+    /// The caller withdrew while waiting for the store; nothing was written.
+    Aborted,
 }
 
 /// The Dolt database handle.
@@ -901,8 +903,21 @@ impl DoltDb {
     /// set. A claim starts the attempt clean: the previous attempt's failure
     /// reason (`meta`) and its `result_cid` are cleared, so a run that fails
     /// does not end `failed` next to an older attempt's result.
-    pub fn claim_task_for_run(&self, id: &str, force: bool) -> Result<RunClaim, SqlError> {
+    ///
+    /// Taking the store lock can block behind another ket process. `abort`
+    /// is asked once the lock is held and before anything is written: if it
+    /// says yes (the caller was interrupted while it waited), the task is
+    /// left exactly as it was and the claim is `Aborted`.
+    pub fn claim_task_for_run(
+        &self,
+        id: &str,
+        force: bool,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<RunClaim, SqlError> {
         let _guard = acquire_dolt_lock(&self.db_path)?;
+        if abort() {
+            return Ok(RunClaim::Aborted);
+        }
         let Some(status) = self.task_status(id)? else {
             return Ok(RunClaim::NotFound);
         };
@@ -1322,7 +1337,8 @@ impl DoltDb {
     /// Query scores for a node.
     pub fn scores_for_node(&self, node_cid: &str) -> Result<String, SqlError> {
         self.query(&format!(
-            "SELECT dimension, value, scorer, evidence FROM scores WHERE node_cid = '{node_cid}'"
+            "SELECT dimension, value, scorer, evidence FROM scores WHERE node_cid = '{}'",
+            escape_sql(node_cid)
         ))
     }
 
@@ -1330,7 +1346,8 @@ impl DoltDb {
     pub fn agent_score_profile(&self, agent: &str) -> Result<String, SqlError> {
         self.query(&format!(
             "SELECT dimension, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
-             FROM scores WHERE agent = '{agent}' GROUP BY dimension ORDER BY dimension"
+             FROM scores WHERE agent = '{}' GROUP BY dimension ORDER BY dimension",
+            escape_sql(agent)
         ))
     }
 
@@ -1338,8 +1355,9 @@ impl DoltDb {
     pub fn best_agent_for(&self, dimension: &str) -> Result<String, SqlError> {
         self.query(&format!(
             "SELECT agent, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
-             FROM scores WHERE dimension = '{dimension}' \
-             GROUP BY agent ORDER BY avg_score DESC LIMIT 1"
+             FROM scores WHERE dimension = '{}' \
+             GROUP BY agent ORDER BY avg_score DESC LIMIT 1",
+            escape_sql(dimension)
         ))
     }
 
@@ -1846,21 +1864,36 @@ mod tests {
         db.assign_task("big", "o'brien").unwrap();
         assert_eq!(db.task_assignee("big").unwrap().as_deref(), Some("o'brien"));
         assert_eq!(
-            db.claim_task_for_run("big", false).unwrap(),
+            db.claim_task_for_run("big", false, &|| false).unwrap(),
             RunClaim::Claimed {
                 previous: "assigned".into()
             }
         );
         assert_eq!(
-            db.claim_task_for_run("big", false).unwrap(),
+            db.claim_task_for_run("big", false, &|| false).unwrap(),
             RunClaim::Refused {
                 status: "running".into()
             }
         );
         assert_eq!(
-            db.claim_task_for_run("nope", true).unwrap(),
+            db.claim_task_for_run("nope", true, &|| false).unwrap(),
             RunClaim::NotFound
         );
+        // a caller interrupted while waiting for the lock writes nothing
+        assert_eq!(
+            db.claim_task_for_run("big", true, &|| true).unwrap(),
+            RunClaim::Aborted
+        );
+        assert_eq!(db.task_status("big").unwrap().as_deref(), Some("running"));
+
+        // readers quote the way the writers do
+        db.insert_score("s1", "n'1", "corp\\o'brien", "h", "correctness", 0.5, "")
+            .unwrap();
+        assert!(db
+            .agent_score_profile("corp\\o'brien")
+            .unwrap()
+            .contains("correctness"));
+        assert!(db.scores_for_node("n'1").unwrap().contains("correctness"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

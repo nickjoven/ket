@@ -2701,7 +2701,19 @@ fn a_run_past_its_timeout_is_killed_and_recorded() {
         return;
     }
     let (ket_dir, tmp) = fresh_ket("run-timeout");
-    let pidfile = sleeper_agent(&ket_dir, tmp.path(), "sleeper");
+    // A wrapper, as most real agent commands are: the script stays alive as
+    // the direct child and the work happens in a process under it. Killing
+    // only the direct child would leave that one running.
+    let pidfile = tmp.path().join("worker.pid");
+    let cmd = script_agent(
+        tmp.path(),
+        "sleeper",
+        &format!("sleep 300 &\necho $! > '{}'\nwait", pidfile.display()),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "sleeper", "--command", &cmd],
+    );
     let tid = new_task(&ket_dir, "sleep", &[]);
     ket(&ket_dir, &["task", "assign", &tid, "sleeper"]);
 
@@ -2716,7 +2728,22 @@ fn a_run_past_its_timeout_is_killed_and_recorded() {
     );
     assert_eq!(task_meta(&ket_dir, &tid)["failed"]["phase"], "timeout");
     let pid = std::fs::read_to_string(&pidfile).unwrap();
-    assert!(!pid_alive(pid.trim()), "the agent outlived its timeout");
+    assert!(
+        !pid_alive(pid.trim()),
+        "a process under the agent outlived its timeout"
+    );
+
+    // a timeout too large to be a deadline is no limit, not a panic
+    let (quick, _capture) = capture_agent(tmp.path(), "quick");
+    ket(
+        &ket_dir,
+        &["agent", "register", "quick", "--command", &quick],
+    );
+    let tid3 = new_task(&ket_dir, "huge timeout", &[]);
+    ket(&ket_dir, &["task", "assign", &tid3, "quick"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid3, "--timeout", "1e19"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(task_status(&ket_dir, &tid3), "done");
 
     // not a number of seconds: refused before anything runs
     let tid2 = new_task(&ket_dir, "bad timeout", &[]);
@@ -2977,4 +3004,52 @@ fn run_names_what_is_missing_and_how_the_agent_was_chosen() {
     assert_eq!(ran["agent"], "o'brien");
     assert_eq!(ran["agent_source"], "assigned");
     assert_eq!(task_status(&ket_dir, &tid), "done");
+}
+
+/// Ctrl-C while `ket run` is still waiting for the store (another ket
+/// process holds the Dolt lock) must not go on to claim the task, start the
+/// agent and kill it: the task is left exactly as it was.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_while_waiting_for_the_store_leaves_the_task_alone() {
+    if !has_dolt() || Command::new("flock").arg("--version").output().is_err() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-interrupt-waiting");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "wait for the lock", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+
+    // Hold the store lock the way another ket process would.
+    let lock = ket_dir.join("ket.db").join(".ket-dolt.lock");
+    assert!(lock.exists(), "lock file moved: {}", lock.display());
+    let mut holder = Command::new("flock")
+        .args([lock.to_str().unwrap(), "sleep", "4"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let (mut run, _out) = spawn_run(&ket_dir, &tid, &[]);
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(run.try_wait().unwrap().is_none(), "run should be waiting");
+    let sent = Command::new("kill")
+        .args(["-INT", &run.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let status = wait_within(&mut run, 60, "interrupted ket run");
+    holder.wait().unwrap();
+
+    assert!(!status.success());
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "assigned",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(!capture.exists(), "the agent must not have been started");
 }

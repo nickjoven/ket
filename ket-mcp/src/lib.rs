@@ -634,7 +634,16 @@ pub fn handle_tool_call(
                     || McpError::InvalidParams("max_depth must be a non-negative integer".into()),
                 )?),
             };
-            let report = dag.lineage_report(&ket_cas::Cid::from(cid_str), max_depth)?;
+            let start = ket_cas::Cid::from(cid_str);
+            let report = dag.lineage_report(&start, max_depth)?;
+            // A start CID that is raw content has no lineage; answering with
+            // an empty, "complete" chain would read as a node without
+            // ancestry rather than as the wrong kind of CID.
+            if report.non_node.contains(&start) {
+                return Err(McpError::InvalidParams(format!(
+                    "{cid_str} is raw content, not a DAG node: it has no lineage (pass a node CID; use ket_get to read content)"
+                )));
+            }
             let nodes: Vec<Value> = report
                 .entries
                 .iter()
@@ -1367,6 +1376,11 @@ mod tests {
         assert_eq!(gone["lineage"], json!([]));
         assert_eq!(gone["missing"], json!([parent]));
         assert_eq!(gone["complete"], json!(false));
+
+        // A start CID that is raw content is the wrong kind of CID, not a
+        // node with an empty, complete ancestry.
+        let err = call(&cas, "ket_dag_lineage", json!({ "cid": raw })).unwrap_err();
+        assert!(err.to_string().contains("not a DAG node"), "{err}");
 
         // A depth bound that cuts the walk is not a complete answer either.
         let bounded = call(

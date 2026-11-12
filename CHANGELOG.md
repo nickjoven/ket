@@ -20,8 +20,12 @@ ket adheres to semantic versioning.
 - **Every `ket run` ends in a recorded state (#23).** SIGINT/SIGTERM and the
   new `--timeout <seconds>` kill the agent and leave the task `failed` with
   phase `interrupted` / `timeout` and the reason in its meta; before, an
-  interrupted or hung run left the task `running` forever. The agent is also
-  killed if the run is dropped.
+  interrupted or hung run left the task `running` forever. The agent runs
+  in its own process group and the whole group is stopped (SIGTERM, then
+  SIGKILL), so a wrapper's real binary or a tool subprocess does not outlive
+  a run recorded as killed; the group is also killed if the run is dropped.
+  An interrupt that arrives while `ket run` is still waiting for the store
+  lock leaves the task untouched.
 - `ket run` no longer hangs when the agent exits but a process it left
   behind still holds its stdin or stdout: the stdin write is abandoned once
   the agent has exited, and its output pipes are read for at most 2s more.
@@ -38,8 +42,8 @@ ket adheres to semantic versioning.
   they no longer carry the whole statement.
 - Task, agent and score writes escape every interpolated value
   (`update_task_status`, `assign_task`, `set_task_result`, `insert_task`,
-  `upsert_agent`, `insert_score`); a quote in an agent name or id broke the
-  statement.
+  `upsert_agent`, `insert_score`) and the score readers quote the same way;
+  a quote in an agent name or id broke the statement.
 - `ket run <unknown-id>` says "not found" instead of "not assigned";
   `agent_source` is `assigned` when `--agent` names the task's assignee.
 - CI runs the whole Dolt-backed suite (`dolt-suite` job): the `ket run`

@@ -481,6 +481,9 @@ impl<'a> Dag<'a> {
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((cid.clone(), 0u32));
         let mut visited = std::collections::HashSet::new();
+        // Parents of nodes at the depth bound: not followed, but not
+        // necessarily unreached (a diamond reaches them another way).
+        let mut cut_off: Vec<Cid> = Vec::new();
 
         while let Some((current, depth)) = queue.pop_front() {
             if !visited.insert(current.clone()) {
@@ -493,8 +496,8 @@ impl<'a> Dag<'a> {
                         for parent in &node.parents {
                             queue.push_back((parent.clone(), depth + 1));
                         }
-                    } else if !node.parents.is_empty() {
-                        report.truncated = true;
+                    } else {
+                        cut_off.extend(node.parents.iter().cloned());
                     }
                     report.entries.push(LineageEntry {
                         cid: current,
@@ -512,6 +515,21 @@ impl<'a> Dag<'a> {
                     // the walk legitimately ends here.
                     report.non_node.push(current);
                 }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // The bound truncated the walk only if it kept a node from being
+        // reached. A cut-off parent the walk visited anyway hides nothing,
+        // and one that is raw content is a leaf, not unwalked ancestry.
+        for parent in cut_off {
+            if !visited.insert(parent.clone()) {
+                continue;
+            }
+            match self.get_node(&parent) {
+                Ok(_) => report.truncated = true,
+                Err(DagError::Cas(ket_cas::CasError::NotFound(_))) => report.missing.push(parent),
+                Err(DagError::Serde(_)) => report.non_node.push(parent),
                 Err(e) => return Err(e),
             }
         }
@@ -924,6 +942,41 @@ mod tests {
 
         let lineage = dag.lineage(&grandchild_cid).unwrap();
         assert_eq!(lineage.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `truncated` means the bound kept something from being reached, not
+    /// merely that a node at the bound has parents.
+    #[test]
+    fn a_bounded_walk_that_reached_everything_is_not_truncated() {
+        let (cas, dir) = temp_store("lineage-diamond");
+        let dag = Dag::new(&cas);
+        let raw = cas.put(b"raw source").unwrap();
+        // A -> [B, C], B -> [C, raw]: at max_depth 1, B sits at the bound
+        // with parents that are already reached (C) or a raw leaf.
+        let (c, _) = dag
+            .store_with_node(b"c", NodeKind::Memory, vec![], "a")
+            .unwrap();
+        let (b, _) = dag
+            .store_with_node(b"b", NodeKind::Memory, vec![c.clone(), raw.clone()], "a")
+            .unwrap();
+        let (a, _) = dag
+            .store_with_node(b"a", NodeKind::Memory, vec![b.clone(), c.clone()], "a")
+            .unwrap();
+
+        let report = dag.lineage_report(&a, Some(1)).unwrap();
+        assert_eq!(report.entries.len(), 3);
+        assert!(!report.truncated);
+        assert!(report.is_complete());
+        assert_eq!(report.non_node, vec![raw]);
+
+        // One hop less and B's node parent C is still reached via A, but
+        // nothing reaches past depth 0: now the bound does hide B and C.
+        let report = dag.lineage_report(&a, Some(0)).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert!(report.truncated);
+        assert!(!report.is_complete());
 
         let _ = fs::remove_dir_all(&dir);
     }
