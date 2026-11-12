@@ -12,6 +12,9 @@ content-addressed. Or run it: `./docs/demo.sh`. Two more domains live in
 [`docs/demos/`](docs/demos/): research claims with typed edges and
 supersession, and a parallel multi-agent review that fans out and back in
 with nothing to lock. Each ends with a graph (`ket graph --format mermaid`).
+[`docs/demos/obsoleted.sh`](docs/demos/obsoleted/README.md) scores ket
+against naive chunk-RAG on 13 HTTP RFCs, with a planted rumour, a late
+supersession and an edit to a shared copy.
 The same pages are published at <https://nickjoven.github.io/ket/>.
 
 ## Architecture
