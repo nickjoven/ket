@@ -477,10 +477,12 @@ impl<'a> Orchestrator<'a> {
             .claim_task_for_run(task_id, opts.force, &|| shutdown.signalled().is_some())?;
         match claim {
             ket_sql::RunClaim::Claimed { .. } => {}
-            ket_sql::RunClaim::Aborted => return Err(AgentError::Interrupted(format!(
+            ket_sql::RunClaim::Aborted => {
+                return Err(AgentError::Interrupted(format!(
                 "ket received {} before task {task_id} was started; the task was left as it was",
                 shutdown.signalled().unwrap_or("a signal")
-            ))),
+            )))
+            }
             ket_sql::RunClaim::NotFound => {
                 return Err(AgentError::NotFound(format!("task {task_id}")))
             }
