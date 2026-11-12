@@ -156,7 +156,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 ### Tasks & Agents
 - `ket task create <title>` (`--by`, `--context <cid>`, `--parent <id>`) / `ket task ls` / `ket task show <id>` / `ket task assign <id> <agent>`
 - `ket agent register <name>` / `ket agent ls` — presets claude/codex/copilot, or any name with `--command "<cli> ..."` (`--model` optional)
-- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task
+- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task. `--timeout <seconds>` bounds it; an interrupted, timed-out or failed run leaves the task `failed` with the reason. A `running` or `done` task is refused unless `--force`
 
 ### Code Intelligence
 - `ket scan <path>` — Index symbols (Rust/Python)

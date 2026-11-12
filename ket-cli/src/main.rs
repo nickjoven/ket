@@ -182,9 +182,16 @@ Execute a task by spawning the assigned agent as a subprocess.
 The agent's output is stored as a Reasoning DAG node.
 Requires the agent CLI to be installed (e.g., 'claude' for Claude).
 
+A run always ends in a recorded state: `done` with a result, or `failed`
+with the phase and reason in the task's meta (`ket task show <id>`). That
+includes a timeout and Ctrl-C/SIGTERM, which kill the agent first. A task
+that is `running` or `done` is refused unless --force is given.
+
 Examples:
   ket run <task-id> --agent claude --prompt 'Review this code'
-  ket run <task-id> --agent codex")]
+  ket run <task-id> --agent codex
+  ket run <task-id> --timeout 600
+  ket run <task-id> --force          Reclaim a task left `running`")]
     Run {
         /// Task ID to run
         task_id: String,
@@ -196,6 +203,14 @@ Examples:
         /// (default: 'Complete the assigned task')
         #[arg(long)]
         prompt: Option<String>,
+        /// Kill the agent and fail the task if it is still running after
+        /// this many seconds (default: no limit)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<f64>,
+        /// Run a task that is already `running` or `done`. Use it to reclaim
+        /// a task whose run was killed before it could record an outcome.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Parse source files with tree-sitter and index symbols
@@ -908,11 +923,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             task_id,
             agent,
             prompt,
+            timeout,
+            force,
         } => cmd_run(
             &base,
             &task_id,
             agent.as_deref(),
             prompt.as_deref(),
+            timeout,
+            force,
             cli.json,
         ),
         Commands::Scan { path } => cmd_scan(&base, &path, cli.json),
@@ -1619,18 +1638,40 @@ fn cmd_run(
     task_id: &str,
     agent: Option<&str>,
     prompt: Option<&str>,
+    timeout: Option<f64>,
+    force: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let timeout = match timeout {
+        None => None,
+        Some(secs) => Some(
+            std::time::Duration::try_from_secs_f64(secs)
+                .ok()
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| {
+                    format!("--timeout must be a positive number of seconds, got {secs}")
+                })?,
+        ),
+    };
     let cas = open_cas(base)?;
     let db = open_db(base)?;
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
+    // An unknown task is "not found", whatever else is missing: without this
+    // a mistyped id with no --agent was reported as "not assigned".
+    if !db.task_exists(task_id)? {
+        return Err(format!("task {task_id} not found").into());
+    }
+
     // The agent: an explicit --agent is an override; otherwise the task's
     // stored assignee runs it, and a task nobody was assigned to is refused
     // rather than routed to a default (#20).
+    let assignee = db.task_assignee(task_id)?;
     let (agent, agent_source) = match agent {
+        // Naming the assignee is not an override of it.
+        Some(a) if assignee.as_deref() == Some(a) => (a.to_string(), "assigned"),
         Some(a) => (a.to_string(), "override"),
-        None => match db.task_assignee(task_id)? {
+        None => match assignee {
             Some(a) => (a, "assigned"),
             None => {
                 return Err(format!(
@@ -1654,7 +1695,8 @@ fn cmd_run(
     let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent))?;
+    let opts = ket_agent::RunOptions { timeout, force };
+    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent, &opts))?;
 
     // Log the run, naming the agent that actually ran and how it was chosen
     let log_path = base.join("log");

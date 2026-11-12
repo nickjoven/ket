@@ -6,7 +6,44 @@ ket adheres to semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **`ket run` refuses a task that is `running` or `done`** unless `--force`
+  is given (#23). The status check and the move to `running` happen in one
+  locked step, so concurrent `ket run`s of one task start the agent once.
+  `--force` reclaims a task whose run was killed (SIGKILL) before it could
+  record an outcome. `Orchestrator::run_task` takes a `RunOptions`.
+- String literals written before #22 that contained backslashes stay as
+  they were stored: `escape_sql` doubles backslashes only for new writes, and
+  rows written earlier are not rewritten.
+
 ### Fixed
+- **Every `ket run` ends in a recorded state (#23).** SIGINT/SIGTERM and the
+  new `--timeout <seconds>` kill the agent and leave the task `failed` with
+  phase `interrupted` / `timeout` and the reason in its meta; before, an
+  interrupted or hung run left the task `running` forever. The agent is also
+  killed if the run is dropped.
+- `ket run` no longer hangs when the agent exits but a process it left
+  behind still holds its stdin or stdout: the stdin write is abandoned once
+  the agent has exited, and its output pipes are read for at most 2s more.
+- A rerun starts clean: the claim clears the previous attempt's `result_cid`
+  as well as its failure reason, so a failed rerun no longer sits next to an
+  older result.
+- The agent's exit status decides the outcome. A failure to write the task
+  context to its stdin no longer replaces a nonzero exit's stderr or fails a
+  task whose agent exited 0 (it is kept as a `warning` in the task's meta),
+  and is no longer recorded as phase `launch`.
+- SQL statements near the 128 KiB per-argument limit go to `dolt sql` on
+  stdin instead of `-q`, so a large batch (a big `scan`, a rebuild) or a
+  heavily escaped value no longer fails with E2BIG. Dolt errors are bounded:
+  they no longer carry the whole statement.
+- Task, agent and score writes escape every interpolated value
+  (`update_task_status`, `assign_task`, `set_task_result`, `insert_task`,
+  `upsert_agent`, `insert_score`); a quote in an agent name or id broke the
+  statement.
+- `ket run <unknown-id>` says "not found" instead of "not assigned";
+  `agent_source` is `assigned` when `--agent` names the task's assignee.
+- CI runs the whole Dolt-backed suite (`dolt-suite` job): the `ket run`
+  tests used to be skipped everywhere, so "CI green" did not cover them.
 - **The MCP read tools return what the write tools record (#27).**
   `ket_dag_lineage`, `ket_get_reasoning` and `ket_dag_ls` now return each
   node's `parents` with an index-aligned `parent_kinds` (an untyped edge reads
