@@ -6,6 +6,11 @@ ket adheres to semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **`ket-py` builds against Python 3.14.** PyO3 goes from 0.23 to 0.30
+  (0.23 stops at CPython 3.13, so `cargo build --workspace` failed wherever
+  `python3` is 3.14). The Python-facing API is unchanged.
+
 ### Fixed
 - **Concurrent writers no longer lose projection rows.** `dolt sql` cannot
   take concurrent writers; ket ran them anyway and swallowed the error, so
