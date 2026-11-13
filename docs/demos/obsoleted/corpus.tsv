@@ -1,0 +1,14 @@
+# rfc	blake3 cid of rfcN.txt	bytes	title	obsoletes (from https://www.rfc-editor.org/rfc/rfcN.json, fetched 2026-11-12)
+1945	0c5c05d67492fd3fa8fa0a6c796baeda2abd0f2da9892b4b641b62acd67bedfd	137582	Hypertext Transfer Protocol -- HTTP/1.0	
+2068	255a441c884eb83ca2a7480751cebf25f95b8389905489a3d561ec339eb12e89	378114	Hypertext Transfer Protocol -- HTTP/1.1	
+2616	4ff24d85e54d66e1f418bd6bad562bd7b5fc211f228754a4d2e991181b60b747	422279	Hypertext Transfer Protocol -- HTTP/1.1	2068
+7230	2636e3129bbefd59d73d67ced573b2e791b86a03118e97035c4d0882109cca7b	205947	Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing	2145,2616
+7231	57e395ea2b742a5eecd5b8e68de46f9594dc19c2d6cda8a24eb00ac13cb136b0	235053	Hypertext Transfer Protocol (HTTP/1.1): Semantics and Content	2616
+7232	aac530293f1261c76be3eed9e9ed285b2e84f3b845c3a70145d8f52d9e47485e	56696	Hypertext Transfer Protocol (HTTP/1.1): Conditional Requests	2616
+7233	096916713a23018dae549c5770e7dd415a455c3defbf18af99bacdfa6fde1e95	46933	Hypertext Transfer Protocol (HTTP/1.1): Range Requests	2616
+7234	301ce5c25d4728259a5655c221de800d985f253b5c6beccb7191814d13f2a977	90647	Hypertext Transfer Protocol (HTTP/1.1): Caching	2616
+7235	7ef0d94e685f7358a7263294d3ba3a4ee2f5683d9db755f21bf26be468a01a67	38142	Hypertext Transfer Protocol (HTTP/1.1): Authentication	2616,2617
+7538	417320569a7e055c6e7360d2de6ea8380393dc6a5422293089a1fb1a0c305154	11189	The Hypertext Transfer Protocol Status Code 308 (Permanent Redirect)	7238
+9110	dc6241aa10da5782c886cfb2e511ae157137cc01b3241fdd4480ee508191edf5	502941	HTTP Semantics	2818,7230,7231,7232,7233,7235,7538,7615,7694
+9111	4a23c7273f07d98f7822d31d7dddec98677c41c944f26a04d4db63dbd1869d46	84477	HTTP Caching	7234
+9112	f261d720f4bae50d6344da0140b87c39ccd809c8ce889e3d0d8c8b14efa5db76	109913	HTTP/1.1	7230

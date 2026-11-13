@@ -1,0 +1,47 @@
+# code	reason phrase	section	line  (answer key: the status-code section headings of RFC 9110, cid dc6241aa...)
+100	Continue	15.2.1.	6878
+101	Switching Protocols	15.2.2.	6895
+200	OK	15.3.1.	6915
+201	Created	15.3.2.	6968
+202	Accepted	15.3.3.	6982
+203	Non-Authoritative Information	15.3.4.	7000
+204	No Content	15.3.5.	7015
+205	Reset Content	15.3.6.	7049
+206	Partial Content	15.3.7.	7066
+300	Multiple Choices	15.4.1.	7322
+301	Moved Permanently	15.4.2.	7365
+302	Found	15.4.3.	7393
+303	See Other	15.4.4.	7411
+304	Not Modified	15.4.5.	7444
+305	Use Proxy	15.4.6.	7480
+306	(Unused)	15.4.7.	7485
+307	Temporary Redirect	15.4.8.	7490
+308	Permanent Redirect	15.4.9.	7505
+400	Bad Request	15.5.1.	7541
+401	Unauthorized	15.5.2.	7548
+402	Payment Required	15.5.3.	7565
+403	Forbidden	15.5.4.	7569
+404	Not Found	15.5.5.	7587
+405	Method Not Allowed	15.5.6.	7601
+406	Not Acceptable	15.5.7.	7613
+407	Proxy Authentication Required	15.5.8.	7629
+408	Request Timeout	15.5.9.	7639
+409	Conflict	15.5.10.	7650
+410	Gone	15.5.11.	7667
+411	Length Required	15.5.12.	7690
+412	Precondition Failed	15.5.13.	7698
+413	Content Too Large	15.5.14.	7708
+414	URI Too Long	15.5.15.	7720
+415	Unsupported Media Type	15.5.16.	7736
+416	Range Not Satisfiable	15.5.17.	7755
+417	Expectation Failed	15.5.18.	7787
+418	(Unused)	15.5.19.	7794
+421	Misdirected Request	15.5.20.	7807
+422	Unprocessable Content	15.5.21.	7824
+426	Upgrade Required	15.5.22.	7834
+500	Internal Server Error	15.6.1.	7863
+501	Not Implemented	15.6.2.	7869
+502	Bad Gateway	15.6.3.	7880
+503	Service Unavailable	15.6.4.	7886
+504	Gateway Timeout	15.6.5.	7899
+505	HTTP Version Not Supported	15.6.6.	7906

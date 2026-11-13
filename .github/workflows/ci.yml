@@ -18,6 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ket-py's PyO3 (0.23) supports CPython up to 3.13; ubuntu-latest now
+      # ships 3.14, and the workspace build fails in pyo3-ffi's build script.
+      # Pin the interpreter until PyO3 is upgraded.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
       # The pinned PyO3 0.23 supports Python through 3.13; ubuntu-latest's
       # default interpreter can advance independently of our Rust lockfile.
