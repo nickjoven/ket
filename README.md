@@ -145,6 +145,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 
 ### DAG & Lineage
 - `ket dag create <content>` — Create node (`--kind`, `--parent <cid>[:<kind>]`, `--agent`, `--edge-kind grounds|derives|proposes|confirms|refutes|supersedes`, `--content-file <path|->` for large or dash-shaped content). Parents must exist in the store.
+- `ket dag recover <cid>` — Complete logging/projection for a retained node without creating another identity. Partial create failures exit nonzero and retain the CID; reconcile by that CID rather than retrying `create`. See [recovery semantics](docs/dag-recovery.md).
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag drift <path> <cid>` — Detect file drift
