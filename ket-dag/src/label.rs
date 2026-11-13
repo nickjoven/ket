@@ -32,7 +32,9 @@
 //!   some support parent is `in`.
 //! * `unknown` — not settled by the two rules above, and the reason is an
 //!   evidence gap: a support parent absent from CAS (or not a DAG node), or a
-//!   dependency that is itself `unknown`.
+//!   dependency that is itself `unknown`, where that dependency could still
+//!   change the outcome. Under `any`, once some support parent is `in`, a
+//!   missing or `unknown` alternative cannot: the node's support stands.
 //! * `contested` — not settled, with no evidence gap: the node sits on a
 //!   standoff (`r` refutes `n` on the strength of `p`, while `r2` refutes `p`
 //!   on the strength of `n`).
@@ -378,23 +380,35 @@ impl Labelling {
             }
         }
 
-        // Among the unsettled, an evidence gap spreads to whatever depends on it.
+        // Among the unsettled, an evidence gap spreads to whatever depends on
+        // it, through dependencies that could still change the outcome. An
+        // attacker always could. Under `all` every support parent could; under
+        // `any`, none can once some support parent is in, because the node's
+        // support already stands and only its attackers keep it unsettled.
+        let support_open = |cid: &str| match policy.support {
+            SupportRule::All => true,
+            SupportRule::Any => tally[cid].support_in == 0,
+        };
         let mut gap: VecDeque<&str> = deps
             .iter()
-            .filter(|(cid, d)| !labels.contains_key(*cid) && !d.support_missing.is_empty())
+            .filter(|(cid, d)| {
+                !labels.contains_key(*cid) && !d.support_missing.is_empty() && support_open(cid)
+            })
             .map(|(cid, _)| cid.as_str())
             .collect();
         for cid in &gap {
             labels.insert(cid.to_string(), Label::Unknown);
         }
         while let Some(cid) = gap.pop_front() {
-            let dependents = supports
+            let through_support = supports
                 .get(cid)
                 .into_iter()
                 .flatten()
-                .chain(attacks.get(cid).into_iter().flatten());
+                .filter(|target| support_open(target));
+            let through_attack = attacks.get(cid).into_iter().flatten();
+            let dependents: Vec<&str> = through_support.chain(through_attack).copied().collect();
             for target in dependents {
-                if !labels.contains_key(*target) {
+                if !labels.contains_key(target) {
                     labels.insert(target.to_string(), Label::Unknown);
                     gap.push_back(target);
                 }

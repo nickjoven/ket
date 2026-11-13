@@ -604,6 +604,44 @@ fn under_any_a_missing_alternative_decides_only_when_nothing_else_stands() {
 }
 
 #[test]
+fn under_any_a_missing_alternative_cannot_turn_a_standoff_into_a_gap() {
+    let fx = Fx::new("any-standoff-gap");
+    let g = fx.node("g", &[]);
+    let gone = absent("alternative");
+    // b's support stands through g whatever the missing alternative is.
+    let b = fx.node("b", &[(&g, Grounds), (&gone, Grounds)]);
+    let p = fx.node("p", &[]);
+    // A standoff: r refutes b on the strength of p, r2 refutes p on b's.
+    let r = fx.node("r", &[(&b, Refutes), (&p, Grounds)]);
+    let r2 = fx.node("r2", &[(&p, Refutes), (&b, Grounds)]);
+    let roots = [&r, &r2];
+    let r_any = fx.label_with(&roots, &any());
+    assert_labels(
+        &r_any,
+        &[
+            (&g, In),
+            (&b, Contested),
+            (&p, Contested),
+            (&r, Contested),
+            (&r2, Contested),
+        ],
+    );
+    // Without the missing alternative the reading is the same.
+    let b2 = fx.node("b2", &[(&g, Grounds)]);
+    let p2 = fx.node("p2", &[]);
+    let s = fx.node("s", &[(&b2, Refutes), (&p2, Grounds)]);
+    let s2 = fx.node("s2", &[(&p2, Refutes), (&b2, Grounds)]);
+    assert_labels(&fx.label_with(&[&s, &s2], &any()), &[(&b2, Contested)]);
+    // Linked premises: b needs the missing one, so it is a gap, and the
+    // standoff that rests on b inherits it.
+    let r_all = fx.label(&roots);
+    assert_labels(
+        &r_all,
+        &[(&b, Unknown), (&r2, Unknown), (&p, Unknown), (&r, Unknown)],
+    );
+}
+
+#[test]
 fn ignored_agents_refutations_are_listed_but_do_not_attack() {
     let fx = Fx::new("ignored");
     let a = fx.node("a", &[]);
@@ -807,9 +845,17 @@ fn oracle(world: &World, policy: &Policy) -> BTreeMap<String, Label> {
             if labels.contains_key(cid) {
                 continue;
             }
-            let gap = support(cid)
-                .iter()
-                .any(|c| !world.contains(c) || labels.get(c) == Some(&Unknown))
+            // Support can still change the outcome unless, under `any`, some
+            // support parent is already in.
+            let sup = support(cid);
+            let support_open = match policy.support {
+                SupportRule::All => true,
+                SupportRule::Any => !sup.iter().any(|c| labels.get(c) == Some(&In)),
+            };
+            let gap = (support_open
+                && sup
+                    .iter()
+                    .any(|c| !world.contains(c) || labels.get(c) == Some(&Unknown)))
                 || attackers(cid)
                     .iter()
                     .any(|c| labels.get(c) == Some(&Unknown));
@@ -872,9 +918,19 @@ fn generated_graphs_match_the_oracle_and_cover_every_label() {
                     // too, so following them never ends, which a finite DAG of
                     // nodes can only do by going round support and attack.
                     Contested => {
-                        assert!(deps.support_missing.is_empty(), "{at}");
+                        let support_stands = policy.support == SupportRule::Any
+                            && deps.support.iter().any(|c| labelling.labels[c] == In);
+                        if !support_stands {
+                            assert!(deps.support_missing.is_empty(), "{at}");
+                            assert!(dep_labels().all(|l| l != Unknown), "{at}");
+                        }
+                        assert!(
+                            deps.attackers
+                                .iter()
+                                .all(|c| labelling.labels[c] != Unknown),
+                            "{at}"
+                        );
                         assert!(dep_labels().any(|l| l == Contested), "{at}");
-                        assert!(dep_labels().all(|l| l != Unknown), "{at}");
                     }
                     // Unknown always traces to an evidence gap.
                     Unknown => assert!(
