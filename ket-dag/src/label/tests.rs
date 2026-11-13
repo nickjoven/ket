@@ -15,7 +15,10 @@ struct Fx {
 
 impl Fx {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ket-label-test-{name}"));
+        // The process id keeps two checkouts testing at once out of each
+        // other's stores.
+        let dir =
+            std::env::temp_dir().join(format!("ket-label-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let cas = CasStore::init(&dir).unwrap();
         Fx { cas, dir }
@@ -25,13 +28,21 @@ impl Fx {
     }
     /// A node with `label` content and typed parents.
     fn node(&self, label: &str, parents: &[(&Cid, EdgeKind)]) -> Cid {
+        self.node_at(label, parents, None)
+    }
+    /// As `node`, with the timestamp pinned so the CID is a function of the
+    /// arguments alone and a generated graph is the same on every run.
+    fn node_at(&self, label: &str, parents: &[(&Cid, EdgeKind)], tick: Option<usize>) -> Cid {
         let out = self.cas.put(label.as_bytes()).unwrap();
-        let node = DagNode::new_typed(
+        let mut node = DagNode::new_typed(
             NodeKind::Reasoning,
             parents.iter().map(|(c, k)| ((*c).clone(), *k)).collect(),
             out,
             "test",
         );
+        if let Some(tick) = tick {
+            node.timestamp = format!("2026-01-01T00:00:00Z+{tick}");
+        }
         self.dag().put_node(&node).unwrap()
     }
     fn label(&self, roots: &[&Cid]) -> LabelReport {
@@ -482,6 +493,44 @@ fn two_views_that_each_refute_the_others_ground_end_contested() {
     assert_labels(&alone, &[(&r, In), (&n, Out), (&p, In)]);
 }
 
+#[test]
+fn a_witness_leaves_an_old_standoff_and_reaches_the_new_evidence() {
+    let fx = Fx::new("witness-standoff");
+    let p = fx.node("p", &[]);
+    let q = fx.node("q", &[]);
+    let r = fx.node("r", &[(&q, Grounds), (&p, Refutes)]);
+    let s = fx.node("s", &[(&p, Grounds), (&q, Refutes)]);
+    // View A is the standoff. View B adds a refutation of q. Whether that
+    // node's CID sorts before or after the standoff's must not matter, so
+    // try refuters on both sides of `s`.
+    let (mut before, mut after) = (None, None);
+    for i in 0..64 {
+        let t = fx.node(&format!("t{i}"), &[(&q, Refutes)]);
+        if t.as_str() < s.as_str() {
+            before.get_or_insert(t);
+        } else {
+            after.get_or_insert(t);
+        }
+    }
+    for t in [before.unwrap(), after.unwrap()] {
+        let report = fx.consistency(&[&r, &s], &[&t]);
+        let flip = |cid: &Cid| {
+            report
+                .flips
+                .iter()
+                .find(|f| f.cid == cid.as_str() && f.side == Side::A)
+                .unwrap()
+        };
+        let path = |cids: &[&Cid]| -> Vec<String> { cids.iter().map(|c| c.0.clone()).collect() };
+        assert_eq!((flip(&q).before, flip(&q).after), (Contested, Out));
+        assert_eq!(flip(&q).because, path(&[&q, &t]));
+        assert_eq!(flip(&r).because, path(&[&r, &q, &t]));
+        assert_eq!((flip(&p).before, flip(&p).after), (Contested, In));
+        assert_eq!(flip(&p).because, path(&[&p, &r, &q, &t]));
+        assert_eq!(flip(&s).because, path(&[&s, &p, &r, &q, &t]));
+    }
+}
+
 // --- Generated graphs against a naive oracle -------------------------------
 
 /// splitmix64: a fixed, dependency-free stream per seed.
@@ -540,7 +589,10 @@ fn generate(fx: &Fx, seed: u64) -> Vec<Cid> {
             format!("g{seed}-n{i}")
         };
         let refs: Vec<(&Cid, EdgeKind)> = parents.iter().map(|(c, k)| (c, *k)).collect();
-        let cid = fx.node(&label, &refs);
+        // Usually a fresh tick; now and then tick 0, so that a repeated
+        // (content, parents) pair is sometimes the very same node.
+        let tick = if rng.below(100) < 15 { 0 } else { i + 1 };
+        let cid = fx.node_at(&label, &refs, Some(tick));
         if !cids.contains(&cid) {
             cids.push(cid);
             labels.push(label);
@@ -767,6 +819,12 @@ fn consistency_is_symmetric_and_matches_its_definition() {
             let distinct: BTreeSet<&String> = f.because.iter().collect();
             assert_eq!(distinct.len(), f.because.len(), "seed {seed}");
             assert!(f.because.iter().all(|c| ou.contains_key(c)), "seed {seed}");
+            // It ends at a node that side did not have, and only there.
+            let own = if f.side == Side::A { &oa } else { &ob };
+            let (last, rest) = f.because.split_last().unwrap();
+            assert!(!own.contains_key(last), "seed {seed}: {f:?}");
+            assert!(rest.iter().all(|c| own.contains_key(c)), "seed {seed}");
+            assert!(rest.iter().all(|c| own[c] != ou[c]), "seed {seed}");
         }
         if ab.consistent {
             consistent += 1;

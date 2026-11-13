@@ -454,8 +454,8 @@ pub struct Flip {
     pub before: Label,
     pub after: Label,
     /// From this node, through dependencies whose status also differs from
-    /// that view, to the first one that does not differ or that the view
-    /// lacked. A witness for where the disagreement enters, not the only one.
+    /// that view, to a node that view did not have: where the other view
+    /// enters. A shortest such chain, not the only one.
     pub because: Vec<String>,
 }
 
@@ -475,48 +475,61 @@ pub struct ConsistencyReport {
     pub flips: Vec<Flip>,
 }
 
-/// Follow the dependencies that explain `start`'s status in the union and
-/// that the side saw differently (or did not have).
+/// A shortest chain of dependencies from `start` to a node the side did not
+/// have, through nodes whose status the side saw differently.
+///
+/// Breadth-first, so a view that was already in a standoff cannot trap the
+/// walk on its old cycle: the search goes round it and out to the new node.
+/// Dependencies that account for the current status (an `in` attacker or an
+/// `out` support parent for `out`; a same-status dependency for `contested`
+/// and `unknown`) are tried alone first; if they do not lead out, any
+/// dependency with a changed status may be used.
 fn because(side: &Labelling, union: &Labelling, start: &str) -> Vec<String> {
     let changed = |cid: &str| side.label(cid) != union.label(cid);
-    let mut path = vec![start.to_string()];
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut cur = start;
-    seen.insert(cur);
-    loop {
-        let deps = &union.deps[cur];
-        let label = union.labels[cur];
-        let is = |cid: &String, want: Label| union.labels[cid] == want;
-        // Dependencies that account for the label, attackers first.
-        let explains: Vec<&String> = match label {
-            Label::Out => deps
+    let search = |explaining_only: bool| -> Option<Vec<String>> {
+        let mut from: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut queue: VecDeque<&str> = VecDeque::from([start]);
+        while let Some(cur) = queue.pop_front() {
+            if !side.labels.contains_key(cur) {
+                // The view never had this node: this is where the other enters.
+                let mut path = vec![cur.to_string()];
+                let mut at = cur;
+                while let Some(prev) = from.get(at) {
+                    path.push(prev.to_string());
+                    at = prev;
+                }
+                path.reverse();
+                return Some(path);
+            }
+            let deps = &union.deps[cur];
+            let label = union.labels[cur];
+            for (dep, attacker) in deps
                 .attackers
                 .iter()
-                .filter(|c| is(c, Label::In))
-                .chain(deps.support.iter().filter(|c| is(c, Label::Out)))
-                .collect(),
-            Label::In => deps.attackers.iter().chain(deps.support.iter()).collect(),
-            Label::Contested | Label::Unknown => deps
-                .attackers
-                .iter()
-                .chain(deps.support.iter())
-                .filter(|c| is(c, label))
-                .collect(),
-        };
-        let Some(next) = explains
-            .into_iter()
-            .find(|c| changed(c) && !seen.contains(c.as_str()))
-        else {
-            return path;
-        };
-        path.push(next.clone());
-        seen.insert(next);
-        if !side.labels.contains_key(next) {
-            // The view never had this node: this is where the other enters.
-            return path;
+                .map(|c| (c, true))
+                .chain(deps.support.iter().map(|c| (c, false)))
+            {
+                let dep_label = union.labels[dep];
+                let explains = match label {
+                    Label::Out => dep_label == if attacker { Label::In } else { Label::Out },
+                    Label::In => true,
+                    Label::Contested | Label::Unknown => dep_label == label,
+                };
+                if (explains || !explaining_only)
+                    && changed(dep)
+                    && dep != start
+                    && !from.contains_key(dep.as_str())
+                {
+                    from.insert(dep, cur);
+                    queue.push_back(dep);
+                }
+            }
         }
-        cur = next;
-    }
+        None
+    };
+    search(true)
+        .or_else(|| search(false))
+        .unwrap_or_else(|| vec![start.to_string()])
 }
 
 /// Whether two views agree: label each alone and both together, and report
