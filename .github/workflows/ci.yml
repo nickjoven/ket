@@ -41,6 +41,8 @@ jobs:
           cargo test -p ket-sql
       - name: CLI and MCP support-loss parity
         run: cargo test -p ket-cli --test invalidated
+      - name: Labelling and consistency CLI
+        run: cargo test -p ket-cli --test labelling
       - name: Offline support-loss artifact checks
         run: |
           python3 docs/retraction-poc/acceptance_report.py \

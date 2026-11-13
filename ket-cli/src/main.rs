@@ -740,6 +740,23 @@ command preserves node identity. A plain `dag create` is always a new event."
         #[arg(long)]
         include_intact: bool,
     },
+    /// Label nodes in, out, contested or unknown from support and refutations
+    Label {
+        /// Node CIDs; the view is these nodes and all their ancestors
+        cids: Vec<String>,
+        /// Label every node in the store instead
+        #[arg(long, conflicts_with = "cids")]
+        all: bool,
+    },
+    /// Report whether two views agree, and every node whose status differs
+    Consistent {
+        /// Root CIDs of the first view (repeatable)
+        #[arg(long = "a", required = true)]
+        a: Vec<String>,
+        /// Root CIDs of the second view (repeatable)
+        #[arg(long = "b", required = true)]
+        b: Vec<String>,
+    },
     /// Check if a file has changed since a CID was recorded
     Drift {
         /// File path to check
@@ -1030,6 +1047,19 @@ fn parse_node_kind(kind: &str) -> Result<ket_dag::NodeKind, Box<dyn std::error::
         "context" => ket_dag::NodeKind::Context,
         _ => return Err(format!("Unknown kind: {kind}").into()),
     })
+}
+
+fn well_formed_cids(raw: &[String]) -> Result<Vec<ket_cas::Cid>, Box<dyn std::error::Error>> {
+    raw.iter()
+        .map(|c| {
+            let cid = ket_cas::Cid::from(c.as_str());
+            if cid.is_well_formed() {
+                Ok(cid)
+            } else {
+                Err(format!("cid must be 64 lowercase hexadecimal characters: {c}").into())
+            }
+        })
+        .collect()
 }
 
 fn parse_edge_kind(kind: &str) -> Result<ket_dag::EdgeKind, Box<dyn std::error::Error>> {
@@ -1622,6 +1652,22 @@ fn cmd_dag(
             let report = invalidated(&dag, &index, &ket_cas::Cid::from(cid.as_str()), &options)?;
             // A single versioned representation keeps CLI, MCP and reports
             // interoperable; --json is accepted as for other DAG commands.
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        DagAction::Label { cids, all } => {
+            let report = if all {
+                ket_dag::label::label_store(&dag)?
+            } else {
+                if cids.is_empty() {
+                    return Err("give at least one node CID, or --all".into());
+                }
+                ket_dag::label::label(&dag, &well_formed_cids(&cids)?)?
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        DagAction::Consistent { a, b } => {
+            let report =
+                ket_dag::label::consistency(&dag, &well_formed_cids(&a)?, &well_formed_cids(&b)?)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         DagAction::Drift { path, cid } => {
