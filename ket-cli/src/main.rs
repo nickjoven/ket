@@ -709,6 +709,19 @@ enum DagAction {
         #[arg(long)]
         schema: Option<String>,
     },
+    /// Complete logging/projection for a retained node without creating a new identity
+    #[command(
+        long_about = "Recover a node retained by an interrupted or partially failed create.
+
+Use the CID from dag:create:intent, dag:create, or the partial-success output.
+Validates retained CAS bytes and dependencies, then completes the missing SQL
+projection. Existing conflicting SQL rows require `ket repair`. Repeating this
+command preserves node identity. A plain `dag create` is always a new event."
+    )]
+    Recover {
+        /// Retained node CID (64 lowercase hex characters)
+        cid: String,
+    },
     /// Trace the full ancestry of a node
     Lineage {
         /// Node CID to trace from
@@ -1052,6 +1065,135 @@ fn warn_if_projection_failed(result: Result<(), ket_sql::SqlError>) {
     }
 }
 
+/// Validate every direct CAS dependency before projecting an externally retained
+/// node. In particular, schema/parent strings must be CIDs and timestamp must
+/// be an RFC3339 value, never arbitrary text interpolated into SQL.
+fn validate_retained_node(
+    cas: &ket_cas::Store,
+    node: &ket_dag::DagNode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    chrono::DateTime::parse_from_rfc3339(&node.timestamp)?;
+    if !node.parent_kinds.is_empty() && node.parent_kinds.len() != node.parents.len() {
+        return Err("retained node parent kinds are misaligned".into());
+    }
+    let mut parents = std::collections::HashSet::new();
+    for parent in &node.parents {
+        if !parents.insert(parent.as_str()) {
+            return Err("retained node has duplicate parents".into());
+        }
+        if !cas.verify(parent)? {
+            return Err(format!("parent integrity check failed: {parent}").into());
+        }
+        resolve_parent(cas, parent.as_str())?;
+    }
+    for cid in std::iter::once(&node.output_cid).chain(node.schema_cid.iter()) {
+        if !cas.verify(cid)? {
+            return Err(format!("dependency integrity check failed: {cid}").into());
+        }
+    }
+    Ok(())
+}
+
+/// Complete a CAS publication, preserving its identity even on partial failure.
+/// This intentionally does not infer retry identity from equal content.
+fn finish_retained_node(
+    base: &PathBuf,
+    cid: &ket_cas::Cid,
+    node: &ket_dag::DagNode,
+    event: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut projection = "not_attempted";
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // Publication is already durable in CAS; record it before SQL can block.
+        // A log error is partial success, never an unqualified successful create.
+        log::append(&base.join("log"), event, cid.as_str())?;
+        if !base.join("ket.db").exists() {
+            projection = "not_configured";
+            return Ok(());
+        }
+        projection = "failed";
+        let db = open_db(base)?;
+        let edges = projected_edges(node);
+        db.sync_dag_node(
+            cid.as_str(),
+            &node.kind.to_string(),
+            &node.agent,
+            &node.timestamp,
+            node.output_cid.as_str(),
+            "",
+            &edge_refs(&edges),
+            node.schema_cid.as_ref().map(|s| s.as_str()),
+        )?;
+        // INSERT IGNORE can leave a conflicting row untouched. Check the exact
+        // target row and incoming edges before claiming it is projected.
+        let expected = ket_sql::NodeRow {
+            cid: cid.as_str().to_string(),
+            kind: node.kind.to_string(),
+            agent: node.agent.clone(),
+            created_at: node.timestamp.clone(),
+            output_cid: node.output_cid.as_str().to_string(),
+            schema_cid: node
+                .schema_cid
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+        };
+        let rows: Vec<_> = db
+            .dag_node_rows()?
+            .into_iter()
+            .filter(|r| r.cid == cid.as_str())
+            .collect();
+        let mut actual: Vec<_> = db
+            .dag_edges()?
+            .into_iter()
+            .filter(|e| e.child_cid == cid.as_str())
+            .map(|e| (e.parent_cid, e.ordinal, e.edge_kind))
+            .collect();
+        let mut expected_edges: Vec<_> = edges
+            .iter()
+            .map(|(p, i, k)| (p.clone(), i64::from(*i), k.to_string()))
+            .collect();
+        actual.sort();
+        expected_edges.sort();
+        if rows != vec![expected] || actual != expected_edges {
+            return Err("retained node projection conflicts with CAS; run `ket repair`, then recover the same CID".into());
+        }
+        projection = "synced";
+        Ok(())
+    })();
+    if json {
+        let mut obj = serde_json::json!({
+            "node_cid": cid.as_str(), "content_cid": node.output_cid.as_str(),
+            "retained": true, "projection": projection,
+            "status": if result.is_ok() { "complete" } else { "partial" },
+            "recovery": { "command": "dag recover", "node_cid": cid.as_str() },
+        });
+        if let Some(ref schema) = node.schema_cid {
+            obj["schema_cid"] = serde_json::json!(schema);
+        }
+        if let Err(ref e) = result {
+            obj["error"] = serde_json::json!(e.to_string());
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("Node CID:    {cid}");
+        println!("Content CID: {}", node.output_cid);
+        println!("Projection:  {projection}");
+        if let Some(ref schema) = node.schema_cid {
+            println!("Schema CID:  {schema}");
+        }
+    }
+    result.map_err(|e| {
+        format!(
+            "node {cid} is retained in CAS; logging/projection incomplete: {e}. \
+         Do not retry dag create; use ket --home <same-store> dag recover {cid}"
+        )
+        .into()
+    })
+}
+
 /// Parse `--parent <cid>[:<kind>]`. A parent without a suffix takes `default`.
 /// CIDs are hex, so the colon is unambiguous.
 fn parse_parent_link(
@@ -1336,44 +1478,24 @@ fn cmd_dag(
             if let Some(ref s) = schema {
                 node = node.with_schema(ket_cas::Cid::from(s.as_str()));
             }
-            let node_cid = dag.put_node(&node)?;
-
-            // Project to SQL if Dolt is available — from the sealed node.
-            if let Ok(db) = open_db(base) {
-                let node = dag.get_node(&node_cid)?;
-                let edges = projected_edges(&node);
-                warn_if_projection_failed(db.sync_dag_node(
-                    node_cid.as_str(),
-                    &kind,
-                    &agent,
-                    &node.timestamp,
-                    content_cid.as_str(),
-                    "",
-                    &edge_refs(&edges),
-                    schema.as_deref(),
-                ));
+            validate_retained_node(&cas, &node)?;
+            let bytes = node.to_bytes()?;
+            let node_cid = ket_cas::hash_bytes(&bytes);
+            // Intent is an attempted publication, not proof that CAS was written.
+            // Append strictly before publishing the timestamped identity so even
+            // an immediate crash after CAS can be reconciled by its exact CID.
+            log::append(&base.join("log"), "dag:create:intent", node_cid.as_str())?;
+            cas.put(&bytes)?;
+            finish_retained_node(base, &node_cid, &node, "dag:create", json)?;
+        }
+        DagAction::Recover { cid } => {
+            let cid = ket_cas::Cid::from(cid);
+            if !cas.verify(&cid)? {
+                return Err(format!("retained node integrity check failed: {cid}").into());
             }
-
-            // Log
-            let log_path = base.join("log");
-            log_event(&log_path, "dag:create", &format!("{node_cid}"));
-
-            if json {
-                let mut obj = serde_json::json!({
-                    "node_cid": node_cid.as_str(),
-                    "content_cid": content_cid.as_str(),
-                });
-                if let Some(ref s) = schema {
-                    obj["schema_cid"] = serde_json::json!(s);
-                }
-                println!("{}", serde_json::to_string_pretty(&obj)?);
-            } else {
-                println!("Node CID:    {node_cid}");
-                println!("Content CID: {content_cid}");
-                if let Some(ref s) = schema {
-                    println!("Schema CID:  {s}");
-                }
-            }
+            let node = dag.get_node(&cid)?;
+            validate_retained_node(&cas, &node)?;
+            finish_retained_node(base, &cid, &node, "dag:recover", json)?;
         }
         DagAction::Lineage { cid } => {
             let start = ket_cas::Cid::from(cid.as_str());

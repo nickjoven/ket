@@ -25,6 +25,11 @@ jobs:
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
+      # The pinned PyO3 0.23 supports Python through 3.13; ubuntu-latest's
+      # default interpreter can advance independently of our Rust lockfile.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Build
         run: cargo build --workspace
       - name: Unit tests (all crates)
@@ -86,3 +91,7 @@ jobs:
           cargo test -p ket-cli --test integration -- \
             verify_projection_after_repair_is_clean \
             rebuild_projection_heals_and_is_idempotent
+      - name: Recover interrupted DAG creates without another node
+        run: |
+          cargo build -p ket-cli
+          python3 scripts/test_dag_recovery.py --ket target/debug/ket -v

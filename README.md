@@ -12,6 +12,9 @@ content-addressed. Or run it: `./docs/demo.sh`. Two more domains live in
 [`docs/demos/`](docs/demos/): research claims with typed edges and
 supersession, and a parallel multi-agent review that fans out and back in
 with nothing to lock. Each ends with a graph (`ket graph --format mermaid`).
+[`docs/demos/obsoleted.sh`](docs/demos/obsoleted/README.md) scores ket
+against naive chunk-RAG on 13 HTTP RFCs, with a planted rumour, a late
+supersession and an edit to a shared copy.
 The same pages are published at <https://nickjoven.github.io/ket/>.
 
 ## Architecture
@@ -145,6 +148,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 
 ### DAG & Lineage
 - `ket dag create <content>` — Create node (`--kind`, `--parent <cid>[:<kind>]`, `--agent`, `--edge-kind grounds|derives|proposes|confirms|refutes|supersedes`, `--content-file <path|->` for large or dash-shaped content). Parents must exist in the store.
+- `ket dag recover <cid>` — Complete logging/projection for a retained node without creating another identity. Partial create failures exit nonzero and retain the CID; reconcile by that CID rather than retrying `create`. See [recovery semantics](docs/dag-recovery.md).
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag drift <path> <cid>` — Detect file drift

@@ -15,6 +15,9 @@ ket adheres to semantic versioning.
 - String literals written before #22 that contained backslashes stay as
   they were stored: `escape_sql` doubles backslashes only for new writes, and
   rows written earlier are not rewritten.
+- **`ket-py` builds against Python 3.14.** PyO3 goes from 0.23 to 0.30
+  (0.23 stops at CPython 3.13, so `cargo build --workspace` failed wherever
+  `python3` is 3.14). The Python-facing API is unchanged.
 
 ### Fixed
 - **Every `ket run` ends in a recorded state (#23).** SIGINT/SIGTERM and the

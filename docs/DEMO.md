@@ -251,7 +251,9 @@ for anything else.
 The walkthrough above is one domain: a code handoff. Three more, each a single
 script in [`docs/demos/`](demos/), show what the same substrate does when the
 artifacts are claims instead of files, when the agents run at once instead of
-in turn, and when the job is to audit a repository and keep the receipts.
+in turn, and when the job is to audit a repository and keep the receipts. A
+fourth puts ket next to naive chunk-RAG on a real document series and scores
+both.
 
 ### Research claims: typed edges and supersession
 
@@ -512,6 +514,38 @@ world, each needing provenance, evidence, and the possibility of being wrong
 later. Content addressing gives every claim an identity; typed edges make
 "confirmed", "refuted" and "corrected" part of that identity; the log makes the
 whole audit re-derivable. The audit of the audit is `ket verify-projection`.
+
+
+### Benchmark: naive chunk-RAG vs ket, on the HTTP RFCs
+
+[`demos/obsoleted.sh`](demos/obsoleted.sh) ([details](demos/obsoleted/README.md)).
+Four walkers read 13 HTTP RFCs (1945 to 9112), each one checked against a
+pinned BLAKE3 CID. Then three things go wrong: one walker writes a confident
+summary that is wrong today and another builds on it, RFC 9110–9112 arrive
+after the store was built, and someone edits the shared copy of
+`rfc9110.txt`. Then 44 questions ("what is the reason phrase for status N?")
+are answered and scored against RFC 9110. The walkers are scripts, so there
+is no LLM, no API key, and the same numbers every run.
+
+```
+   naive       42/44 correct   (correct 42, stale 2)
+   ket, blind  42/44 correct   (correct 42, stale 2)
+   ket         43/44 correct   (correct 43, conflict 1)
+   naive answers taken from the rumour or the summary built on it: 2
+```
+
+On accuracy alone, a generous hybrid baseline does well. The difference is
+where the errors come from. Both of naive's misses came from the planted
+summary, and nothing in a chunk index marks a summary as a guess. In ket it
+is a `proposes` claim, which a checker refutes once current sources arrive.
+"ket, blind" reads the same store without edge kinds, which is what the MCP
+read tools return today, and does no better than naive. The one ket answer
+that is not a plain hit is a real disagreement: RFC 1945 calls 302 "Moved
+Temporarily", RFC 9110 calls it "Found", and nothing obsoletes 1945. ket
+reports both rather than choosing. After the edit, ket flags the 44 claims
+grounded in RFC 9110 and clears them by re-extracting byte-identical claims.
+The naive index gives no signal, and all 741 of its RFC 9110 offset
+citations now point at the wrong text.
 
 ---
 
