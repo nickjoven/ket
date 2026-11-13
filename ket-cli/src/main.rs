@@ -747,6 +747,8 @@ command preserves node identity. A plain `dag create` is always a new event."
         /// Label every node in the store instead
         #[arg(long, conflicts_with = "cids")]
         all: bool,
+        #[command(flatten)]
+        policy: LabelPolicyArgs,
     },
     /// Report whether two views agree, and every node whose status differs
     Consistent {
@@ -756,6 +758,8 @@ command preserves node identity. A plain `dag create` is always a new event."
         /// Root CIDs of the second view (repeatable)
         #[arg(long = "b", required = true)]
         b: Vec<String>,
+        #[command(flatten)]
+        policy: LabelPolicyArgs,
     },
     /// Check if a file has changed since a CID was recorded
     Drift {
@@ -1047,6 +1051,29 @@ fn parse_node_kind(kind: &str) -> Result<ket_dag::NodeKind, Box<dyn std::error::
         "context" => ket_dag::NodeKind::Context,
         _ => return Err(format!("Unknown kind: {kind}").into()),
     })
+}
+
+/// The reading rules for `dag label` and `dag consistent`.
+#[derive(clap::Args, Debug)]
+struct LabelPolicyArgs {
+    /// How much support a node needs: all of its grounds/derives parents
+    /// (linked premises), or any one of them (alternatives; use this on
+    /// citation graphs)
+    #[arg(long, default_value = "all", value_parser = ["all", "any"])]
+    support: String,
+    /// Do not count refutations written by this agent (repeatable)
+    #[arg(long = "ignore-attacks-by", value_name = "AGENT")]
+    ignore_attacks_by: Vec<String>,
+}
+
+impl LabelPolicyArgs {
+    fn policy(&self) -> ket_dag::label::Policy {
+        ket_dag::label::Policy {
+            support: ket_dag::label::SupportRule::parse(&self.support)
+                .expect("clap restricts --support to known rules"),
+            ignore_attacks_by: self.ignore_attacks_by.iter().cloned().collect(),
+        }
+    }
 }
 
 fn well_formed_cids(raw: &[String]) -> Result<Vec<ket_cas::Cid>, Box<dyn std::error::Error>> {
@@ -1654,20 +1681,25 @@ fn cmd_dag(
             // interoperable; --json is accepted as for other DAG commands.
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        DagAction::Label { cids, all } => {
+        DagAction::Label { cids, all, policy } => {
+            let policy = policy.policy();
             let report = if all {
-                ket_dag::label::label_store(&dag)?
+                ket_dag::label::label_store(&dag, &policy)?
             } else {
                 if cids.is_empty() {
                     return Err("give at least one node CID, or --all".into());
                 }
-                ket_dag::label::label(&dag, &well_formed_cids(&cids)?)?
+                ket_dag::label::label(&dag, &well_formed_cids(&cids)?, &policy)?
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        DagAction::Consistent { a, b } => {
-            let report =
-                ket_dag::label::consistency(&dag, &well_formed_cids(&a)?, &well_formed_cids(&b)?)?;
+        DagAction::Consistent { a, b, policy } => {
+            let report = ket_dag::label::consistency(
+                &dag,
+                &well_formed_cids(&a)?,
+                &well_formed_cids(&b)?,
+                &policy.policy(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         DagAction::Drift { path, cid } => {

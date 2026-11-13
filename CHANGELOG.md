@@ -154,6 +154,13 @@ ket adheres to semantic versioning.
   `ket.invalidated/v1` is unchanged. It differs from v1 in two rules: losing
   any one support parent is enough, and a refuted refutation no longer
   counts. No MCP tool yet.
+- **Labelling policies.** `ket dag label` and `ket dag consistent` take
+  `--support all|any` and `--ignore-attacks-by <agent>`. `any` treats
+  support parents as alternatives, which is the reading for citation
+  graphs: on the pinned XMRV replay it marks out exactly the nodes v1 marks
+  refuted or invalidated (checked in CI), where `all` marked 177 of 179.
+  The policy is never sealed into nodes; each report records it with the
+  CID of its canonical bytes.
 - **Resolution edges.** `EdgeKind` gains `confirms`, `refutes`, `supersedes`
   (with `EdgeKind::ALL` and a strict `parse`). `ket dag create --parent`
   accepts `<cid>:<kind>` so one node can confirm a claim and be grounded

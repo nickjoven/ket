@@ -66,6 +66,10 @@ jobs:
             --output "$RUNNER_TEMP/ket24-render"
           diff -r "$RUNNER_TEMP/ket24-render/paper-results" docs/retraction-poc/paper-results
           cmp "$RUNNER_TEMP/ket24-render/paper-report.md" docs/retraction-poc/paper-report.md
+      - name: Labelling under support any agrees with v1 on the pinned replay
+        run: |
+          python3 scripts/retraction-poc/label_check.py \
+            --replay "$RUNNER_TEMP/ket24-replay" --ket target/debug/ket
       - name: Lint (informational, non-blocking)
         continue-on-error: true
         run: |

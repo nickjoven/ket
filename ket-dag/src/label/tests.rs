@@ -650,7 +650,8 @@ fn a_policy_has_canonical_bytes_and_a_content_address() {
     let r = fx.label_with(&[&a], &p);
     assert_eq!(r.policy.cid, p.cid().0);
     assert_eq!(r.policy.support, SupportRule::Any);
-    let c = consistency(&fx.dag(), &[a.clone()], &[a.clone()], &p).unwrap();
+    let one = std::slice::from_ref(&a);
+    let c = consistency(&fx.dag(), one, one, &p).unwrap();
     assert_eq!(c.policy.cid, p.cid().0);
     assert_eq!(SupportRule::parse("any"), Some(SupportRule::Any));
     assert_eq!(SupportRule::parse("some"), None);
