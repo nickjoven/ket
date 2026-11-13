@@ -1,0 +1,71 @@
+{
+  "schema": "ket.invalidated/v1",
+  "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+  "scope": "seed_only",
+  "index": "cas-scan",
+  "refuted": [
+    "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750"
+  ],
+  "complete": false,
+  "frontier": [],
+  "missing": [
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "undiscovered": [],
+  "nodes": [
+    {
+      "cid": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+      "status": "refuted",
+      "support_total": 0,
+      "support_lost": [],
+      "support_missing": [],
+      "support_unresolved": [],
+      "depth": 0,
+      "witness_path": [
+        "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750"
+      ],
+      "superseded_by": [],
+      "refuted_by": []
+    },
+    {
+      "cid": "2535f1945dffdc86e600f506db62b0a68bafabd2dedbb58f58b91db9ddf37c09",
+      "status": "unknown",
+      "support_total": 2,
+      "support_lost": [
+        "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750"
+      ],
+      "support_missing": [
+        "0000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "support_unresolved": [],
+      "depth": 1,
+      "witness_path": [
+        "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+        "2535f1945dffdc86e600f506db62b0a68bafabd2dedbb58f58b91db9ddf37c09"
+      ],
+      "superseded_by": [],
+      "refuted_by": []
+    },
+    {
+      "cid": "dbe3c931e124a866dd9b6363cabe45ecfa8c2c00d759b3e936bf276303819f95",
+      "status": "unknown",
+      "support_total": 1,
+      "support_lost": [],
+      "support_missing": [],
+      "support_unresolved": [
+        "2535f1945dffdc86e600f506db62b0a68bafabd2dedbb58f58b91db9ddf37c09"
+      ],
+      "depth": 2,
+      "witness_path": [
+        "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+        "2535f1945dffdc86e600f506db62b0a68bafabd2dedbb58f58b91db9ddf37c09",
+        "dbe3c931e124a866dd9b6363cabe45ecfa8c2c00d759b3e936bf276303819f95"
+      ],
+      "superseded_by": [],
+      "refuted_by": []
+    }
+  ],
+  "replacement_boundaries": [],
+  "blocked": [],
+  "projection_mismatch": []
+}

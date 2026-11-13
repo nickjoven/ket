@@ -1,0 +1,134 @@
+{
+  "context_changed": false,
+  "domain_gate": "pass",
+  "eligibility": "eligible",
+  "execution": "completed",
+  "execution_evidence_cid": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fixture": true,
+  "gates": [
+    {
+      "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+      "evidence_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "gate": "quod",
+      "integrity": "verified",
+      "required": true,
+      "verdict": "pass"
+    },
+    {
+      "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+      "evidence_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "gate": "calibration",
+      "integrity": "verified",
+      "required": true,
+      "verdict": "pass"
+    }
+  ],
+  "inputs": [
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "quod_evidence",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "corpus_manifest",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "corpus_shards",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "split_manifest",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "tokenizer",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "config",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "checkpoint",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "code",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "env_lock",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "calibration",
+      "status": "verified"
+    },
+    {
+      "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "index": 0,
+      "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+      "required": true,
+      "role": "metrics",
+      "status": "verified"
+    }
+  ],
+  "logical_run_key": "1111111111111111111111111111111111111111111111111111111111111111",
+  "manifest_cid": "6666666666666666666666666666666666666666666666666666666666666666",
+  "manifest_node_cid": "7777777777777777777777777777777777777777777777777777777777777777",
+  "manifest_policy_cid": "2222222222222222222222222222222222222222222222222222222222222222",
+  "original_context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+  "policy_cid": "2222222222222222222222222222222222222222222222222222222222222222",
+  "reasons": [],
+  "requested_context": {
+    "corpus_manifest_cid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "gate_impl_cid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "mathlib_pin": "synthetic-no-lean",
+    "split_manifest_cid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tokenizer_cid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "requested_context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+  "run_id": "synthetic-run-1",
+  "schema": "qkl.assessment/v1",
+  "schema_version": 1
+}

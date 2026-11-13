@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+  "nodes": {
+    "retracted-ground": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+    "independent-ground": "2cf58e7c9fb988462f9769b04d2a6418b1929fcf9509165bf3c912e549d7fc9d",
+    "left": "9337fa119c676a6b197760d7b819486613b15d2cfa089d3856e73bf6d9260585",
+    "right": "7b84425a1020b722d278c7bc8d6ea5fd83d023c19016d43449b18248e0db8ff7",
+    "diamond": "c02f693ec4356bcb9f0f247727e3e08a863988b0421d456712ac7e7b7c382c87",
+    "partly-supported": "bbfcf7bd5b961e6a4b10ee63b2d71df730ecc01d3f9b00040d5ce006e7babd8c",
+    "child-of-weakened": "be9f580b65ecb450cca00a1025dc13bb3155e13067452bc166132e3e8e129c73",
+    "superseded": "08c8388fac72a85a7b204fab85ecbcec2a8090be11c3d7b51e005e101a0c592f",
+    "behind-boundary": "ec1c2a964349832cf857c4377522c745fe5fc825fdbc251e6d94260834868623",
+    "replacement": "b54e7565c95fb7c8c589ac4bda0c03f2bde93d066cca9a1783d7eb9ea891c062",
+    "notice": "b9d9ece14ff75561f26d737d3781fc523cecd476f87f21869cceed26ec971782",
+    "proposal": "0408c6ff58719f503204df2fdc3d34189bbb0f7ebd644fff2935da1ac9412fab"
+  },
+  "expected": {
+    "retracted-ground": "refuted",
+    "left": "invalidated",
+    "right": "invalidated",
+    "diamond": "invalidated",
+    "partly-supported": "weakened",
+    "child-of-weakened": "intact",
+    "superseded": "invalidated"
+  },
+  "expected_absent": [
+    "independent-ground",
+    "behind-boundary",
+    "replacement",
+    "notice",
+    "proposal"
+  ],
+  "external_references": {}
+}

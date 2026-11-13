@@ -1,0 +1,65 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/projection-receipt.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "dolt_commit": {
+      "pattern": "^[0-9a-v]{32}$",
+      "type": "string"
+    },
+    "dolt_format": {
+      "const": "dolt-hash32"
+    },
+    "fixture": {
+      "const": true
+    },
+    "projected_tables": {
+      "items": {
+        "enum": [
+          "dag_nodes",
+          "dag_edges"
+        ]
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "query": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "run_manifest_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_manifest_node_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema": {
+      "const": "qkl.projection-receipt/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "verification_evidence_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "run_manifest_cid",
+    "run_manifest_node_cid",
+    "dolt_commit",
+    "dolt_format",
+    "verification_evidence_cid",
+    "projected_tables",
+    "query"
+  ],
+  "title": "qkl1 projection-receipt",
+  "type": "object"
+}

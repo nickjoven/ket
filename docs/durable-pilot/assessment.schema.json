@@ -1,0 +1,128 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/assessment.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "context_changed": {
+      "type": "boolean"
+    },
+    "domain_gate": {
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "eligibility": {
+      "enum": [
+        "eligible",
+        "blocked",
+        "unknown",
+        "needs_revalidation"
+      ]
+    },
+    "execution": {
+      "enum": [
+        "pending",
+        "running",
+        "interrupted",
+        "completed",
+        "failed"
+      ]
+    },
+    "execution_evidence_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fixture": {
+      "const": true
+    },
+    "gates": {
+      "items": {
+        "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/gate_check"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/input_check"
+      },
+      "minItems": 11,
+      "type": "array"
+    },
+    "logical_run_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_node_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_policy_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "original_context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "requested_context": {
+      "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/context"
+    },
+    "requested_context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema": {
+      "const": "qkl.assessment/v1"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "run_id",
+    "logical_run_key",
+    "manifest_cid",
+    "manifest_node_cid",
+    "manifest_policy_cid",
+    "policy_cid",
+    "original_context_cid",
+    "requested_context_cid",
+    "requested_context",
+    "context_changed",
+    "execution",
+    "execution_evidence_cid",
+    "inputs",
+    "gates",
+    "domain_gate",
+    "eligibility",
+    "reasons"
+  ],
+  "title": "qkl1 assessment",
+  "type": "object"
+}

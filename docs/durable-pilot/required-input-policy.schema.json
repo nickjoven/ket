@@ -1,0 +1,72 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/required-input-policy.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "alternative_justifications": {
+      "const": "unsupported"
+    },
+    "fixture": {
+      "const": true
+    },
+    "gate_context": {
+      "const": "must_match_manifest_context"
+    },
+    "historical_failures_terminal": {
+      "const": true
+    },
+    "precedence": {
+      "const": [
+        "required_gate_fail",
+        "required_unknown",
+        "execution_not_completed",
+        "context_or_policy_changed",
+        "eligible"
+      ]
+    },
+    "required_gates": {
+      "const": [
+        "quod",
+        "calibration"
+      ]
+    },
+    "required_roles": {
+      "const": [
+        "quod_evidence",
+        "corpus_manifest",
+        "corpus_shards",
+        "split_manifest",
+        "tokenizer",
+        "config",
+        "checkpoint",
+        "code",
+        "env_lock",
+        "calibration",
+        "metrics"
+      ]
+    },
+    "schema": {
+      "const": "qkl.required-input-policy/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "semantics": {
+      "const": "all_required"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "semantics",
+    "required_roles",
+    "required_gates",
+    "precedence",
+    "historical_failures_terminal",
+    "alternative_justifications",
+    "gate_context"
+  ],
+  "title": "qkl1 required-input-policy",
+  "type": "object"
+}

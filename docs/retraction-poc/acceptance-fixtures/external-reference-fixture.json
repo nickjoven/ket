@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "seed": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+  "nodes": {
+    "retracted-ground": "04a8dd28c0a072b26625a1add4acd0aed590290768bf4285aeb1a57477158750",
+    "paper-with-external-reference": "9447ea69b4e9a95b14d7b92b42b7181823c5d77d96952fba52b3ac6a23054470",
+    "child-of-unresolved": "bce047cc339a493e047bee56df43c48f60891f5fa011d23622e92aac1e668b58"
+  },
+  "expected": {
+    "retracted-ground": "refuted",
+    "paper-with-external-reference": "unknown",
+    "child-of-unresolved": "unknown"
+  },
+  "expected_absent": [],
+  "external_references": {
+    "non_dag_blob": "cc8dc169ee5c4c16bfbafbfce7c90e12f10da515007f71d7a32c5bfeb82b4f14"
+  }
+}

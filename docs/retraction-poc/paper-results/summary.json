@@ -1,0 +1,254 @@
+{
+  "capture_manifest_sha256": "3b8fee0b018faadb39b7dae8565e673a27093196837c2c0a5a997f0ee36ab121",
+  "captured_at": "2026-11-04T07:09:28.282099+00:00",
+  "cohort_papers": 175,
+  "cycle_cuts": [
+    {
+      "child": "https://openalex.org/W2026581385",
+      "parent": "https://openalex.org/W1510563341",
+      "reason": "citation_cycle"
+    },
+    {
+      "child": "https://openalex.org/W2063218235",
+      "parent": "https://openalex.org/W2062387197",
+      "reason": "citation_cycle"
+    },
+    {
+      "child": "https://openalex.org/W2892840888",
+      "parent": "https://openalex.org/W2618041134",
+      "reason": "citation_cycle"
+    }
+  ],
+  "graph_counts": {
+    "external_edges": 9404,
+    "in_sample_edges": 1647
+  },
+  "model": "conservative",
+  "replay_map_sha256": "afdf9d999ebe65516b2b2544d55bc6e56df21ddc60151d41524753651ead3bd7",
+  "schema_version": 1,
+  "seeds": [
+    {
+      "blocked_count": 0,
+      "complete": false,
+      "depth_max": 1,
+      "depth_min": 1,
+      "doi": "https://doi.org/10.1126/science.1179052",
+      "downstream_papers": 176,
+      "examples": [
+        {
+          "cid": "b1047fd5d92776b501821b75008ff98c40b4a9e13c95eb0a9eb21bd41ec923a7",
+          "depth": 1,
+          "doi": "https://doi.org/10.1073/pnas.1012930107",
+          "source_id": "https://openalex.org/W2156452911",
+          "status": "invalidated",
+          "support_lost": [
+            "62b44533b36a6dde2e82d61c49e01f334d431edfdf30ff060a84b2fefd342873",
+            "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547"
+          ],
+          "support_total": 2,
+          "title": "Possible widespread low-level occurrence of murine leukemia virus-related gene sequences in humans",
+          "witness_path": [
+            "62b44533b36a6dde2e82d61c49e01f334d431edfdf30ff060a84b2fefd342873",
+            "b1047fd5d92776b501821b75008ff98c40b4a9e13c95eb0a9eb21bd41ec923a7"
+          ]
+        },
+        {
+          "cid": "0065f4350eb1be95e0932d5f2d1d1b7a22d133767161221b0be1e9d403b5f3b9",
+          "depth": 1,
+          "doi": "https://doi.org/10.1016/j.chom.2010.11.013",
+          "source_id": "https://openalex.org/W2009651532",
+          "status": "unknown",
+          "support_lost": [
+            "62b44533b36a6dde2e82d61c49e01f334d431edfdf30ff060a84b2fefd342873",
+            "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547"
+          ],
+          "support_total": 10,
+          "title": "Mother's Milk and Intrinsic Immunity",
+          "witness_path": [
+            "62b44533b36a6dde2e82d61c49e01f334d431edfdf30ff060a84b2fefd342873",
+            "0065f4350eb1be95e0932d5f2d1d1b7a22d133767161221b0be1e9d403b5f3b9"
+          ]
+        }
+      ],
+      "frontier_count": 0,
+      "missing_count": 5747,
+      "notices": [
+        {
+          "assertions": [
+            {
+              "DOI": "10.1126/science.1179052",
+              "label": "Retraction",
+              "record-id": "492",
+              "source": "retraction-watch",
+              "type": "retraction",
+              "updated": {
+                "date-parts": [
+                  [
+                    2011,
+                    12,
+                    23
+                  ]
+                ],
+                "date-time": "2011-12-23T00:00:00Z",
+                "timestamp": 1324598400000
+              }
+            }
+          ],
+          "cid": "2ae853bbaa4d88b3012e327e0234f07f2d6417347eba4677de0d47ec7c6a7876",
+          "notice_doi": "10.1126/science.334.6063.1636-a",
+          "seed": "https://openalex.org/W2160675481"
+        }
+      ],
+      "recorded_refuted_papers": [
+        {
+          "cid": "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547",
+          "source_id": "https://openalex.org/W2026087575"
+        }
+      ],
+      "report_sha256": "4f1b7ca6e9b3e47c962797b4704564863aa5ac287ea79f824f90c24060b567d8",
+      "seed": "https://openalex.org/W2160675481",
+      "seed_cid": "62b44533b36a6dde2e82d61c49e01f334d431edfdf30ff060a84b2fefd342873",
+      "statuses": {
+        "invalidated": 1,
+        "refuted": 1,
+        "unknown": 174
+      },
+      "title": "Detection of an Infectious Retrovirus, XMRV, in Blood Cells of Patients with Chronic Fatigue Syndrome",
+      "undiscovered_count": 0
+    },
+    {
+      "blocked_count": 0,
+      "complete": false,
+      "depth_max": 1,
+      "depth_min": 1,
+      "doi": "https://doi.org/10.1073/pnas.1006901107",
+      "downstream_papers": 175,
+      "examples": [
+        {
+          "cid": "0065f4350eb1be95e0932d5f2d1d1b7a22d133767161221b0be1e9d403b5f3b9",
+          "depth": 1,
+          "doi": "https://doi.org/10.1016/j.chom.2010.11.013",
+          "source_id": "https://openalex.org/W2009651532",
+          "status": "unknown",
+          "support_lost": [
+            "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547"
+          ],
+          "support_total": 10,
+          "title": "Mother's Milk and Intrinsic Immunity",
+          "witness_path": [
+            "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547",
+            "0065f4350eb1be95e0932d5f2d1d1b7a22d133767161221b0be1e9d403b5f3b9"
+          ]
+        }
+      ],
+      "frontier_count": 0,
+      "missing_count": 5747,
+      "notices": [
+        {
+          "assertions": [
+            {
+              "DOI": "10.1073/pnas.1006901107",
+              "label": "Retraction",
+              "record-id": "5657",
+              "source": "retraction-watch",
+              "type": "retraction",
+              "updated": {
+                "date-parts": [
+                  [
+                    2011,
+                    12,
+                    27
+                  ]
+                ],
+                "date-time": "2011-12-27T00:00:00Z",
+                "timestamp": 1324944000000
+              }
+            },
+            {
+              "DOI": "10.1073/pnas.1006901107",
+              "label": "Retraction",
+              "source": "publisher",
+              "type": "retraction",
+              "updated": {
+                "date-parts": [
+                  [
+                    2011,
+                    12,
+                    21
+                  ]
+                ],
+                "date-time": "2011-12-21T00:00:00Z",
+                "timestamp": 1324425600000
+              }
+            }
+          ],
+          "cid": "5e6b3a0c2e4b2c274e0b3748806fc5d92f0b2d011d7e0d080e57ab96bdda4815",
+          "notice_doi": "10.1073/pnas.1119641109",
+          "seed": "https://openalex.org/W2026087575"
+        }
+      ],
+      "recorded_refuted_papers": [],
+      "report_sha256": "b0495d0a78d59b2a0536e0dc93ca19c30b926a6aaf209c6d03551f2926fe642d",
+      "seed": "https://openalex.org/W2026087575",
+      "seed_cid": "d3b75d2c8891917c20faf731a0896b52c49365fb6e533af61341e206f92a2547",
+      "statuses": {
+        "unknown": 175
+      },
+      "title": "RETRACTED: Detection of MLV-related virus gene sequences in blood of patients with chronic fatigue syndrome and healthy blood donors",
+      "undiscovered_count": 0
+    }
+  ],
+  "sources": [
+    {
+      "bytes": 522926,
+      "file": "openalex-cohort.json",
+      "sha256": "de2ab9d69342cf9fb4ba4db6e319183d30dbb6eeca737f6a9e569c39090c130a",
+      "status": 200,
+      "url": "https://api.openalex.org/works?filter=cites%3AW2160675481%2Ccites%3AW2026087575&per_page=200&sort=publication_date%3Aasc&select=id%2Cdoi%2Ctitle%2Cpublication_date%2Cpublication_year%2Creferenced_works%2Cis_retracted%2Cprimary_topic"
+    },
+    {
+      "bytes": 1963,
+      "file": "openalex-W2160675481.json",
+      "sha256": "3269671e7e1b4844500472646bf68917e4964242f56fa8c65dceb46ba696888c",
+      "status": 200,
+      "url": "https://api.openalex.org/works/W2160675481?select=id,doi,title,publication_date,publication_year,referenced_works,is_retracted,primary_topic"
+    },
+    {
+      "bytes": 10197,
+      "file": "crossref-W2160675481-original.json",
+      "sha256": "df029017815d54ea9e7ab892631da6ce710d78b59441c5ce658d6369969527ec",
+      "status": 200,
+      "url": "https://api.crossref.org/works/10.1126%2Fscience.1179052"
+    },
+    {
+      "bytes": 4763,
+      "file": "crossref-W2160675481-updates.json",
+      "sha256": "99ac40342c89cdfe01613f95f28cfdd10a0c39cfb292b84b2228eee68b55b811",
+      "status": 200,
+      "url": "https://api.crossref.org/works?filter=updates%3A10.1126%2Fscience.1179052&rows=100"
+    },
+    {
+      "bytes": 1681,
+      "file": "openalex-W2026087575.json",
+      "sha256": "26bd957e91135bb822934c5d7d78f85355479104e42d136913cfd0c27d34581a",
+      "status": 200,
+      "url": "https://api.openalex.org/works/W2026087575?select=id,doi,title,publication_date,publication_year,referenced_works,is_retracted,primary_topic"
+    },
+    {
+      "bytes": 8993,
+      "file": "crossref-W2026087575-original.json",
+      "sha256": "f5f637cc0f8f7b91b55d0d83f62c57ee02cdf65882b158a116d364c9be6e9f7c",
+      "status": 200,
+      "url": "https://api.crossref.org/works/10.1073%2Fpnas.1006901107"
+    },
+    {
+      "bytes": 5060,
+      "file": "crossref-W2026087575-updates.json",
+      "sha256": "6d7edccb800d7446d965da22b84e7d07163f7f0642112e39aa2347e6fef555fd",
+      "status": 200,
+      "url": "https://api.crossref.org/works?filter=updates%3A10.1073%2Fpnas.1006901107&rows=100"
+    }
+  ],
+  "total_papers": 177,
+  "unresolved_unique": 5747
+}

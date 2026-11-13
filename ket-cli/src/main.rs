@@ -271,9 +271,8 @@ Examples:
     #[command(long_about = "\
 Start the MCP server on stdin/stdout using JSON-RPC over line-delimited JSON.
 
-Exposes 11 tools: ket_put, ket_get, ket_verify, ket_dag_link,
-ket_dag_lineage, ket_check_drift, ket_query_cdom, ket_store_reasoning,
-ket_create_subtask, ket_get_reasoning, ket_score.
+Exposes CAS, DAG, support-loss, scoring and task tools, including
+ket_invalidated. Use MCP tools/list to discover their current schemas.
 
 Use with Claude or other MCP-capable agents:
   claude --mcp-config ket.json -p 'store a memory'
@@ -726,6 +725,20 @@ command preserves node identity. A plain `dag create` is always a new event."
     Lineage {
         /// Node CID to trace from
         cid: String,
+    },
+    /// Report support lost downstream when this node is treated as refuted
+    Invalidated {
+        /// Full node CID (64 lowercase hexadecimal characters)
+        cid: String,
+        /// Also use recorded refutations inside the downstream closure
+        #[arg(long)]
+        with_recorded_refutations: bool,
+        /// Stop downstream discovery after this many nodes (seed always included)
+        #[arg(long)]
+        max_nodes: Option<usize>,
+        /// Include nodes whose support remains intact
+        #[arg(long)]
+        include_intact: bool,
     },
     /// Check if a file has changed since a CID was recorded
     Drift {
@@ -1583,6 +1596,33 @@ fn cmd_dag(
                     }
                 }
             }
+        }
+        DagAction::Invalidated {
+            cid,
+            with_recorded_refutations,
+            max_nodes,
+            include_intact,
+        } => {
+            use ket_dag::propagate::{invalidated, CasChildIndex, PropagateOptions, SeedScope};
+            if !ket_cas::Cid::from(cid.as_str()).is_well_formed() {
+                return Err("cid must be 64 lowercase hexadecimal characters".into());
+            }
+            // Scan authoritative CAS, so an incomplete SQL projection cannot
+            // silently omit downstream papers or resolution evidence.
+            let index = CasChildIndex::build(&cas)?;
+            let options = PropagateOptions {
+                scope: if with_recorded_refutations {
+                    SeedScope::WithRecordedRefutations
+                } else {
+                    SeedScope::SeedOnly
+                },
+                max_nodes,
+                include_intact,
+            };
+            let report = invalidated(&dag, &index, &ket_cas::Cid::from(cid.as_str()), &options)?;
+            // A single versioned representation keeps CLI, MCP and reports
+            // interoperable; --json is accepted as for other DAG commands.
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         DagAction::Drift { path, cid } => {
             let drifted = dag.check_drift(

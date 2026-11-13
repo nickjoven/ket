@@ -1,0 +1,32 @@
+{
+  "checks": [
+    {
+      "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+      "evidence_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+      "gate_id": "fixture-known-answer",
+      "required": true,
+      "verdict": "pass"
+    }
+  ],
+  "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+  "corpus": {
+    "manifest_cid": "4444444444444444444444444444444444444444444444444444444444444444",
+    "shard_cids": [
+      "4444444444444444444444444444444444444444444444444444444444444444"
+    ]
+  },
+  "fixture": true,
+  "gate_verdict": "pass",
+  "limitation": "Synthetic software fixture; not a Lean proof, numerical result, or scientific validity claim.",
+  "producer": {
+    "adapter_code_cid": "8888888888888888888888888888888888888888888888888888888888888888",
+    "env_lock_cid": "9999999999999999999999999999999999999999999999999999999999999999",
+    "source_commit": "ee85c65422ed1fc673d5df6fcecfe6658657d30a"
+  },
+  "schema": "qkl.quod-evidence/v1",
+  "schema_version": 1,
+  "subject": {
+    "id": "six-row-known-answer",
+    "kind": "synthetic_fixture"
+  }
+}

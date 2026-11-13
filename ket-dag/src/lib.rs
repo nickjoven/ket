@@ -10,6 +10,8 @@
 use ket_cas::{Cid, Store as CasStore};
 use serde::{Deserialize, Serialize};
 
+pub mod propagate;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
     #[error("CAS error: {0}")]

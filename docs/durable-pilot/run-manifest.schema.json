@@ -1,0 +1,294 @@
+{
+  "$id": "https://schemas.ket.local/qkl1/run-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_journal_head_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "context": {
+      "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/context"
+    },
+    "context_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "execution": {
+      "enum": [
+        "pending",
+        "running",
+        "interrupted",
+        "completed",
+        "failed"
+      ]
+    },
+    "fixture": {
+      "const": true
+    },
+    "logical_run_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_cid": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "roles": {
+      "additionalProperties": false,
+      "properties": {
+        "calibration": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "checkpoint": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "code": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "config": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "corpus_manifest": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "corpus_shards": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "env_lock": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "metrics": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "quod_evidence": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "split_manifest": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "tokenizer": {
+          "items": {
+            "allOf": [
+              {
+                "$ref": "https://schemas.ket.local/qkl1/common.schema.json#/$defs/binding"
+              },
+              {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "quod_evidence",
+        "corpus_manifest",
+        "corpus_shards",
+        "split_manifest",
+        "tokenizer",
+        "config",
+        "checkpoint",
+        "code",
+        "env_lock",
+        "calibration",
+        "metrics"
+      ],
+      "type": "object"
+    },
+    "run_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema": {
+      "const": "qkl.run-manifest/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "sealed_timestamp": {
+      "const": "2026-11-04T00:00:00Z"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema",
+    "fixture",
+    "run_id",
+    "logical_run_key",
+    "policy_cid",
+    "context_cid",
+    "context",
+    "execution",
+    "attempt_journal_head_cid",
+    "roles",
+    "sealed_timestamp"
+  ],
+  "title": "qkl1 run-manifest",
+  "type": "object"
+}

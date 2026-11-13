@@ -1,0 +1,120 @@
+{
+  "attempt_journal_head_cid": "0000000000000000000000000000000000000000000000000000000000000000",
+  "context": {
+    "corpus_manifest_cid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "gate_impl_cid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "mathlib_pin": "synthetic-no-lean",
+    "split_manifest_cid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tokenizer_cid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "context_cid": "3333333333333333333333333333333333333333333333333333333333333333",
+  "execution": "completed",
+  "fixture": true,
+  "logical_run_key": "1111111111111111111111111111111111111111111111111111111111111111",
+  "policy_cid": "2222222222222222222222222222222222222222222222222222222222222222",
+  "roles": {
+    "calibration": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "checkpoint": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "code": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "config": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "corpus_manifest": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "corpus_shards": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "env_lock": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "metrics": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "quod_evidence": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "split_manifest": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ],
+    "tokenizer": [
+      {
+        "cid": "4444444444444444444444444444444444444444444444444444444444444444",
+        "kind": "blob",
+        "node_cid": "5555555555555555555555555555555555555555555555555555555555555555",
+        "required": true,
+        "unavailable_reason": null
+      }
+    ]
+  },
+  "run_id": "synthetic-run-1",
+  "schema": "qkl.run-manifest/v1",
+  "schema_version": 1,
+  "sealed_timestamp": "2026-11-04T00:00:00Z"
+}

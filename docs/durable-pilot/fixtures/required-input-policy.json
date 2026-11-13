@@ -1,0 +1,33 @@
+{
+  "alternative_justifications": "unsupported",
+  "fixture": true,
+  "gate_context": "must_match_manifest_context",
+  "historical_failures_terminal": true,
+  "precedence": [
+    "required_gate_fail",
+    "required_unknown",
+    "execution_not_completed",
+    "context_or_policy_changed",
+    "eligible"
+  ],
+  "required_gates": [
+    "quod",
+    "calibration"
+  ],
+  "required_roles": [
+    "quod_evidence",
+    "corpus_manifest",
+    "corpus_shards",
+    "split_manifest",
+    "tokenizer",
+    "config",
+    "checkpoint",
+    "code",
+    "env_lock",
+    "calibration",
+    "metrics"
+  ],
+  "schema": "qkl.required-input-policy/v1",
+  "schema_version": 1,
+  "semantics": "all_required"
+}
