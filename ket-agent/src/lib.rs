@@ -23,6 +23,12 @@ pub enum AgentError {
     InvocationFailed(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("task {task} is {status}; it was not run (pass --force to run it anyway)")]
+    NotRunnable { task: String, status: String },
+    #[error("Agent timed out: {0}")]
+    TimedOut(String),
+    #[error("Interrupted: {0}")]
+    Interrupted(String),
     #[error("Max subtask depth ({0}) exceeded")]
     MaxDepth(u32),
     #[error("Task context unavailable: {0}")]
@@ -121,6 +127,155 @@ fn bounded(s: &str, max: usize) -> String {
     )
 }
 
+/// How long an agent's output pipes are read after it has exited, and how
+/// long a killed agent is waited for. Output written before the exit is
+/// already in the pipe and is read at once; the grace only bounds a pipe
+/// that a process the agent left behind is still holding open.
+const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How a run is allowed to proceed.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Kill the agent and fail the task (phase `timeout`) if it is still
+    /// running after this long. `None` waits for as long as it takes.
+    pub timeout: Option<std::time::Duration>,
+    /// Run a task that is already `running` or `done`. Without it such a
+    /// task is refused, so concurrent runs cannot race on one task and a
+    /// finished task is not silently run again.
+    pub force: bool,
+}
+
+/// Sleep until `deadline`; never completes when there is none.
+async fn at(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves with the name of the first SIGINT or SIGTERM delivered to this
+/// process. The handlers are installed when this is called, not when the
+/// returned future is first polled. If they cannot be installed the future
+/// never resolves and the run proceeds without interrupt handling.
+fn shutdown_signal() -> impl std::future::Future<Output = &'static str> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let int = signal(SignalKind::interrupt());
+        let term = signal(SignalKind::terminate());
+        async move {
+            match (int, term) {
+                (Ok(mut int), Ok(mut term)) => tokio::select! {
+                    _ = int.recv() => "SIGINT",
+                    _ = term.recv() => "SIGTERM",
+                },
+                _ => std::future::pending().await,
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "Ctrl-C",
+            Err(_) => std::future::pending().await,
+        }
+    }
+}
+
+/// Watches for SIGINT/SIGTERM for the length of one run.
+///
+/// The watcher is its own task, so on a multi-threaded runtime it records a
+/// signal even while the run is inside a blocking store call (waiting for
+/// the Dolt lock, say), where the run can then ask `signalled()` without
+/// awaiting. Once the handlers are installed an interrupt no longer ends
+/// ket by default; every phase of `run_task` either checks here or is a
+/// bounded recording step that should finish anyway.
+struct Shutdown {
+    rx: tokio::sync::watch::Receiver<Option<&'static str>>,
+    watcher: tokio::task::JoinHandle<()>,
+}
+
+impl Shutdown {
+    fn install() -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let signal = shutdown_signal();
+        let watcher = tokio::spawn(async move {
+            let name = signal.await;
+            let _ = tx.send(Some(name));
+        });
+        Shutdown { rx, watcher }
+    }
+
+    /// The signal received so far, if any. Never blocks.
+    fn signalled(&self) -> Option<&'static str> {
+        *self.rx.borrow()
+    }
+
+    /// Resolves with the signal's name once one has been received.
+    async fn wait(&mut self) -> &'static str {
+        match self.rx.wait_for(|s| s.is_some()).await {
+            Ok(seen) => seen.unwrap_or("a signal"),
+            Err(_) => std::future::pending().await,
+        }
+    }
+}
+
+impl Drop for Shutdown {
+    fn drop(&mut self) {
+        self.watcher.abort();
+    }
+}
+
+/// The agent's process group. The agent is started as the leader of its own
+/// group, so whatever it launched (a wrapper's real binary, tool
+/// subprocesses) can be stopped with it: killing only the direct child
+/// would leave those running after the task is recorded as killed.
+///
+/// While armed, dropping this kills the group, which covers a run that is
+/// dropped or panics. It is disarmed once the agent has exited by itself:
+/// anything it deliberately left behind is then not ket's to kill.
+struct AgentGroup {
+    pgid: Option<u32>,
+}
+
+impl AgentGroup {
+    fn signal(&self, hard: bool) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            let sig = if hard { libc::SIGKILL } else { libc::SIGTERM };
+            // SAFETY: kill(2) with a negative pid signals a process group;
+            // it has no memory-safety preconditions.
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), sig);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = hard;
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+
+    /// Stop the group: ask (SIGTERM), give the agent a moment to exit, then
+    /// kill whatever is left. Both waits are bounded, so a process that
+    /// cannot be reaped never turns a recorded failure into a hang.
+    async fn stop(&mut self, child: &mut tokio::process::Child) {
+        self.signal(false);
+        let _ = tokio::time::timeout(OUTPUT_DRAIN_GRACE, child.wait()).await;
+        self.signal(true);
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(OUTPUT_DRAIN_GRACE, child.wait()).await;
+        self.disarm();
+    }
+}
+
+impl Drop for AgentGroup {
+    fn drop(&mut self) {
+        self.signal(true);
+    }
+}
+
 /// The agent orchestrator.
 pub struct Orchestrator<'a> {
     cas: &'a CasStore,
@@ -201,8 +356,16 @@ impl<'a> Orchestrator<'a> {
     /// blob that does not parse as a node counts as "not a node"; a read
     /// error is never mistaken for one.
     pub fn task_context(&self, task_id: &str) -> Result<Option<Vec<u8>>, AgentError> {
-        let Some(ctx) = self.db.task_context_cid(task_id)? else {
-            return Ok(None);
+        // Called once the task is claimed, so a lookup failure is a failure
+        // of this run and is recorded like any other: returning it bare
+        // would leave the task `running` with nothing running.
+        let ctx = match self.db.task_context_cid(task_id) {
+            Ok(Some(ctx)) => ctx,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                let reason = format!("the task's context could not be looked up: {e}");
+                return Err(self.fail_task(task_id, "context", &reason, e.into()));
+            }
         };
         let cid = Cid::from(ctx.as_str());
         let resolved = self
@@ -228,17 +391,23 @@ impl<'a> Orchestrator<'a> {
     }
 
     /// Run a task by spawning the assigned agent.
+    ///
+    /// Every run ends in a recorded state. Once the task has been claimed
+    /// (`running`), each way out — a launch failure, a nonzero exit, a
+    /// timeout, SIGINT/SIGTERM delivered to ket, a result that cannot be
+    /// stored — moves it to `failed` with the phase and reason in
+    /// `tasks.meta`. The one exception cannot be closed from inside the
+    /// process: SIGKILL of ket itself leaves the task `running`, and a later
+    /// `run` refuses it until `force` reclaims it.
     pub async fn run_task(
         &self,
         task_id: &str,
         prompt: &str,
         agent_name: &str,
+        opts: &RunOptions,
     ) -> Result<Cid, AgentError> {
-        // Refuse an unknown task or agent instead of running and minting an
-        // orphan node.
-        if !self.db.task_exists(task_id)? {
-            return Err(AgentError::NotFound(format!("task {task_id}")));
-        }
+        // Refuse an unknown agent instead of running and minting an orphan
+        // node. (An unknown task is refused by the claim, below.)
         if !self.agent_is_known(agent_name)? {
             return Err(AgentError::NotFound(format!(
                 "agent {agent_name} (register it first, or use a preset: claude/codex/copilot)"
@@ -290,22 +459,57 @@ impl<'a> Orchestrator<'a> {
                 }
         };
 
-        // The context is resolved last, once the run is known to go ahead:
-        // a context that cannot be read fails the task (`task_context`), and
-        // a run refused above for an unknown task, an unknown agent or no
-        // program must leave the task as it was, not rewrite it to `failed`.
+        // Listen for SIGINT/SIGTERM before the task reads `running`, so there
+        // is no window in which an interrupt ends ket with the task claimed.
+        let mut shutdown = Shutdown::install();
+
+        // Claim the task: check its status and mark it `running` in one
+        // locked step. A task another run holds (or one that already
+        // finished) is refused and left exactly as it was; two `ket run`s
+        // cannot both start it. The claim also clears the previous attempt's
+        // failure reason and result, which belong to that attempt.
+        //
+        // The claim can wait on the store lock behind another ket process.
+        // An interrupt during that wait withdraws the claim once the lock is
+        // held: the task is left untouched, as if ket had simply exited.
+        let claim = self
+            .db
+            .claim_task_for_run(task_id, opts.force, &|| shutdown.signalled().is_some())?;
+        match claim {
+            ket_sql::RunClaim::Claimed { .. } => {}
+            ket_sql::RunClaim::Aborted => {
+                return Err(AgentError::Interrupted(format!(
+                "ket received {} before task {task_id} was started; the task was left as it was",
+                shutdown.signalled().unwrap_or("a signal")
+            )))
+            }
+            ket_sql::RunClaim::NotFound => {
+                return Err(AgentError::NotFound(format!("task {task_id}")))
+            }
+            ket_sql::RunClaim::Refused { status } => {
+                return Err(AgentError::NotRunnable {
+                    task: task_id.to_string(),
+                    status,
+                })
+            }
+        }
+
+        // From here on the task reads `running`, so every exit that is not
+        // success goes through `fail_task` and records why. The context is
+        // resolved after the claim: a context that cannot be read fails the
+        // task (`task_context`), and only the run that holds the task may
+        // rewrite its status.
         let context = self.task_context(task_id)?;
         let context = context.as_deref();
 
-        // From here on the task reads `running`, so every exit that is not
-        // success goes through `fail_task` and records why.
-        self.db
-            .update_task_status(task_id, TaskStatus::Running.as_str())?;
-        // A retry starts clean: the reason a previous attempt failed belongs
-        // to that attempt, not to this one's outcome.
-        if let Err(e) = self.db.clear_task_meta(task_id) {
-            let reason = format!("could not clear the previous attempt's meta: {e}");
-            return Err(self.fail_task(task_id, "launch", &reason, e.into()));
+        // An interrupt that arrived since the claim: do not start an agent
+        // only to kill it. (The yield lets the watcher run on a
+        // single-threaded runtime, where it could not during the calls above.)
+        tokio::task::yield_now().await;
+        if let Some(signal) = shutdown.signalled() {
+            let reason = format!("ket received {signal} before {program} was started");
+            let err = AgentError::Interrupted(reason.clone());
+            return Err(self.fail_task(task_id, "interrupted", &reason, err));
         }
 
         // Spawn the process. A launch failure (missing executable, permission
@@ -328,7 +532,15 @@ impl<'a> Orchestrator<'a> {
                 std::process::Stdio::null()
             })
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // If this future is dropped (a panic, a caller's own timeout),
+            // the agent does not outlive the run that was tracking it.
+            .kill_on_drop(true);
+        // Its own process group: the whole tree under the agent can be
+        // stopped with it, and a terminal Ctrl-C reaches ket alone, so it is
+        // ket that decides (and records) how the run ends.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -336,6 +548,9 @@ impl<'a> Orchestrator<'a> {
                 let err = AgentError::InvocationFailed(reason.clone());
                 return Err(self.fail_task(task_id, "launch", &reason, err));
             }
+        };
+        let mut group = AgentGroup {
+            pgid: if cfg!(unix) { child.id() } else { None },
         };
         // Feed stdin while collecting output, so neither side can fill a pipe
         // and block the other. An agent that exits without reading all of its
@@ -353,35 +568,116 @@ impl<'a> Orchestrator<'a> {
             }
             Ok(())
         };
-        let (fed, output) = tokio::join!(feed, child.wait_with_output());
-        let output = match output {
-            Ok(output) => output,
-            Err(e) => {
-                let reason = format!("{program}: waiting for it failed: {e}");
-                let err = AgentError::InvocationFailed(reason.clone());
-                return Err(self.fail_task(task_id, "exit", &reason, err));
+        tokio::pin!(feed);
+        let mut stdout = child.stdout.take().expect("stdout was piped");
+        let mut stderr = child.stderr.take().expect("stderr was piped");
+        let (mut out, mut errout) = (Vec::new(), Vec::new());
+        let (mut out_open, mut err_open) = (true, true);
+        // `None` until the feed finishes; it is abandoned once the agent has
+        // exited. A background process the agent left behind can hold the
+        // pipe open without ever reading it, and waiting on that write would
+        // hang `ket run` for as long as that process lives.
+        let mut fed: Option<std::io::Result<()>> = None;
+        let mut status: Option<std::process::ExitStatus> = None;
+        // A timeout too large to be a point in time is no deadline at all
+        // (plain `+` would panic here, after the task was claimed).
+        let deadline = opts
+            .timeout
+            .and_then(|t| tokio::time::Instant::now().checked_add(t));
+        // Set when the agent exits: how long its output pipes may stay open
+        // after that (the same left-behind process can hold those too).
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
+
+        let stopped: Option<(&str, String)> = loop {
+            if status.is_some() && !out_open && !err_open {
+                break None;
+            }
+            use tokio::io::AsyncReadExt;
+            // Polled in order: an interrupt or the timeout is never lost to
+            // an exit that became ready in the same instant, and the drain
+            // deadline cannot be starved by a pipe that is always readable.
+            tokio::select! {
+                biased;
+                signal = shutdown.wait(), if status.is_none() => {
+                    break Some((
+                        "interrupted",
+                        format!("ket received {signal} while {program} was running; the agent was killed"),
+                    ));
+                }
+                _ = at(deadline), if deadline.is_some() && status.is_none() => {
+                    let limit = opts.timeout.unwrap_or_default();
+                    break Some((
+                        "timeout",
+                        format!("{program} was still running after {limit:?} and was killed"),
+                    ));
+                }
+                _ = at(drain_deadline), if drain_deadline.is_some() => break None,
+                exited = child.wait(), if status.is_none() => match exited {
+                    Ok(s) => {
+                        status = Some(s);
+                        // It ended by itself: what it left behind is its own.
+                        group.disarm();
+                        drain_deadline = Some(tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE);
+                    }
+                    Err(e) => break Some(("exit", format!("{program}: waiting for it failed: {e}"))),
+                },
+                r = &mut feed, if fed.is_none() && status.is_none() => fed = Some(r),
+                n = stdout.read_buf(&mut out), if out_open => {
+                    out_open = matches!(n, Ok(n) if n > 0);
+                }
+                n = stderr.read_buf(&mut errout), if err_open => {
+                    err_open = matches!(n, Ok(n) if n > 0);
+                }
             }
         };
-        if let Err(e) = fed {
-            let reason = format!("{program}: could not write the task context to its stdin: {e}");
-            let err = AgentError::InvocationFailed(reason.clone());
-            return Err(self.fail_task(task_id, "launch", &reason, err));
+        if let Some((phase, reason)) = stopped {
+            // Stop the agent, and everything it started, and reap it.
+            group.stop(&mut child).await;
+            let err = match phase {
+                "timeout" => AgentError::TimedOut(reason.clone()),
+                "interrupted" => AgentError::Interrupted(reason.clone()),
+                _ => AgentError::InvocationFailed(reason.clone()),
+            };
+            return Err(self.fail_task(task_id, phase, &reason, err));
         }
+        let status = status.expect("the loop only ends without a stop once the agent has exited");
 
-        let result = if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let reason = format!("{program} failed ({}): {stderr}", output.status);
+        // The agent's own outcome comes first: its exit status and stderr
+        // are what happened. A failure to deliver the context is reported
+        // alongside, never instead.
+        let stdin_error = fed.and_then(Result::err).map(|e| {
+            format!("{program}: could not write the whole task context to its stdin: {e}")
+        });
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&errout);
+            let mut reason = format!("{program} failed ({status}): {stderr}");
+            if let Some(note) = &stdin_error {
+                reason.push_str(&format!("\n(also: {note})"));
+            }
             let err = AgentError::InvocationFailed(reason.clone());
             return Err(self.fail_task(task_id, "exit", &reason, err));
-        };
+        }
+        let result = String::from_utf8_lossy(&out).into_owned();
 
         // The agent finished; storing its result is a separate step, and a
         // storage failure must not read as "still running" either. The task
         // fails with a reason that says the output existed.
         match self.store_result(task_id, &result, agent_name) {
-            Ok(cid) => Ok(cid),
+            Ok(cid) => {
+                // The agent succeeded, so the task is `done`; but it may
+                // have worked from a partial context, and that is kept on
+                // the row rather than dropped.
+                if let Some(note) = stdin_error {
+                    eprintln!("warning: {note}");
+                    let meta = serde_json::json!({
+                        "warning": { "phase": "stdin", "reason": bounded(&note, MAX_REASON_BYTES) }
+                    });
+                    if let Err(e) = self.db.set_task_meta(task_id, &meta.to_string()) {
+                        eprintln!("warning: could not record that on the task: {e}");
+                    }
+                }
+                Ok(cid)
+            }
             Err(e) => {
                 let reason = format!("agent exited 0 but its result could not be stored: {e}");
                 Err(self.fail_task(task_id, "store", &reason, e))

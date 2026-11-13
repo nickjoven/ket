@@ -160,7 +160,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 ### Tasks & Agents
 - `ket task create <title>` (`--by`, `--context <cid>`, `--parent <id>`) / `ket task ls` / `ket task show <id>` / `ket task assign <id> <agent>`
 - `ket agent register <name>` / `ket agent ls` — presets claude/codex/copilot, or any name with `--command "<cli> ..."` (`--model` optional)
-- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task
+- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task. `--timeout <seconds>` bounds it; an interrupted, timed-out or failed run leaves the task `failed` with the reason. A `running` or `done` task is refused unless `--force`
 
 ### Code Intelligence
 - `ket scan <path>` — Index symbols (Rust/Python)
@@ -204,16 +204,16 @@ Ket exposes 19 tools over MCP (Model Context Protocol) for agent integration.
 | Tool | What it does | Needs Dolt? |
 |------|-------------|-------------|
 | `ket_put` | Store content, get CID | No |
-| `ket_get` | Retrieve content by CID | No |
+| `ket_get` | Retrieve content by CID, re-hashed on read (`verified`) | No |
 | `ket_verify` | Check CID integrity | No |
 | `ket_dag_link` | Create DAG node with provenance | No |
-| `ket_dag_lineage` | Trace ancestry chain | No |
+| `ket_dag_lineage` | Trace ancestry with edge kinds, saturation and any `missing` ancestors | No |
 | `ket_dag_ls` | List/filter DAG nodes | No |
-| `ket_check_drift` | Detect file changes | No |
+| `ket_check_drift` | Detect file changes (expected vs actual CID) | No |
 | `ket_search` | Full-text content search | No |
 | `ket_status` | Substrate health dashboard | No (enhanced with Dolt) |
 | `ket_store_reasoning` | Persist reasoning as DAG node | No |
-| `ket_get_reasoning` | Retrieve reasoning with context | No |
+| `ket_get_reasoning` | Retrieve verified reasoning with its parents, edge kinds and saturation | No |
 | `ket_query_cdom` | Search code symbols | No |
 | `ket_schema_stats` | Check schema dedup effectiveness | No |
 | `decay_status` | Decay-adjusted activation for a node | No |

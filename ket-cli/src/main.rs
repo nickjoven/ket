@@ -182,9 +182,16 @@ Execute a task by spawning the assigned agent as a subprocess.
 The agent's output is stored as a Reasoning DAG node.
 Requires the agent CLI to be installed (e.g., 'claude' for Claude).
 
+A run always ends in a recorded state: `done` with a result, or `failed`
+with the phase and reason in the task's meta (`ket task show <id>`). That
+includes a timeout and Ctrl-C/SIGTERM, which kill the agent first. A task
+that is `running` or `done` is refused unless --force is given.
+
 Examples:
   ket run <task-id> --agent claude --prompt 'Review this code'
-  ket run <task-id> --agent codex")]
+  ket run <task-id> --agent codex
+  ket run <task-id> --timeout 600
+  ket run <task-id> --force          Reclaim a task left `running`")]
     Run {
         /// Task ID to run
         task_id: String,
@@ -196,6 +203,14 @@ Examples:
         /// (default: 'Complete the assigned task')
         #[arg(long)]
         prompt: Option<String>,
+        /// Kill the agent and fail the task if it is still running after
+        /// this many seconds (default: no limit)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<f64>,
+        /// Run a task that is already `running` or `done`. Use it to reclaim
+        /// a task whose run was killed before it could record an outcome.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Parse source files with tree-sitter and index symbols
@@ -921,11 +936,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             task_id,
             agent,
             prompt,
+            timeout,
+            force,
         } => cmd_run(
             &base,
             &task_id,
             agent.as_deref(),
             prompt.as_deref(),
+            timeout,
+            force,
             cli.json,
         ),
         Commands::Scan { path } => cmd_scan(&base, &path, cli.json),
@@ -1419,8 +1438,8 @@ fn cmd_dag(
                 println!("Timestamp:  {}", node.timestamp);
                 println!("Output CID: {}", node.output_cid);
                 println!("Parents:    {}", node.parents.len());
-                for (i, p) in node.parents.iter().enumerate() {
-                    println!("  [{i}] {p}");
+                for (i, (p, k)) in node.parent_links().enumerate() {
+                    println!("  [{i}] {p}  ({k})");
                 }
                 if let Some(ref s) = node.schema_cid {
                     println!("Schema:     {s}");
@@ -1479,31 +1498,89 @@ fn cmd_dag(
             finish_retained_node(base, &cid, &node, "dag:recover", json)?;
         }
         DagAction::Lineage { cid } => {
-            let lineage = dag.lineage(&ket_cas::Cid::from(cid.as_str()))?;
+            let start = ket_cas::Cid::from(cid.as_str());
+            let report = dag.lineage_report(&start, None)?;
+            // A start CID that is absent (or is raw content) has no lineage
+            // to show; saying "none found" and exiting 0 would read as an
+            // answer about a node that was never looked at.
+            if report.entries.is_empty() {
+                let why = if report.missing.contains(&start) {
+                    "not in the store"
+                } else {
+                    "not a DAG node"
+                };
+                return Err(format!("no lineage: {cid} is {why}").into());
+            }
+            let absent = |c: &ket_cas::Cid| report.missing.contains(c);
             if json {
-                let items: Vec<serde_json::Value> = lineage
+                // Still one array of nodes. What the walk could not follow is
+                // reported on the node that references it (`missing_parents`),
+                // so an incomplete chain never looks like a complete one.
+                let items: Vec<serde_json::Value> = report
+                    .entries
                     .iter()
-                    .map(|(cid, node)| {
-                        serde_json::json!({
-                            "cid": cid.as_str(),
-                            "kind": node.kind.to_string(),
-                            "agent": node.agent,
-                            "timestamp": node.timestamp,
-                        })
+                    .map(|e| {
+                        let (parents, kinds): (Vec<&str>, Vec<&str>) = e
+                            .node
+                            .parent_links()
+                            .map(|(p, k)| (p.as_str(), k.as_str()))
+                            .unzip();
+                        let missing: Vec<&str> = e
+                            .node
+                            .parents
+                            .iter()
+                            .filter(|p| absent(p))
+                            .map(|p| p.as_str())
+                            .collect();
+                        let mut obj = serde_json::json!({
+                            "cid": e.cid.as_str(),
+                            "kind": e.node.kind.to_string(),
+                            "agent": e.node.agent,
+                            "timestamp": e.node.timestamp,
+                            "depth": e.depth,
+                            "parents": parents,
+                            "parent_kinds": kinds,
+                            "missing_parents": missing,
+                        });
+                        if let Some(sat) = e.node.saturation() {
+                            obj["saturation"] = serde_json::json!(sat);
+                        }
+                        obj
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
-            } else if lineage.is_empty() {
-                println!("No lineage found.");
             } else {
-                for (i, (cid, node)) in lineage.iter().enumerate() {
-                    let indent = "  ".repeat(i);
+                // Indent by distance from the start node, not by position in
+                // the breadth-first output: sibling parents sit at the same
+                // level instead of reading as a parent/grandparent chain.
+                for e in &report.entries {
+                    let indent = "  ".repeat(e.depth as usize);
+                    let sat = e
+                        .node
+                        .saturation()
+                        .map(|s| format!("  saturation:{s}"))
+                        .unwrap_or_default();
                     println!(
-                        "{indent}{}  {}  {}",
-                        &cid.as_str()[..12],
-                        node.kind,
-                        node.agent
+                        "{indent}{}  {}  {}{sat}",
+                        &e.cid.as_str()[..12],
+                        e.node.kind,
+                        e.node.agent
                     );
+                    for (p, k) in e.node.parent_links().filter(|(p, _)| absent(p)) {
+                        println!(
+                            "{indent}  {}  MISSING ({k} parent, not in this store)",
+                            p.as_str().get(..12).unwrap_or(p.as_str())
+                        );
+                    }
+                }
+                if !report.missing.is_empty() {
+                    println!(
+                        "INCOMPLETE: {} ancestor(s) not in this store:",
+                        report.missing.len()
+                    );
+                    for m in &report.missing {
+                        println!("  {m}");
+                    }
                 }
             }
         }
@@ -1683,18 +1760,42 @@ fn cmd_run(
     task_id: &str,
     agent: Option<&str>,
     prompt: Option<&str>,
+    timeout: Option<f64>,
+    force: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let timeout = match timeout {
+        None => None,
+        Some(secs) => Some(
+            std::time::Duration::try_from_secs_f64(secs)
+                .ok()
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| {
+                    format!("--timeout must be a positive number of seconds, got {secs}")
+                })?,
+        ),
+    };
     let cas = open_cas(base)?;
     let db = open_db(base)?;
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
+    // The task content: its title and the context it was created against are
+    // part of the invocation, not something inferred from lineage afterwards.
+    // Looked up first, so an unknown id is "not found" whatever else is
+    // missing (a mistyped id with no --agent used to read "not assigned").
+    let title = db
+        .task_title(task_id)?
+        .ok_or_else(|| format!("task {task_id} not found"))?;
+
     // The agent: an explicit --agent is an override; otherwise the task's
     // stored assignee runs it, and a task nobody was assigned to is refused
     // rather than routed to a default (#20).
+    let assignee = db.task_assignee(task_id)?;
     let (agent, agent_source) = match agent {
+        // Naming the assignee is not an override of it.
+        Some(a) if assignee.as_deref() == Some(a) => (a.to_string(), "assigned"),
         Some(a) => (a.to_string(), "override"),
-        None => match db.task_assignee(task_id)? {
+        None => match assignee {
             Some(a) => (a, "assigned"),
             None => {
                 return Err(format!(
@@ -1705,11 +1806,6 @@ fn cmd_run(
         },
     };
 
-    // The task content: its title and the context it was created against are
-    // part of the invocation, not something inferred from lineage afterwards.
-    let title = db
-        .task_title(task_id)?
-        .ok_or_else(|| format!("task {task_id} not found"))?;
     // The context's bytes (a DAG node's content or a plain blob) are
     // resolved inside `run_task`, after it has checked the task, the agent
     // and the program: a context that cannot be read fails the task with the
@@ -1718,7 +1814,8 @@ fn cmd_run(
     let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent))?;
+    let opts = ket_agent::RunOptions { timeout, force };
+    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent, &opts))?;
 
     // Log the run, naming the agent that actually ran and how it was chosen
     let log_path = base.join("log");
