@@ -144,6 +144,16 @@ ket adheres to semantic versioning.
   unreadable: that is "cannot check", not "missing".
 
 ### Added
+- **`ket dag label` and `ket dag consistent`.** Whole-view status for every
+  node from typed edges alone: `out` when a refutation in the view stands or
+  a `grounds`/`derives` parent is out, `in` when all support is in and every
+  refutation is itself out, `contested` on a standoff, `unknown` when a
+  support parent is missing from CAS. `consistent` labels two views alone
+  and together and reports every node whose status the combination changes.
+  This is a separate report (`ket.labelling/v1`, `ket.consistency/v1`);
+  `ket.invalidated/v1` is unchanged. It differs from v1 in two rules: losing
+  any one support parent is enough, and a refuted refutation no longer
+  counts. No MCP tool yet.
 - **Resolution edges.** `EdgeKind` gains `confirms`, `refutes`, `supersedes`
   (with `EdgeKind::ALL` and a strict `parse`). `ket dag create --parent`
   accepts `<cid>:<kind>` so one node can confirm a claim and be grounded

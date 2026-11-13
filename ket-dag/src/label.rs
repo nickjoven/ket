@@ -31,6 +31,13 @@
 //! reinstatement, and consults recorded refutations only inside the seed's
 //! downstream closure.
 //!
+//! The linked rule is only as good as the edges. It is right when a node's
+//! `grounds`/`derives` parents really are premises it needs. On a graph where
+//! those edges are citations it over-claims badly: every paper citing one
+//! retracted paper comes out `out`. Do not apply this report to the
+//! retraction POC's citation graphs; v1's all-support-lost rule is the
+//! conservative reading there.
+//!
 //! A `refutes` link is read as an attack on that node (that derivation). Two
 //! nodes with the same `output_cid` are separate derivations of one claim;
 //! `convergent_claims` reports the claim-level status, which is `in` while any
