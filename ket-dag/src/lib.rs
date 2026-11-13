@@ -10,6 +10,7 @@
 use ket_cas::{Cid, Store as CasStore};
 use serde::{Deserialize, Serialize};
 
+pub mod label;
 pub mod propagate;
 
 #[derive(Debug, thiserror::Error)]

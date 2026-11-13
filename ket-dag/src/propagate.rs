@@ -572,7 +572,7 @@ fn read_verified_bytes(cas: &CasStore, cid: &Cid) -> Result<Vec<u8>, ket_cas::Ca
 
 /// Missing or valid non-node blobs are epistemic gaps. Storage failures and
 /// corrupt bytes are errors, so replacement evidence cannot silently vanish.
-fn read_node(dag: &Dag, cid: &Cid) -> Result<Option<DagNode>, DagError> {
+pub(crate) fn read_node(dag: &Dag, cid: &Cid) -> Result<Option<DagNode>, DagError> {
     let bytes = match read_verified_bytes(dag.cas, cid) {
         Ok(bytes) => bytes,
         Err(ket_cas::CasError::NotFound(_)) => return Ok(None),
