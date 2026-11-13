@@ -223,6 +223,35 @@ fn diff_nodes(diff: &mut ProjectionDiff, expected: Vec<NodeRow>, actual: Vec<Nod
     }
 }
 
+/// One step in a schema migration plan.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MigrationStep {
+    CreateTable {
+        name: String,
+    },
+    AddColumn {
+        table: String,
+        column: String,
+        column_def: String,
+    },
+}
+
+impl MigrationStep {
+    /// Short human-readable description, e.g. `create table calibrations` or
+    /// `add column dag_nodes.schema_cid (VARCHAR(64))`.
+    pub fn describe(&self) -> String {
+        match self {
+            MigrationStep::CreateTable { name } => format!("create table {name}"),
+            MigrationStep::AddColumn {
+                table,
+                column,
+                column_def,
+            } => format!("add column {table}.{column} ({column_def})"),
+        }
+    }
+}
+
 /// Split one CSV record into fields, honoring RFC-4180 double-quote quoting
 /// (Dolt quotes a field that contains a comma, quote, or newline). Agent names
 /// are user-controlled and may contain commas, so a naive `split(',')` would
@@ -251,6 +280,45 @@ fn parse_csv_line(line: &str) -> Vec<String> {
     }
     fields.push(cur);
     fields
+}
+
+/// Tables the current binary expects to exist. `create_schema()` is the source
+/// of truth for their DDL; this list is used by migration to detect missing
+/// tables in older databases.
+const EXPECTED_TABLES: &[&str] = &[
+    "dag_nodes",
+    "dag_edges",
+    "soft_links",
+    "tasks",
+    "agents",
+    "context_files",
+    "cdom_symbols",
+    "scores",
+    "calibrations",
+];
+
+/// Columns added to existing tables after the initial schema release. Each
+/// entry is `(table, column_name, column_def)`. The `column_def` MUST be
+/// nullable (no `NOT NULL`) or carry an explicit `DEFAULT` so that
+/// `ALTER TABLE ADD COLUMN` on a non-empty table is safe.
+const POST_INIT_COLUMNS: &[(&str, &str, &str)] = &[("dag_nodes", "schema_cid", "VARCHAR(64)")];
+
+/// SQL longer than this goes to `dolt sql` on stdin rather than as `-q`'s
+/// argument. Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN); this
+/// leaves headroom.
+const MAX_ARGV_SQL_BYTES: usize = 96 * 1024;
+
+/// The outcome of `DoltDb::claim_task_for_run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunClaim {
+    /// The task is now `running`; `previous` is the status it had.
+    Claimed { previous: String },
+    /// The task was left alone because it is `running` or `done`.
+    Refused { status: String },
+    /// No such task.
+    NotFound,
+    /// The caller withdrew while waiting for the store; nothing was written.
+    Aborted,
 }
 
 /// The Dolt database handle.
@@ -303,17 +371,59 @@ impl DoltDb {
         Ok(db)
     }
 
+    /// Run `dolt sql` on `sql` under the store lock.
+    ///
+    /// Small statements go as `-q <sql>`. A statement near the kernel's
+    /// per-argument limit (128 KiB on Linux; exceeding it is E2BIG before
+    /// dolt even starts) is written to dolt's stdin instead, which it reads
+    /// as a batch: same output, same stop-at-first-error exit status. A long
+    /// task title or a large `meta` therefore no longer fails to store.
+    fn run_sql(&self, sql: &str, csv: bool) -> Result<std::process::Output, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
+        let mut cmd = Command::new("dolt");
+        cmd.arg("sql").current_dir(&self.db_path);
+        if csv {
+            cmd.args(["-r", "csv"]);
+        }
+        if sql.len() <= MAX_ARGV_SQL_BYTES {
+            return Ok(cmd.args(["-q", sql]).output()?);
+        }
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        // Write from a second thread: dolt may fill its stdout pipe before
+        // it has read all of stdin, and a single thread would deadlock.
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(move || {
+                let fed = stdin.write_all(sql.as_bytes());
+                drop(stdin);
+                fed
+            });
+            let output = child.wait_with_output()?;
+            match writer.join().expect("stdin writer panicked") {
+                // dolt stopping at an error closes the pipe early; its exit
+                // status and stderr say why, so that is not a second error.
+                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+                _ => Ok(output),
+            }
+        })
+    }
+
     /// Execute a SQL query, return raw output.
     pub fn query(&self, sql: &str) -> Result<String, SqlError> {
-        let _guard = acquire_dolt_lock(&self.db_path)?;
-        let output = Command::new("dolt")
-            .args(["sql", "-q", sql, "-r", "csv"])
-            .current_dir(&self.db_path)
-            .output()?;
+        let output = self.run_sql(sql, true)?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(SqlError::DoltError(format!("{sql}: {stderr}")));
+            return Err(SqlError::DoltError(format!(
+                "{}: {}",
+                sql_for_error(sql),
+                stderr_for_error(&output.stderr)
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -321,15 +431,14 @@ impl DoltDb {
 
     /// Execute a SQL statement (INSERT/UPDATE/DELETE), no result expected.
     pub fn exec(&self, sql: &str) -> Result<(), SqlError> {
-        let _guard = acquire_dolt_lock(&self.db_path)?;
-        let output = Command::new("dolt")
-            .args(["sql", "-q", sql])
-            .current_dir(&self.db_path)
-            .output()?;
+        let output = self.run_sql(sql, false)?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(SqlError::DoltError(format!("{sql}: {stderr}")));
+            return Err(SqlError::DoltError(format!(
+                "{}: {}",
+                sql_for_error(sql),
+                stderr_for_error(&output.stderr)
+            )));
         }
 
         Ok(())
@@ -341,7 +450,6 @@ impl DoltDb {
         if statements.is_empty() {
             return Ok(());
         }
-        let _guard = acquire_dolt_lock(&self.db_path)?;
         let mut batch = String::from("BEGIN;\n");
         for stmt in statements {
             batch.push_str(stmt);
@@ -349,14 +457,13 @@ impl DoltDb {
         }
         batch.push_str("COMMIT;");
 
-        let output = Command::new("dolt")
-            .args(["sql", "-q", &batch])
-            .current_dir(&self.db_path)
-            .output()?;
+        let output = self.run_sql(&batch, false)?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(SqlError::DoltError(format!("batch: {stderr}")));
+            return Err(SqlError::DoltError(format!(
+                "batch: {}",
+                stderr_for_error(&output.stderr)
+            )));
         }
 
         Ok(())
@@ -491,6 +598,115 @@ impl DoltDb {
         Ok(())
     }
 
+    /// List all tables in the current database. Parses `SHOW TABLES` CSV output.
+    pub fn list_tables(&self) -> Result<Vec<String>, SqlError> {
+        let csv = self.query("SHOW TABLES")?;
+        Ok(csv
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// List column names for a table. Parses `SHOW COLUMNS FROM <t>` CSV output.
+    /// Only the Field column is extracted; type/null/default are ignored.
+    pub fn list_columns(&self, table: &str) -> Result<Vec<String>, SqlError> {
+        let csv = self.query(&format!("SHOW COLUMNS FROM {table}"))?;
+        Ok(csv
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split(',').next())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Plan a schema migration without applying it. Returns the list of steps
+    /// needed to bring the current DB up to the binary's expected schema.
+    ///
+    /// Handles two kinds of drift:
+    ///   1. Entire tables missing (added in a later release)
+    ///   2. Individual columns missing from existing tables (post-init columns
+    ///      declared in [`POST_INIT_COLUMNS`])
+    ///
+    /// Does NOT handle: column type changes, index changes, NOT NULL columns
+    /// added to non-empty tables (unsafe without a default). Such cases require
+    /// manual migration.
+    pub fn plan_migration(&self) -> Result<Vec<MigrationStep>, SqlError> {
+        let mut steps = Vec::new();
+        let existing_tables = self.list_tables()?;
+        let table_set: std::collections::HashSet<&str> =
+            existing_tables.iter().map(String::as_str).collect();
+
+        for table in EXPECTED_TABLES {
+            if !table_set.contains(table) {
+                steps.push(MigrationStep::CreateTable {
+                    name: (*table).into(),
+                });
+            }
+        }
+
+        for (table, column, column_def) in POST_INIT_COLUMNS {
+            if !table_set.contains(table) {
+                continue;
+            }
+            let columns = self.list_columns(table)?;
+            if !columns.iter().any(|c| c == column) {
+                steps.push(MigrationStep::AddColumn {
+                    table: (*table).into(),
+                    column: (*column).into(),
+                    column_def: (*column_def).into(),
+                });
+            }
+        }
+
+        Ok(steps)
+    }
+
+    /// Apply a list of migration steps. Creates any missing tables by delegating
+    /// to `create_schema()` (which uses `CREATE TABLE IF NOT EXISTS`) and issues
+    /// `ALTER TABLE ADD COLUMN` for missing columns. Commits with a single Dolt
+    /// commit message on success.
+    pub fn apply_migration(&self, steps: &[MigrationStep]) -> Result<(), SqlError> {
+        if steps.is_empty() {
+            return Ok(());
+        }
+
+        let needs_create = steps
+            .iter()
+            .any(|s| matches!(s, MigrationStep::CreateTable { .. }));
+        if needs_create {
+            self.create_schema()?;
+        }
+
+        for step in steps {
+            if let MigrationStep::AddColumn {
+                table,
+                column,
+                column_def,
+            } = step
+            {
+                let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}");
+                self.exec(&sql)?;
+            }
+        }
+
+        self.commit("Migrate schema")?;
+        Ok(())
+    }
+
+    /// Plan and apply a schema migration in one call. Equivalent to
+    /// `plan_migration()` followed by `apply_migration()`. Returns the list of
+    /// steps that were applied so callers can report them.
+    pub fn migrate(&self) -> Result<Vec<MigrationStep>, SqlError> {
+        let steps = self.plan_migration()?;
+        self.apply_migration(&steps)?;
+        Ok(steps)
+    }
+
     /// Insert a DAG node record.
     // The arity mirrors the dag_nodes table columns one-for-one. Collapsing
     // them into a params struct would buy a lint and cost the call-site
@@ -613,8 +829,12 @@ impl DoltDb {
         let ctx = context_cid.unwrap_or("");
         let sql = format!(
             "INSERT INTO tasks (id, title, status, created_by, created_at, updated_at, parent_task, context_cid) \
-             VALUES ('{id}', '{}', 'pending', '{created_by}', '{now}', '{now}', '{parent}', '{ctx}')",
-            escape_sql(title)
+             VALUES ('{}', '{}', 'pending', '{}', '{now}', '{now}', '{}', '{}')",
+            escape_sql(id),
+            escape_sql(title),
+            escape_sql(created_by),
+            escape_sql(parent),
+            escape_sql(ctx)
         );
         self.exec(&sql)
     }
@@ -622,8 +842,11 @@ impl DoltDb {
     /// Update task status.
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<(), SqlError> {
         let now = chrono::Utc::now().to_rfc3339();
-        let sql =
-            format!("UPDATE tasks SET status = '{status}', updated_at = '{now}' WHERE id = '{id}'");
+        let sql = format!(
+            "UPDATE tasks SET status = '{}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(status),
+            escape_sql(id)
+        );
         self.exec(&sql)
     }
 
@@ -631,7 +854,9 @@ impl DoltDb {
     pub fn assign_task(&self, id: &str, agent: &str) -> Result<(), SqlError> {
         let now = chrono::Utc::now().to_rfc3339();
         let sql = format!(
-            "UPDATE tasks SET assigned_to = '{agent}', status = 'assigned', updated_at = '{now}' WHERE id = '{id}'"
+            "UPDATE tasks SET assigned_to = '{}', status = 'assigned', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(agent),
+            escape_sql(id)
         );
         self.exec(&sql)
     }
@@ -651,9 +876,61 @@ impl DoltDb {
     pub fn set_task_result(&self, id: &str, result_cid: &str) -> Result<(), SqlError> {
         let now = chrono::Utc::now().to_rfc3339();
         self.exec(&format!(
-            "UPDATE tasks SET result_cid = '{result_cid}', updated_at = '{now}' WHERE id = '{}'",
+            "UPDATE tasks SET result_cid = '{}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(result_cid),
             escape_sql(id)
         ))
+    }
+
+    /// A task's current status, or `None` if there is no such task.
+    pub fn task_status(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT status FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| csv_field(l.trim()))
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// Take a task for a run: check its status and move it to `running` in
+    /// one locked section, so two `ket run`s cannot both start it.
+    ///
+    /// A task that is already `running` (another run has it, or one died
+    /// without recording an outcome) or `done` is refused unless `force` is
+    /// set. A claim starts the attempt clean: the previous attempt's failure
+    /// reason (`meta`) and its `result_cid` are cleared, so a run that fails
+    /// does not end `failed` next to an older attempt's result.
+    ///
+    /// Taking the store lock can block behind another ket process. `abort`
+    /// is asked once the lock is held and before anything is written: if it
+    /// says yes (the caller was interrupted while it waited), the task is
+    /// left exactly as it was and the claim is `Aborted`.
+    pub fn claim_task_for_run(
+        &self,
+        id: &str,
+        force: bool,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<RunClaim, SqlError> {
+        let _guard = acquire_dolt_lock(&self.db_path)?;
+        if abort() {
+            return Ok(RunClaim::Aborted);
+        }
+        let Some(status) = self.task_status(id)? else {
+            return Ok(RunClaim::NotFound);
+        };
+        if !force && (status == "running" || status == "done") {
+            return Ok(RunClaim::Refused { status });
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET status = 'running', meta = NULL, result_cid = NULL, \
+             updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(RunClaim::Claimed { previous: status })
     }
 
     /// The context blob a task was created against, if any — so a run can
@@ -668,6 +945,57 @@ impl DoltDb {
             .nth(1)
             .map(|l| l.trim().trim_matches('"').to_string())
             .filter(|s| !s.is_empty()))
+    }
+
+    /// The agent a task was assigned to, if any — so `run` executes the task
+    /// through its stored assignee instead of a hard-coded default (#20).
+    pub fn task_assignee(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT assigned_to FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        Ok(csv
+            .lines()
+            .nth(1)
+            .map(|l| csv_field(l.trim()))
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// The task's title — the content the assigned agent is asked to work on,
+    /// which `run` resolves into the invocation rather than a fixed sentence (#20).
+    pub fn task_title(&self, id: &str) -> Result<Option<String>, SqlError> {
+        let csv = self.query(&format!(
+            "SELECT title FROM tasks WHERE id = '{}'",
+            escape_sql(id)
+        ))?;
+        // One column, at most one row: everything after the header is the
+        // field. A title may span lines (dolt quotes it), so it is not read
+        // line-by-line, which would hand the agent only its first line.
+        Ok(csv
+            .split_once('\n')
+            .filter(|(_, row)| !row.is_empty())
+            .map(|(_, row)| csv_field(row.trim_end_matches(['\r', '\n']))))
+    }
+
+    /// Record free-form JSON on the task row (`tasks.meta`): used to keep the
+    /// reason a task failed next to its status (#21).
+    pub fn set_task_meta(&self, id: &str, meta: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = '{}', updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(meta),
+            escape_sql(id)
+        ))
+    }
+
+    /// Drop the task's `meta`, so a new run attempt does not carry the
+    /// failure reason of an earlier one onto a row that later reads `done`.
+    pub fn clear_task_meta(&self, id: &str) -> Result<(), SqlError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec(&format!(
+            "UPDATE tasks SET meta = NULL, updated_at = '{now}' WHERE id = '{}'",
+            escape_sql(id)
+        ))
     }
 
     /// The registered invocation command for an agent, if any — so `run`
@@ -697,9 +1025,11 @@ impl DoltDb {
         let mcp = if mcp_capable { "TRUE" } else { "FALSE" };
         let sql = format!(
             "REPLACE INTO agents (name, cli_command, mcp_capable, capabilities, model, updated_at) \
-             VALUES ('{name}', '{}', {mcp}, '{}', '{model}', '{now}')",
+             VALUES ('{}', '{}', {mcp}, '{}', '{}', '{now}')",
+            escape_sql(name),
             escape_sql(cli_command),
-            escape_sql(capabilities)
+            escape_sql(capabilities),
+            escape_sql(model)
         );
         self.exec(&sql)
     }
@@ -719,7 +1049,12 @@ impl DoltDb {
         let now = chrono::Utc::now().to_rfc3339();
         let sql = format!(
             "INSERT INTO scores (id, node_cid, agent, scorer, dimension, value, evidence, created_at) \
-             VALUES ('{id}', '{node_cid}', '{agent}', '{scorer}', '{dimension}', {value}, '{}', '{now}')",
+             VALUES ('{}', '{}', '{}', '{}', '{}', {value}, '{}', '{now}')",
+            escape_sql(id),
+            escape_sql(node_cid),
+            escape_sql(agent),
+            escape_sql(scorer),
+            escape_sql(dimension),
             escape_sql(evidence)
         );
         self.exec(&sql)
@@ -1001,7 +1336,8 @@ impl DoltDb {
     /// Query scores for a node.
     pub fn scores_for_node(&self, node_cid: &str) -> Result<String, SqlError> {
         self.query(&format!(
-            "SELECT dimension, value, scorer, evidence FROM scores WHERE node_cid = '{node_cid}'"
+            "SELECT dimension, value, scorer, evidence FROM scores WHERE node_cid = '{}'",
+            escape_sql(node_cid)
         ))
     }
 
@@ -1009,7 +1345,8 @@ impl DoltDb {
     pub fn agent_score_profile(&self, agent: &str) -> Result<String, SqlError> {
         self.query(&format!(
             "SELECT dimension, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
-             FROM scores WHERE agent = '{agent}' GROUP BY dimension ORDER BY dimension"
+             FROM scores WHERE agent = '{}' GROUP BY dimension ORDER BY dimension",
+            escape_sql(agent)
         ))
     }
 
@@ -1017,8 +1354,9 @@ impl DoltDb {
     pub fn best_agent_for(&self, dimension: &str) -> Result<String, SqlError> {
         self.query(&format!(
             "SELECT agent, ROUND(AVG(value), 3) AS avg_score, COUNT(*) AS n \
-             FROM scores WHERE dimension = '{dimension}' \
-             GROUP BY agent ORDER BY avg_score DESC LIMIT 1"
+             FROM scores WHERE dimension = '{}' \
+             GROUP BY agent ORDER BY avg_score DESC LIMIT 1",
+            escape_sql(dimension)
         ))
     }
 
@@ -1305,8 +1643,62 @@ fn parse_count(csv: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// The statement as it should appear in an error message: whole when short,
+/// else its start and its size. An error must not carry megabytes of SQL.
+fn sql_for_error(sql: &str) -> std::borrow::Cow<'_, str> {
+    const MAX: usize = 2000;
+    if sql.len() <= MAX {
+        return sql.into();
+    }
+    let mut cut = MAX;
+    while !sql.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… [{} bytes of SQL]", &sql[..cut], sql.len()).into()
+}
+
+/// Dolt's stderr for an error message. Dolt echoes the failing statement, so
+/// a large statement makes a large stderr; the cause is at the end, so the
+/// end is what is kept whole.
+fn stderr_for_error(stderr: &[u8]) -> String {
+    const HEAD: usize = 500;
+    const TAIL: usize = 2000;
+    let text = String::from_utf8_lossy(stderr);
+    if text.len() <= HEAD + TAIL {
+        return text.into_owned();
+    }
+    let mut head = HEAD;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - TAIL;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}… [{} bytes elided] …{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
+}
+
+/// Quote a value for a single-quoted SQL string literal. Dolt, like MySQL,
+/// reads backslash escapes inside literals (`\"`, `\n`, `\\`), so a value
+/// with backslashes, a JSON document especially, came back altered and could
+/// stop being valid JSON. Backslashes are doubled first, then quotes.
 fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
+    s.replace('\\', "\\\\").replace('\'', "''")
+}
+
+/// Decode one single-column CSV row as `dolt sql -r csv` prints it: a value
+/// containing commas, quotes or newlines is double-quoted with `""` escapes.
+fn csv_field(raw: &str) -> String {
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1].replace("\"\"", "\"")
+    } else {
+        raw.to_string()
+    }
 }
 
 /// Strip ANSI colour escapes. `dolt log` colourises its output, and those
@@ -1456,6 +1848,100 @@ fn expected_nodes_from_cas(cas: &ket_cas::Store) -> Result<Vec<NodeRow>, SqlErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value larger than the kernel's per-argument limit used to make
+    /// `dolt sql -q <sql>` fail to start (E2BIG). Needs a real Dolt; the
+    /// Dolt CI job runs it, and it is skipped where dolt is not installed.
+    #[test]
+    fn statements_beyond_the_argv_limit_are_stored_and_read_back() {
+        if Command::new("dolt").arg("version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ket-sql-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = DoltDb::init(&dir).unwrap();
+
+        // One statement past the limit: a title that fits its TEXT column
+        // (64 KiB) but, being all quotes and backslashes, doubles in SQL.
+        let title = "'\\".repeat(30_000);
+        assert!(escape_sql(&title).len() > MAX_ARGV_SQL_BYTES);
+        db.insert_task("big", &title, "o'brien", None, None)
+            .unwrap();
+        assert_eq!(db.task_title("big").unwrap().as_deref(), Some(&*title));
+
+        // A batch past the limit (what a large `scan` or rebuild produces).
+        let statements: Vec<String> = (0..3000)
+            .map(|i| {
+                format!(
+                    "INSERT INTO soft_links (from_cid, to_cid, relation, created_at) \
+                     VALUES ('{i:064}', '{:064}', 'cites', 'now')",
+                    i + 1
+                )
+            })
+            .collect();
+        assert!(statements.iter().map(String::len).sum::<usize>() > 2 * MAX_ARGV_SQL_BYTES);
+        db.exec_batch(&statements).unwrap();
+        assert_eq!(
+            parse_count(&db.query("SELECT COUNT(*) FROM soft_links").unwrap()),
+            3000
+        );
+
+        // A failing large statement reports dolt's reason, bounded: dolt
+        // echoes the statement it rejected.
+        let err = db
+            .exec(&format!(
+                "INSERT INTO no_such_table VALUES ('{}')",
+                "x".repeat(300_000)
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no_such_table"), "{err}");
+        assert!(err.len() < 8 * 1024, "error carries {} bytes", err.len());
+
+        // the small path still escapes what it interpolates
+        db.assign_task("big", "o'brien").unwrap();
+        assert_eq!(db.task_assignee("big").unwrap().as_deref(), Some("o'brien"));
+        assert_eq!(
+            db.claim_task_for_run("big", false, &|| false).unwrap(),
+            RunClaim::Claimed {
+                previous: "assigned".into()
+            }
+        );
+        assert_eq!(
+            db.claim_task_for_run("big", false, &|| false).unwrap(),
+            RunClaim::Refused {
+                status: "running".into()
+            }
+        );
+        assert_eq!(
+            db.claim_task_for_run("nope", true, &|| false).unwrap(),
+            RunClaim::NotFound
+        );
+        // a caller interrupted while waiting for the lock writes nothing
+        assert_eq!(
+            db.claim_task_for_run("big", true, &|| true).unwrap(),
+            RunClaim::Aborted
+        );
+        assert_eq!(db.task_status("big").unwrap().as_deref(), Some("running"));
+
+        // readers quote the way the writers do
+        db.insert_score("s1", "n'1", "corp\\o'brien", "h", "correctness", 0.5, "")
+            .unwrap();
+        assert!(db
+            .agent_score_profile("corp\\o'brien")
+            .unwrap()
+            .contains("correctness"));
+        assert!(db.scores_for_node("n'1").unwrap().contains("correctness"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escape_sql_doubles_backslashes_before_quotes() {
+        assert_eq!(escape_sql("it's"), "it''s");
+        assert_eq!(escape_sql(r#"a\"b\n\\c"#), r#"a\\"b\\n\\\\c"#);
+        assert_eq!(escape_sql(r"\'"), r"\\''");
+    }
 
     fn edge(parent: &str, child: &str, ord: i64, kind: &str) -> EdgeRow {
         EdgeRow {

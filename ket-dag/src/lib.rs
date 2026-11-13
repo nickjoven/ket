@@ -374,6 +374,36 @@ pub struct SoftLink {
     pub created_at: String,
 }
 
+/// One node reached by a lineage walk.
+#[derive(Debug, Clone)]
+pub struct LineageEntry {
+    pub cid: Cid,
+    pub node: DagNode,
+    /// Shortest distance from the start node (the start node is 0).
+    pub depth: u32,
+}
+
+/// The result of a lineage walk, including what the walk could not follow.
+#[derive(Debug, Clone, Default)]
+pub struct LineageReport {
+    /// Nodes reached, breadth-first from the start node.
+    pub entries: Vec<LineageEntry>,
+    /// CIDs referenced as a parent (or the start CID itself) that are not in
+    /// the store. Each one is a gap: its own ancestors are unknown.
+    pub missing: Vec<Cid>,
+    /// Parents that exist but are raw content blobs rather than nodes.
+    pub non_node: Vec<Cid>,
+    /// True when a depth bound stopped the walk short of some parents.
+    pub truncated: bool,
+}
+
+impl LineageReport {
+    /// Every ancestor was reached: nothing absent, nothing cut off by a bound.
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty() && !self.truncated
+    }
+}
+
 /// DAG operations backed by CAS.
 pub struct Dag<'a> {
     cas: &'a CasStore,
@@ -420,16 +450,42 @@ impl<'a> Dag<'a> {
     ///
     /// `max_depth = Some(0)` returns only the start node.
     /// `max_depth = None` walks the full ancestor chain (equivalent to `lineage()`).
+    ///
+    /// This is the nodes-only view. It cannot tell a complete chain from one
+    /// with an absent ancestor; a reader that needs to know uses
+    /// `lineage_report`.
     pub fn lineage_bounded(
         &self,
         cid: &Cid,
         max_depth: Option<u32>,
     ) -> Result<Vec<(Cid, DagNode)>, DagError> {
-        let mut result = Vec::new();
+        Ok(self
+            .lineage_report(cid, max_depth)?
+            .entries
+            .into_iter()
+            .map(|e| (e.cid, e.node))
+            .collect())
+    }
+
+    /// Trace lineage and account for every CID the walk could not follow.
+    ///
+    /// A parent that is not in the store is a gap in the chain and is listed
+    /// under `missing`; a parent that is a raw content blob is a legitimate
+    /// leaf and is listed under `non_node`. Neither is silently dropped: an
+    /// incomplete result has to say it is incomplete.
+    pub fn lineage_report(
+        &self,
+        cid: &Cid,
+        max_depth: Option<u32>,
+    ) -> Result<LineageReport, DagError> {
+        let mut report = LineageReport::default();
         // Queue entries: (cid, depth_from_start)
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((cid.clone(), 0u32));
         let mut visited = std::collections::HashSet::new();
+        // Parents of nodes at the depth bound: not followed, but not
+        // necessarily unreached (a diamond reaches them another way).
+        let mut cut_off: Vec<Cid> = Vec::new();
 
         while let Some((current, depth)) = queue.pop_front() {
             if !visited.insert(current.clone()) {
@@ -442,20 +498,45 @@ impl<'a> Dag<'a> {
                         for parent in &node.parents {
                             queue.push_back((parent.clone(), depth + 1));
                         }
+                    } else {
+                        cut_off.extend(node.parents.iter().cloned());
                     }
-                    result.push((current, node));
+                    report.entries.push(LineageEntry {
+                        cid: current,
+                        node,
+                        depth,
+                    });
                 }
                 Err(DagError::Cas(ket_cas::CasError::NotFound(_))) => {
-                    // Parent might be raw content, not a node — skip
+                    // Absent from this store: deleted, unsynced or never
+                    // imported. The chain is shorter than it should be.
+                    report.missing.push(current);
                 }
                 Err(DagError::Serde(_)) => {
-                    // Not a valid node (raw content blob) — skip
+                    // A raw content blob used as a parent — not a node, so
+                    // the walk legitimately ends here.
+                    report.non_node.push(current);
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(result)
+        // The bound truncated the walk only if it kept a node from being
+        // reached. A cut-off parent the walk visited anyway hides nothing,
+        // and one that is raw content is a leaf, not unwalked ancestry.
+        for parent in cut_off {
+            if !visited.insert(parent.clone()) {
+                continue;
+            }
+            match self.get_node(&parent) {
+                Ok(_) => report.truncated = true,
+                Err(DagError::Cas(ket_cas::CasError::NotFound(_))) => report.missing.push(parent),
+                Err(DagError::Serde(_)) => report.non_node.push(parent),
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(report)
     }
 
     /// Check if content has drifted by comparing a file's current hash to a stored CID.
@@ -863,6 +944,41 @@ mod tests {
 
         let lineage = dag.lineage(&grandchild_cid).unwrap();
         assert_eq!(lineage.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `truncated` means the bound kept something from being reached, not
+    /// merely that a node at the bound has parents.
+    #[test]
+    fn a_bounded_walk_that_reached_everything_is_not_truncated() {
+        let (cas, dir) = temp_store("lineage-diamond");
+        let dag = Dag::new(&cas);
+        let raw = cas.put(b"raw source").unwrap();
+        // A -> [B, C], B -> [C, raw]: at max_depth 1, B sits at the bound
+        // with parents that are already reached (C) or a raw leaf.
+        let (c, _) = dag
+            .store_with_node(b"c", NodeKind::Memory, vec![], "a")
+            .unwrap();
+        let (b, _) = dag
+            .store_with_node(b"b", NodeKind::Memory, vec![c.clone(), raw.clone()], "a")
+            .unwrap();
+        let (a, _) = dag
+            .store_with_node(b"a", NodeKind::Memory, vec![b.clone(), c.clone()], "a")
+            .unwrap();
+
+        let report = dag.lineage_report(&a, Some(1)).unwrap();
+        assert_eq!(report.entries.len(), 3);
+        assert!(!report.truncated);
+        assert!(report.is_complete());
+        assert_eq!(report.non_node, vec![raw]);
+
+        // One hop less and B's node parent C is still reached via A, but
+        // nothing reaches past depth 0: now the bound does hide B and C.
+        let report = dag.lineage_report(&a, Some(0)).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert!(report.truncated);
+        assert!(!report.is_complete());
 
         let _ = fs::remove_dir_all(&dir);
     }

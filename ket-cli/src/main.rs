@@ -182,18 +182,35 @@ Execute a task by spawning the assigned agent as a subprocess.
 The agent's output is stored as a Reasoning DAG node.
 Requires the agent CLI to be installed (e.g., 'claude' for Claude).
 
+A run always ends in a recorded state: `done` with a result, or `failed`
+with the phase and reason in the task's meta (`ket task show <id>`). That
+includes a timeout and Ctrl-C/SIGTERM, which kill the agent first. A task
+that is `running` or `done` is refused unless --force is given.
+
 Examples:
   ket run <task-id> --agent claude --prompt 'Review this code'
-  ket run <task-id> --agent codex")]
+  ket run <task-id> --agent codex
+  ket run <task-id> --timeout 600
+  ket run <task-id> --force          Reclaim a task left `running`")]
     Run {
         /// Task ID to run
         task_id: String,
-        /// Agent to use (claude, codex)
-        #[arg(long, default_value = "claude")]
-        agent: String,
-        /// Prompt for the agent (default: 'Complete the assigned task')
+        /// Agent to run as. Overrides the task's stored assignee; without it
+        /// the assignee is used and an unassigned task is refused.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Extra instructions for the agent, appended after the task title
+        /// (default: 'Complete the assigned task')
         #[arg(long)]
         prompt: Option<String>,
+        /// Kill the agent and fail the task if it is still running after
+        /// this many seconds (default: no limit)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<f64>,
+        /// Run a task that is already `running` or `done`. Use it to reclaim
+        /// a task whose run was killed before it could record an outcome.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Parse source files with tree-sitter and index symbols
@@ -347,6 +364,33 @@ Examples:
   ket rebuild-projection            Replay + report counts
   ket rebuild-projection --json     Machine-readable report")]
     RebuildProjection,
+
+    /// Migrate a stale Dolt schema to the current binary's expected shape
+    #[command(long_about = "\
+Bring an older .ket Dolt database up to the current binary's expected schema.
+
+Handles two drift cases:
+  1. Entire tables missing (e.g. `calibrations` added in a later release)
+  2. Individual columns missing from existing tables (e.g. `dag_nodes.schema_cid`)
+
+Missing tables are created via the same DDL as `ket init` (idempotent).
+Missing columns are added via `ALTER TABLE ADD COLUMN`. Only nullable columns
+or columns with a DEFAULT are added automatically — unsafe NOT-NULL additions
+require manual intervention.
+
+Run this after upgrading the ket binary on an existing .ket store, especially
+if `ket status` reports `table not found` or `Unknown column` errors. Does not
+touch CAS blobs — pair with `ket repair` afterward to sync any DAG nodes that
+failed to index under the old schema.
+
+Examples:
+  ket migrate              Plan and apply any needed schema migrations
+  ket migrate --dry-run    Show the plan without writing")]
+    Migrate {
+        /// Show what would be migrated without actually writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Show .ket health dashboard (CAS blobs, SQL stats, Dolt HEAD)
     #[command(long_about = "\
@@ -664,6 +708,19 @@ enum DagAction {
         #[arg(long)]
         schema: Option<String>,
     },
+    /// Complete logging/projection for a retained node without creating a new identity
+    #[command(
+        long_about = "Recover a node retained by an interrupted or partially failed create.
+
+Use the CID from dag:create:intent, dag:create, or the partial-success output.
+Validates retained CAS bytes and dependencies, then completes the missing SQL
+projection. Existing conflicting SQL rows require `ket repair`. Repeating this
+command preserves node identity. A plain `dag create` is always a new event."
+    )]
+    Recover {
+        /// Retained node CID (64 lowercase hex characters)
+        cid: String,
+    },
     /// Trace the full ancestry of a node
     Lineage {
         /// Node CID to trace from
@@ -733,7 +790,8 @@ enum AgentAction {
         /// --command is given
         name: String,
         /// Invocation command for a custom agent; the prompt is appended as
-        /// the final argument. Overrides the preset for this name.
+        /// the final argument and the task's context, if any, is written to
+        /// its stdin. Overrides the preset for this name.
         #[arg(long)]
         command: Option<String>,
         /// Model identifier to record (optional)
@@ -891,7 +949,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             task_id,
             agent,
             prompt,
-        } => cmd_run(&base, &task_id, &agent, prompt.as_deref(), cli.json),
+            timeout,
+            force,
+        } => cmd_run(
+            &base,
+            &task_id,
+            agent.as_deref(),
+            prompt.as_deref(),
+            timeout,
+            force,
+            cli.json,
+        ),
         Commands::Scan { path } => cmd_scan(&base, &path, cli.json),
         Commands::Cdom { query, path } => cmd_cdom(&base, &query, path.as_deref(), cli.json),
         Commands::Log { n } => cmd_log(&base, n, cli.json),
@@ -901,6 +969,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Repair { dry_run } => cmd_repair(&base, dry_run, cli.json),
         Commands::VerifyProjection => cmd_verify_projection(&base, cli.json),
         Commands::RebuildProjection => cmd_rebuild_projection(&base, cli.json),
+        Commands::Migrate { dry_run } => cmd_migrate(&base, dry_run, cli.json),
         Commands::Status => cmd_status(&base, cli.json),
         Commands::History { n } => cmd_history(&base, n, cli.json),
         Commands::Diff { from, to } => cmd_diff(&base, from.as_deref(), to.as_deref(), cli.json),
@@ -1007,6 +1076,135 @@ fn warn_if_projection_failed(result: Result<(), ket_sql::SqlError>) {
     if let Err(e) = result {
         eprintln!("warning: projection sync failed (run `ket repair`): {e}");
     }
+}
+
+/// Validate every direct CAS dependency before projecting an externally retained
+/// node. In particular, schema/parent strings must be CIDs and timestamp must
+/// be an RFC3339 value, never arbitrary text interpolated into SQL.
+fn validate_retained_node(
+    cas: &ket_cas::Store,
+    node: &ket_dag::DagNode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    chrono::DateTime::parse_from_rfc3339(&node.timestamp)?;
+    if !node.parent_kinds.is_empty() && node.parent_kinds.len() != node.parents.len() {
+        return Err("retained node parent kinds are misaligned".into());
+    }
+    let mut parents = std::collections::HashSet::new();
+    for parent in &node.parents {
+        if !parents.insert(parent.as_str()) {
+            return Err("retained node has duplicate parents".into());
+        }
+        if !cas.verify(parent)? {
+            return Err(format!("parent integrity check failed: {parent}").into());
+        }
+        resolve_parent(cas, parent.as_str())?;
+    }
+    for cid in std::iter::once(&node.output_cid).chain(node.schema_cid.iter()) {
+        if !cas.verify(cid)? {
+            return Err(format!("dependency integrity check failed: {cid}").into());
+        }
+    }
+    Ok(())
+}
+
+/// Complete a CAS publication, preserving its identity even on partial failure.
+/// This intentionally does not infer retry identity from equal content.
+fn finish_retained_node(
+    base: &PathBuf,
+    cid: &ket_cas::Cid,
+    node: &ket_dag::DagNode,
+    event: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut projection = "not_attempted";
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // Publication is already durable in CAS; record it before SQL can block.
+        // A log error is partial success, never an unqualified successful create.
+        log::append(&base.join("log"), event, cid.as_str())?;
+        if !base.join("ket.db").exists() {
+            projection = "not_configured";
+            return Ok(());
+        }
+        projection = "failed";
+        let db = open_db(base)?;
+        let edges = projected_edges(node);
+        db.sync_dag_node(
+            cid.as_str(),
+            &node.kind.to_string(),
+            &node.agent,
+            &node.timestamp,
+            node.output_cid.as_str(),
+            "",
+            &edge_refs(&edges),
+            node.schema_cid.as_ref().map(|s| s.as_str()),
+        )?;
+        // INSERT IGNORE can leave a conflicting row untouched. Check the exact
+        // target row and incoming edges before claiming it is projected.
+        let expected = ket_sql::NodeRow {
+            cid: cid.as_str().to_string(),
+            kind: node.kind.to_string(),
+            agent: node.agent.clone(),
+            created_at: node.timestamp.clone(),
+            output_cid: node.output_cid.as_str().to_string(),
+            schema_cid: node
+                .schema_cid
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+        };
+        let rows: Vec<_> = db
+            .dag_node_rows()?
+            .into_iter()
+            .filter(|r| r.cid == cid.as_str())
+            .collect();
+        let mut actual: Vec<_> = db
+            .dag_edges()?
+            .into_iter()
+            .filter(|e| e.child_cid == cid.as_str())
+            .map(|e| (e.parent_cid, e.ordinal, e.edge_kind))
+            .collect();
+        let mut expected_edges: Vec<_> = edges
+            .iter()
+            .map(|(p, i, k)| (p.clone(), i64::from(*i), k.to_string()))
+            .collect();
+        actual.sort();
+        expected_edges.sort();
+        if rows != vec![expected] || actual != expected_edges {
+            return Err("retained node projection conflicts with CAS; run `ket repair`, then recover the same CID".into());
+        }
+        projection = "synced";
+        Ok(())
+    })();
+    if json {
+        let mut obj = serde_json::json!({
+            "node_cid": cid.as_str(), "content_cid": node.output_cid.as_str(),
+            "retained": true, "projection": projection,
+            "status": if result.is_ok() { "complete" } else { "partial" },
+            "recovery": { "command": "dag recover", "node_cid": cid.as_str() },
+        });
+        if let Some(ref schema) = node.schema_cid {
+            obj["schema_cid"] = serde_json::json!(schema);
+        }
+        if let Err(ref e) = result {
+            obj["error"] = serde_json::json!(e.to_string());
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("Node CID:    {cid}");
+        println!("Content CID: {}", node.output_cid);
+        println!("Projection:  {projection}");
+        if let Some(ref schema) = node.schema_cid {
+            println!("Schema CID:  {schema}");
+        }
+    }
+    result.map_err(|e| {
+        format!(
+            "node {cid} is retained in CAS; logging/projection incomplete: {e}. \
+         Do not retry dag create; use ket --home <same-store> dag recover {cid}"
+        )
+        .into()
+    })
 }
 
 /// Parse `--parent <cid>[:<kind>]`. A parent without a suffix takes `default`.
@@ -1253,8 +1451,8 @@ fn cmd_dag(
                 println!("Timestamp:  {}", node.timestamp);
                 println!("Output CID: {}", node.output_cid);
                 println!("Parents:    {}", node.parents.len());
-                for (i, p) in node.parents.iter().enumerate() {
-                    println!("  [{i}] {p}");
+                for (i, (p, k)) in node.parent_links().enumerate() {
+                    println!("  [{i}] {p}  ({k})");
                 }
                 if let Some(ref s) = node.schema_cid {
                     println!("Schema:     {s}");
@@ -1293,71 +1491,109 @@ fn cmd_dag(
             if let Some(ref s) = schema {
                 node = node.with_schema(ket_cas::Cid::from(s.as_str()));
             }
-            let node_cid = dag.put_node(&node)?;
-
-            // Project to SQL if Dolt is available — from the sealed node.
-            if let Ok(db) = open_db(base) {
-                let node = dag.get_node(&node_cid)?;
-                let edges = projected_edges(&node);
-                warn_if_projection_failed(db.sync_dag_node(
-                    node_cid.as_str(),
-                    &kind,
-                    &agent,
-                    &node.timestamp,
-                    content_cid.as_str(),
-                    "",
-                    &edge_refs(&edges),
-                    schema.as_deref(),
-                ));
+            validate_retained_node(&cas, &node)?;
+            let bytes = node.to_bytes()?;
+            let node_cid = ket_cas::hash_bytes(&bytes);
+            // Intent is an attempted publication, not proof that CAS was written.
+            // Append strictly before publishing the timestamped identity so even
+            // an immediate crash after CAS can be reconciled by its exact CID.
+            log::append(&base.join("log"), "dag:create:intent", node_cid.as_str())?;
+            cas.put(&bytes)?;
+            finish_retained_node(base, &node_cid, &node, "dag:create", json)?;
+        }
+        DagAction::Recover { cid } => {
+            let cid = ket_cas::Cid::from(cid);
+            if !cas.verify(&cid)? {
+                return Err(format!("retained node integrity check failed: {cid}").into());
             }
-
-            // Log
-            let log_path = base.join("log");
-            log_event(&log_path, "dag:create", &format!("{node_cid}"));
-
-            if json {
-                let mut obj = serde_json::json!({
-                    "node_cid": node_cid.as_str(),
-                    "content_cid": content_cid.as_str(),
-                });
-                if let Some(ref s) = schema {
-                    obj["schema_cid"] = serde_json::json!(s);
-                }
-                println!("{}", serde_json::to_string_pretty(&obj)?);
-            } else {
-                println!("Node CID:    {node_cid}");
-                println!("Content CID: {content_cid}");
-                if let Some(ref s) = schema {
-                    println!("Schema CID:  {s}");
-                }
-            }
+            let node = dag.get_node(&cid)?;
+            validate_retained_node(&cas, &node)?;
+            finish_retained_node(base, &cid, &node, "dag:recover", json)?;
         }
         DagAction::Lineage { cid } => {
-            let lineage = dag.lineage(&ket_cas::Cid::from(cid.as_str()))?;
+            let start = ket_cas::Cid::from(cid.as_str());
+            let report = dag.lineage_report(&start, None)?;
+            // A start CID that is absent (or is raw content) has no lineage
+            // to show; saying "none found" and exiting 0 would read as an
+            // answer about a node that was never looked at.
+            if report.entries.is_empty() {
+                let why = if report.missing.contains(&start) {
+                    "not in the store"
+                } else {
+                    "not a DAG node"
+                };
+                return Err(format!("no lineage: {cid} is {why}").into());
+            }
+            let absent = |c: &ket_cas::Cid| report.missing.contains(c);
             if json {
-                let items: Vec<serde_json::Value> = lineage
+                // Still one array of nodes. What the walk could not follow is
+                // reported on the node that references it (`missing_parents`),
+                // so an incomplete chain never looks like a complete one.
+                let items: Vec<serde_json::Value> = report
+                    .entries
                     .iter()
-                    .map(|(cid, node)| {
-                        serde_json::json!({
-                            "cid": cid.as_str(),
-                            "kind": node.kind.to_string(),
-                            "agent": node.agent,
-                            "timestamp": node.timestamp,
-                        })
+                    .map(|e| {
+                        let (parents, kinds): (Vec<&str>, Vec<&str>) = e
+                            .node
+                            .parent_links()
+                            .map(|(p, k)| (p.as_str(), k.as_str()))
+                            .unzip();
+                        let missing: Vec<&str> = e
+                            .node
+                            .parents
+                            .iter()
+                            .filter(|p| absent(p))
+                            .map(|p| p.as_str())
+                            .collect();
+                        let mut obj = serde_json::json!({
+                            "cid": e.cid.as_str(),
+                            "kind": e.node.kind.to_string(),
+                            "agent": e.node.agent,
+                            "timestamp": e.node.timestamp,
+                            "depth": e.depth,
+                            "parents": parents,
+                            "parent_kinds": kinds,
+                            "missing_parents": missing,
+                        });
+                        if let Some(sat) = e.node.saturation() {
+                            obj["saturation"] = serde_json::json!(sat);
+                        }
+                        obj
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
-            } else if lineage.is_empty() {
-                println!("No lineage found.");
             } else {
-                for (i, (cid, node)) in lineage.iter().enumerate() {
-                    let indent = "  ".repeat(i);
+                // Indent by distance from the start node, not by position in
+                // the breadth-first output: sibling parents sit at the same
+                // level instead of reading as a parent/grandparent chain.
+                for e in &report.entries {
+                    let indent = "  ".repeat(e.depth as usize);
+                    let sat = e
+                        .node
+                        .saturation()
+                        .map(|s| format!("  saturation:{s}"))
+                        .unwrap_or_default();
                     println!(
-                        "{indent}{}  {}  {}",
-                        &cid.as_str()[..12],
-                        node.kind,
-                        node.agent
+                        "{indent}{}  {}  {}{sat}",
+                        &e.cid.as_str()[..12],
+                        e.node.kind,
+                        e.node.agent
                     );
+                    for (p, k) in e.node.parent_links().filter(|(p, _)| absent(p)) {
+                        println!(
+                            "{indent}  {}  MISSING ({k} parent, not in this store)",
+                            p.as_str().get(..12).unwrap_or(p.as_str())
+                        );
+                    }
+                }
+                if !report.missing.is_empty() {
+                    println!(
+                        "INCOMPLETE: {} ancestor(s) not in this store:",
+                        report.missing.len()
+                    );
+                    for m in &report.missing {
+                        println!("  {m}");
+                    }
                 }
             }
         }
@@ -1562,22 +1798,72 @@ fn cmd_agent(
 fn cmd_run(
     base: &PathBuf,
     task_id: &str,
-    agent: &str,
+    agent: Option<&str>,
     prompt: Option<&str>,
+    timeout: Option<f64>,
+    force: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let timeout = match timeout {
+        None => None,
+        Some(secs) => Some(
+            std::time::Duration::try_from_secs_f64(secs)
+                .ok()
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| {
+                    format!("--timeout must be a positive number of seconds, got {secs}")
+                })?,
+        ),
+    };
     let cas = open_cas(base)?;
     let db = open_db(base)?;
     let orch = ket_agent::Orchestrator::new(&cas, &db);
 
-    let prompt = prompt.unwrap_or("Complete the assigned task");
+    // The task content: its title and the context it was created against are
+    // part of the invocation, not something inferred from lineage afterwards.
+    // Looked up first, so an unknown id is "not found" whatever else is
+    // missing (a mistyped id with no --agent used to read "not assigned").
+    let title = db
+        .task_title(task_id)?
+        .ok_or_else(|| format!("task {task_id} not found"))?;
+
+    // The agent: an explicit --agent is an override; otherwise the task's
+    // stored assignee runs it, and a task nobody was assigned to is refused
+    // rather than routed to a default (#20).
+    let assignee = db.task_assignee(task_id)?;
+    let (agent, agent_source) = match agent {
+        // Naming the assignee is not an override of it.
+        Some(a) if assignee.as_deref() == Some(a) => (a.to_string(), "assigned"),
+        Some(a) => (a.to_string(), "override"),
+        None => match assignee {
+            Some(a) => (a, "assigned"),
+            None => {
+                return Err(format!(
+                    "task {task_id} is not assigned to any agent; `ket task assign {task_id} <agent>` first, or pass --agent"
+                )
+                .into())
+            }
+        },
+    };
+
+    // The context's bytes (a DAG node's content or a plain blob) are
+    // resolved inside `run_task`, after it has checked the task, the agent
+    // and the program: a context that cannot be read fails the task with the
+    // reason recorded, but only for a run that would otherwise go ahead.
+    let instructions = prompt.unwrap_or("Complete the assigned task");
+    let prompt = format!("Task {task_id}: {title}\n\n{instructions}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result_cid = rt.block_on(orch.run_task(task_id, prompt, agent, None))?;
+    let opts = ket_agent::RunOptions { timeout, force };
+    let result_cid = rt.block_on(orch.run_task(task_id, &prompt, &agent, &opts))?;
 
-    // Log the run
+    // Log the run, naming the agent that actually ran and how it was chosen
     let log_path = base.join("log");
-    log_event(&log_path, "run", &format!("{task_id} -> {result_cid}"));
+    log_event(
+        &log_path,
+        "run",
+        &format!("{task_id} -> {result_cid} (agent {agent}, {agent_source})"),
+    );
 
     if json {
         println!(
@@ -1585,6 +1871,7 @@ fn cmd_run(
             serde_json::to_string_pretty(&serde_json::json!({
                 "task_id": task_id,
                 "agent": agent,
+                "agent_source": agent_source,
                 "result_cid": result_cid.as_str(),
             }))?
         );
@@ -2097,6 +2384,49 @@ fn cmd_repair(base: &PathBuf, dry_run: bool, json: bool) -> Result<(), Box<dyn s
 
     let log_path = base.join("log");
     log_event(&log_path, "repair", &format!("reconciled={to_fix}"));
+
+    Ok(())
+}
+
+fn cmd_migrate(
+    base: &PathBuf,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_db(base)?;
+    let steps = db.plan_migration()?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": dry_run,
+                "steps": steps,
+                "applied": !dry_run && !steps.is_empty(),
+            }))?
+        );
+    } else if steps.is_empty() {
+        println!("Schema is current. No migration needed.");
+    } else {
+        let verb = if dry_run { "would apply" } else { "applying" };
+        println!(
+            "Migration plan ({} step{}):",
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        );
+        for step in &steps {
+            println!("  {verb}: {}", step.describe());
+        }
+    }
+
+    if !dry_run && !steps.is_empty() {
+        db.apply_migration(&steps)?;
+        if !json {
+            println!("\nMigration applied. Run `ket repair` next if CAS contains nodes that failed to index under the old schema.");
+        }
+        let log_path = base.join("log");
+        log::append(&log_path, "migrate", &format!("applied={}", steps.len()))?;
+    }
 
     Ok(())
 }

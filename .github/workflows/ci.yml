@@ -18,7 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ket-py's PyO3 (0.23) supports CPython up to 3.13; ubuntu-latest now
+      # ships 3.14, and the workspace build fails in pyo3-ffi's build script.
+      # Pin the interpreter until PyO3 is upgraded.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
+      # The pinned PyO3 0.23 supports Python through 3.13; ubuntu-latest's
+      # default interpreter can advance independently of our Rust lockfile.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Build
         run: cargo build --workspace
       - name: Unit tests (all crates)
@@ -44,6 +55,28 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
 
+  # Everything that needs a live Dolt: the whole ket-cli integration suite
+  # (`ket run`, tasks, repair, projection) and ket-sql's Dolt-backed tests.
+  # Those tests return early when dolt is absent, so in the `test` job they
+  # would pass without running; here Dolt is installed and they gate.
+  dolt-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Dolt
+        run: |
+          curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+          dolt version
+      - name: Configure Dolt identity
+        run: |
+          dolt config --global --add user.name "ket-ci"
+          dolt config --global --add user.email "ci@ket.local"
+      - name: Dolt-backed tests (ket-sql, ket-cli integration)
+        run: |
+          cargo test -p ket-sql
+          cargo test -p ket-cli --test integration
+
   # The L3 audit gate: verify_projection must return clean on a fresh substrate,
   # and rebuild_projection must be idempotent. This is the CI form of the ket
   # DESIGN.md test — "throw away everything except CAS + log; can you rebuild
@@ -68,3 +101,7 @@ jobs:
           cargo test -p ket-cli --test integration -- \
             verify_projection_after_repair_is_clean \
             rebuild_projection_heals_and_is_idempotent
+      - name: Recover interrupted DAG creates without another node
+        run: |
+          cargo build -p ket-cli
+          python3 scripts/test_dag_recovery.py --ket target/debug/ket -v

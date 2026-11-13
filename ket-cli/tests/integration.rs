@@ -145,6 +145,74 @@ fn dag_create_and_lineage() {
     assert_eq!(lineage_arr.len(), 2);
 }
 
+/// `dag lineage --json` returns what the node records (edge kinds, depth)
+/// and names an ancestor that is absent instead of returning a shorter chain.
+#[test]
+fn dag_lineage_reports_edge_kinds_and_missing_ancestors() {
+    let (ket_dir, _dir) = fresh_ket("dag-lineage-missing");
+    let mk = |content: &str, extra: &[&str]| {
+        let mut args = vec![
+            "dag",
+            "create",
+            content,
+            "--kind",
+            "reasoning",
+            "--agent",
+            "a",
+        ];
+        args.extend_from_slice(extra);
+        ket_json(&ket_dir, &args)["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let root = mk("root", &[]);
+    let left = mk("left", &["--parent", &root, "--edge-kind", "proposes"]);
+    let right = mk("right", &["--parent", &root]);
+    let merge = mk("merged", &["--parent", &left, "--parent", &right]);
+
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &merge]);
+    let arr = lineage.as_array().unwrap();
+    assert_eq!(arr.len(), 4);
+    let by_cid = |c: &str| arr.iter().find(|n| n["cid"] == c).unwrap().clone();
+    assert_eq!(
+        by_cid(&left)["parent_kinds"],
+        serde_json::json!(["proposes"])
+    );
+    assert_eq!(
+        by_cid(&right)["parent_kinds"],
+        serde_json::json!(["derives"])
+    );
+    // Siblings share a depth; the text view indents by it.
+    assert_eq!(by_cid(&left)["depth"], 1);
+    assert_eq!(by_cid(&right)["depth"], 1);
+    assert_eq!(by_cid(&root)["depth"], 2);
+    let (_, text, _) = ket(&ket_dir, &["dag", "lineage", &merge]);
+    let indents: Vec<usize> = text
+        .lines()
+        .map(|l| l.len() - l.trim_start().len())
+        .collect();
+    assert_eq!(indents, vec![0, 2, 2, 4], "{text}");
+
+    // Lose an ancestor: the chain says so.
+    std::fs::remove_file(ket_dir.join("cas").join(&left)).unwrap();
+    let lineage = ket_json(&ket_dir, &["dag", "lineage", &merge]);
+    let arr = lineage.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["missing_parents"], serde_json::json!([left]));
+    let (ok, text, _) = ket(&ket_dir, &["dag", "lineage", &merge]);
+    assert!(ok);
+    assert!(
+        text.contains("MISSING") && text.contains("INCOMPLETE"),
+        "{text}"
+    );
+
+    // A start CID that is not in the store is an error, not "none found".
+    let (ok, _, err) = ket(&ket_dir, &["dag", "lineage", &left]);
+    assert!(!ok);
+    assert!(err.contains("not in the store"), "{err}");
+}
+
 #[test]
 fn dag_drift_detection() {
     let (ket_dir, dir) = fresh_ket("dag-drift");
@@ -552,6 +620,57 @@ fn repair_idempotent() {
         0,
         "repair is idempotent"
     );
+}
+
+// --- Migrate test ---
+
+#[test]
+fn migrate_restores_dropped_schema() {
+    let (ket_dir, _dir) = fresh_ket("migrate");
+    if !has_dolt() {
+        return;
+    }
+
+    // Simulate a pre-schema-drift database: drop the calibrations table and
+    // the dag_nodes.schema_cid column. Matches the real-world failure mode
+    // from old .ket stores created before these were added.
+    ket(&ket_dir, &["sql", "DROP TABLE calibrations"]);
+    ket(
+        &ket_dir,
+        &["sql", "ALTER TABLE dag_nodes DROP COLUMN schema_cid"],
+    );
+
+    // Status should now fail (reproduces the sandbox/.ket symptom).
+    let (ok, _, _) = ket(&ket_dir, &["status"]);
+    assert!(!ok, "status should fail on a drifted schema");
+
+    // Dry-run should report both drift cases without touching the DB.
+    let plan = ket_json(&ket_dir, &["migrate", "--dry-run"]);
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["applied"], false);
+    let steps = plan["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "expected 2 drift steps, got: {steps:?}");
+    let kinds: Vec<&str> = steps.iter().map(|s| s["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"create_table"));
+    assert!(kinds.contains(&"add_column"));
+
+    // Status should still fail (dry-run must not mutate).
+    let (still_broken, _, _) = ket(&ket_dir, &["status"]);
+    assert!(!still_broken);
+
+    // Apply.
+    let applied = ket_json(&ket_dir, &["migrate"]);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["steps"].as_array().unwrap().len(), 2);
+
+    // Status should now succeed.
+    let (ok2, _, _) = ket(&ket_dir, &["status"]);
+    assert!(ok2, "status should succeed after migrate");
+
+    // Re-running migrate is a no-op.
+    let noop = ket_json(&ket_dir, &["migrate"]);
+    assert_eq!(noop["applied"], false);
+    assert_eq!(noop["steps"].as_array().unwrap().len(), 0);
 }
 
 // --- CDOM test ---
@@ -1584,4 +1703,1353 @@ fn dolt_history_advances_on_repair() {
         after > before,
         "history advanced after repair: {before} -> {after}"
     );
+}
+
+// --- #20 / #21: run routes through the stored assignee with the task's
+// content, and every launch failure leaves a failed task with its reason ---
+
+/// A stand-in agent: a shell script that records its argv to `capture`
+/// (`<name>.argv`) and its stdin to `<name>.stdin`, and prints a JSON line.
+/// Returns the registered command.
+fn capture_agent(tmp: &Path, name: &str) -> (String, PathBuf) {
+    let script = tmp.join(format!("{name}.sh"));
+    let capture = tmp.join(format!("{name}.argv"));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n---\\n' \"$@\" > '{}'\ncat > '{}'\necho '{{\"ok\":true}}'\n",
+            capture.display(),
+            capture.with_extension("stdin").display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (format!("bash {}", script.display()), capture)
+}
+
+/// Everything a `capture_agent` was handed: its argv, then its stdin.
+fn seen_by(capture: &Path) -> String {
+    let argv = std::fs::read_to_string(capture).unwrap();
+    let stdin = std::fs::read_to_string(capture.with_extension("stdin")).unwrap_or_default();
+    format!("{argv}{stdin}")
+}
+
+fn task_row(ket_dir: &Path, tid: &str) -> String {
+    ket(
+        ket_dir,
+        &[
+            "sql",
+            &format!("SELECT status, meta FROM tasks WHERE id='{tid}'"),
+        ],
+    )
+    .1
+}
+
+#[test]
+fn run_uses_the_stored_assignee_and_passes_the_task_content() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-assignee");
+    let (cmd, capture) = capture_agent(tmp.path(), "review-agent");
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["agent", "register", "review-agent", "--command", &cmd],
+    );
+    assert!(ok, "register: {err}");
+    // the context the task is created against must reach the agent
+    let ctx_cid = {
+        let mut child = std::process::Command::new(ket_bin())
+            .args(["--home", ket_dir.to_str().unwrap(), "put", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"CTX-BLOB the file under review")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let tid = ket_json(
+        &ket_dir,
+        &[
+            "task",
+            "create",
+            "review the parser, carefully",
+            "--by",
+            "human",
+            "--context",
+            &ctx_cid,
+        ],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "review-agent"]);
+    assert!(ok, "assign: {err}");
+
+    // no --agent: the stored assignee runs it
+    let (ok, out, err) = ket(&ket_dir, &["--json", "run", &tid]);
+    assert!(ok, "run without --agent: {out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["agent"], "review-agent");
+    assert_eq!(v["agent_source"], "assigned");
+    let seen = seen_by(&capture);
+    assert!(
+        seen.contains("review the parser, carefully"),
+        "title in the invocation: {seen}"
+    );
+    assert!(
+        seen.contains("CTX-BLOB the file under review"),
+        "context in the invocation: {seen}"
+    );
+    assert!(seen.contains(&tid), "task id in the invocation: {seen}");
+    assert!(task_row(&ket_dir, &tid).contains("done"));
+}
+
+#[test]
+fn run_with_explicit_agent_is_recorded_as_an_override() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-override");
+    let (cmd_a, _) = capture_agent(tmp.path(), "assignee");
+    let (cmd_b, capture_b) = capture_agent(tmp.path(), "override");
+    ket(
+        &ket_dir,
+        &["agent", "register", "assignee", "--command", &cmd_a],
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "override", "--command", &cmd_b],
+    );
+    let tid = ket_json(&ket_dir, &["task", "create", "t", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "assignee"]);
+    let (ok, out, err) = ket(&ket_dir, &["--json", "run", &tid, "--agent", "override"]);
+    assert!(ok, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["agent"], "override");
+    assert_eq!(v["agent_source"], "override");
+    assert!(
+        capture_b.exists(),
+        "the override agent, not the assignee, was invoked"
+    );
+    // the sealed result names the agent that actually ran
+    let node = ket_json(
+        &ket_dir,
+        &["dag", "show", v["result_cid"].as_str().unwrap()],
+    );
+    assert_eq!(node["agent"], "override");
+}
+
+#[test]
+fn run_refuses_an_unassigned_task_without_an_agent() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("run-unassigned");
+    let tid = ket_json(&ket_dir, &["task", "create", "t", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(err.contains("not assigned"), "{err}");
+    assert!(
+        task_row(&ket_dir, &tid).contains("pending"),
+        "nothing ran, nothing changed"
+    );
+}
+
+#[test]
+fn run_marks_the_task_failed_when_the_agent_cannot_launch() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-launch-failure");
+    // missing executable
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "review-missing",
+            "--command",
+            "/definitely-not-installed-review-agent",
+        ],
+    );
+    let tid = ket_json(
+        &ket_dir,
+        &["task", "create", "review spawn failure", "--by", "review"],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "review-missing"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid, "--agent", "review-missing"]);
+    assert!(!ok);
+    assert!(err.contains("definitely-not-installed"), "{err}");
+    let row = task_row(&ket_dir, &tid);
+    assert!(row.contains("failed"), "status must leave running: {row}");
+    assert!(
+        row.contains("launch") && row.contains("definitely-not-installed"),
+        "reason kept on the row: {row}"
+    );
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "launch", "{meta}");
+
+    // permission denied: a real file that is not executable
+    let noexec = tmp.path().join("noexec-agent");
+    std::fs::write(&noexec, "#!/usr/bin/env bash\necho hi\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&noexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "review-noexec",
+            "--command",
+            noexec.to_str().unwrap(),
+        ],
+    );
+    let tid2 = ket_json(
+        &ket_dir,
+        &[
+            "task",
+            "create",
+            "review permission failure",
+            "--by",
+            "review",
+        ],
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid2, "review-noexec"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid2]);
+    assert!(!ok, "{err}");
+    let row = task_row(&ket_dir, &tid2);
+    assert!(row.contains("failed") && row.contains("launch"), "{row}");
+    assert_eq!(task_meta(&ket_dir, &tid2)["failed"]["phase"], "launch");
+
+    // the successful path is intact. (Nonzero exits and storage failures have
+    // their own tests: a_nonzero_exit_keeps_a_reason_with_quotes_and_backslashes_as_json,
+    // a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase.)
+    let (cmd, _) = capture_agent(tmp.path(), "fine");
+    ket(&ket_dir, &["agent", "register", "fine", "--command", &cmd]);
+    let tid3 = ket_json(&ket_dir, &["task", "create", "works", "--by", "review"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid3, "fine"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid3]);
+    assert!(ok, "{err}");
+    assert!(task_row(&ket_dir, &tid3).contains("done"));
+}
+
+#[test]
+fn run_passes_a_multi_line_title_whole() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-multiline-title");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    // dolt quotes a multi-line value across CSV lines; reading the first
+    // line only would hand the agent `"first line` and drop the rest
+    let title = "first line, with a comma\nsecond line with \"quotes\"";
+    let tid = ket_json(&ket_dir, &["task", "create", title, "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let seen = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        seen.contains(title),
+        "whole title in the invocation: {seen}"
+    );
+}
+
+#[test]
+fn a_successful_retry_drops_the_earlier_failure_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-retry");
+    ket(
+        &ket_dir,
+        &[
+            "agent",
+            "register",
+            "missing",
+            "--command",
+            "/definitely-not-installed-review-agent",
+        ],
+    );
+    let (cmd, _) = capture_agent(tmp.path(), "fine");
+    ket(&ket_dir, &["agent", "register", "fine", "--command", &cmd]);
+    let tid = ket_json(&ket_dir, &["task", "create", "retry me", "--by", "human"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ket(&ket_dir, &["task", "assign", &tid, "missing"]);
+    let (ok, _, _) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(task_row(&ket_dir, &tid).contains("launch"));
+
+    // reassigned and rerun: the row must not read `done` next to a failure
+    ket(&ket_dir, &["task", "assign", &tid, "fine"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let row = task_row(&ket_dir, &tid);
+    assert!(
+        row.contains("done") && !row.contains("failed"),
+        "stale failure reason on a done task: {row}"
+    );
+}
+
+// --- Review fixes on #20/#21: no exit leaves `running`, the failure reason
+// round-trips as JSON, and context reaches the agent as content on stdin ---
+
+/// A registered agent whose behaviour is the given bash body.
+fn script_agent(tmp: &Path, name: &str, body: &str) -> String {
+    let script = tmp.join(format!("{name}.sh"));
+    std::fs::write(&script, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    format!("bash {}", script.display())
+}
+
+/// A single-column, single-row value from `ket sql`, decoded from dolt's CSV.
+fn sql_value(ket_dir: &Path, sql: &str) -> String {
+    let (ok, out, err) = ket(ket_dir, &["sql", sql]);
+    assert!(ok, "{sql}: {err}");
+    let row = out
+        .split_once('\n')
+        .map(|(_, r)| r.trim_end_matches(['\r', '\n']))
+        .unwrap_or("");
+    if row.len() >= 2 && row.starts_with('"') && row.ends_with('"') {
+        row[1..row.len() - 1].replace("\"\"", "\"")
+    } else {
+        row.to_string()
+    }
+}
+
+fn task_status(ket_dir: &Path, tid: &str) -> String {
+    sql_value(
+        ket_dir,
+        &format!("SELECT status FROM tasks WHERE id='{tid}'"),
+    )
+}
+
+/// `tasks.meta`, which must always be valid JSON when set.
+fn task_meta(ket_dir: &Path, tid: &str) -> serde_json::Value {
+    let raw = sql_value(ket_dir, &format!("SELECT meta FROM tasks WHERE id='{tid}'"));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("meta is not JSON ({e}): {raw:?}"))
+}
+
+fn new_task(ket_dir: &Path, title: &str, extra: &[&str]) -> String {
+    let mut args = vec!["task", "create", title, "--by", "human"];
+    args.extend_from_slice(extra);
+    ket_json(ket_dir, &args)["id"].as_str().unwrap().to_string()
+}
+
+fn put_blob(ket_dir: &Path, bytes: &[u8]) -> String {
+    use std::io::Write;
+    let mut child = Command::new(ket_bin())
+        .args(["--home", ket_dir.to_str().unwrap(), "put", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn an_agent_with_no_runnable_command_does_not_leave_the_task_running() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, _tmp) = fresh_ket("run-unresolvable");
+    // copilot is a known preset name (assign accepts it) but has no built-in
+    // invocation unless registered
+    let tid = new_task(&ket_dir, "suggest something", &[]);
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "copilot"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "nothing could run");
+    assert!(err.contains("copilot"), "{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "assigned", "never started");
+
+    // a registered command that is only whitespace has no program
+    ket(
+        &ket_dir,
+        &["agent", "register", "blank", "--command", "   "],
+    );
+    let tid2 = new_task(&ket_dir, "blank agent", &[]);
+    ket(&ket_dir, &["task", "assign", &tid2, "blank"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid2]);
+    assert!(!ok);
+    assert!(err.contains("blank"), "{err}");
+    assert_eq!(task_status(&ket_dir, &tid2), "assigned", "never started");
+}
+
+#[test]
+fn a_nonzero_exit_keeps_a_reason_with_quotes_and_backslashes_as_json() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-exit-reason");
+    let stderr = r#"bad "thing" happened\path\n"#;
+    let cmd = script_agent(
+        tmp.path(),
+        "grumpy",
+        &format!("printf '%s' '{stderr}' >&2\nexit 3"),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "grumpy", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "fail loudly", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "grumpy"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(
+        err.contains(stderr),
+        "the agent's error reaches the user: {err}"
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "exit", "{meta}");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("exit status: 3") && reason.ends_with(stderr),
+        "exact reason kept: {reason:?}"
+    );
+}
+
+#[test]
+fn a_huge_stderr_is_bounded_on_the_row_and_the_agent_error_survives() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-huge-stderr");
+    let cmd = script_agent(
+        tmp.path(),
+        "noisy",
+        "{ printf 'HEAD-MARK'; head -c 300000 /dev/zero | tr '\\0' x; printf 'TAIL-MARK'; } >&2\nexit 1",
+    );
+    ket(&ket_dir, &["agent", "register", "noisy", "--command", &cmd]);
+    let tid = new_task(&ket_dir, "fail at length", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "noisy"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(
+        err.contains("exit status: 1") && err.contains("HEAD-MARK"),
+        "the agent's failure, not a storage error, is reported: {}",
+        &err[..err.len().min(500)]
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "exit");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(reason.len() < 16 * 1024, "bounded: {} bytes", reason.len());
+    assert!(
+        reason.contains("HEAD-MARK") && reason.contains("TAIL-MARK"),
+        "both ends of the output kept"
+    );
+}
+
+#[test]
+fn a_result_that_cannot_be_stored_fails_the_task_in_the_store_phase() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-store-failure");
+    // the agent exits 0, but takes the projection table away first, so
+    // sealing its result into SQL fails after it finished
+    let db = ket_dir.join("ket.db");
+    let cmd = script_agent(
+        tmp.path(),
+        "saboteur",
+        &format!(
+            "cd '{}' && dolt sql -q 'RENAME TABLE dag_nodes TO dag_nodes_gone' >/dev/null\necho '{{\"ok\":1}}'",
+            db.display()
+        ),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "saboteur", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "finish, then fail to store", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "saboteur"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    let meta = task_meta(&ket_dir, &tid);
+    assert_eq!(meta["failed"]["phase"], "store", "{meta}");
+    assert!(
+        meta["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("exited 0"),
+        "{meta}"
+    );
+}
+
+#[test]
+fn a_context_node_reaches_the_agent_as_its_content() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-context-node");
+    let ctx = create_node(&ket_dir, "the source material", &["--kind", "context"]);
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "read it", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let seen = seen_by(&capture);
+    assert!(seen.contains("the source material"), "content: {seen}");
+    assert!(
+        !seen.contains("output_cid"),
+        "not the node's JSON wrapper: {seen}"
+    );
+}
+
+#[test]
+fn context_is_delivered_on_stdin_whatever_its_size_or_shape() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-context-stdin");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+
+    // larger than one argv element may be (128 KiB on Linux)
+    let big = "y".repeat(200 * 1024);
+    let ctx = put_blob(&ket_dir, big.as_bytes());
+    let tid = new_task(&ket_dir, "read a lot", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{}", &err[..err.len().min(500)]);
+    assert_eq!(
+        std::fs::read_to_string(capture.with_extension("stdin")).unwrap(),
+        big
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+
+    // a context that looks like a flag never becomes an argument
+    let ctx = put_blob(&ket_dir, b"--model=evil\nthen the real material");
+    let tid = new_task(&ket_dir, "read a flag", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let argv = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        !argv.contains("--model=evil"),
+        "context leaked into argv: {argv}"
+    );
+    assert!(
+        argv.starts_with(&format!("Task {tid}: read a flag")),
+        "the prompt is the only argument: {argv}"
+    );
+    assert!(std::fs::read_to_string(capture.with_extension("stdin"))
+        .unwrap()
+        .starts_with("--model=evil"));
+}
+
+// --- Second review round: the stdin feed tolerates an agent that ignores
+// its context, and cannot deadlock against one that talks first ---
+
+/// `ket run <tid>` with a deadline: a run that has not finished in `secs` is
+/// killed and reported as a timeout, so a deadlock fails the test instead
+/// of hanging it. ket's own output goes to files, never a pipe nobody reads.
+fn ket_run_within(ket_dir: &Path, tid: &str, secs: u64) -> Result<(bool, String), String> {
+    let out_dir = tempfile::tempdir().unwrap();
+    let stdout = out_dir.path().join("stdout");
+    let stderr = out_dir.path().join("stderr");
+    let mut child = Command::new(ket_bin())
+        .args(["--home", ket_dir.to_str().unwrap(), "run", tid])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut text = std::fs::read_to_string(&stdout).unwrap_or_default();
+            let err = std::fs::read(&stderr).unwrap_or_default();
+            text.push_str(&String::from_utf8_lossy(&err[..err.len().min(2000)]));
+            return Ok((status.success(), text));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("`ket run {tid}` did not finish within {secs}s"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn an_agent_that_exits_without_reading_its_context_still_completes() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-unread-context");
+    // exits at once: ket's write of a context far larger than a pipe buffer
+    // meets a closed pipe (EPIPE), which is the agent's choice, not a failure
+    let cmd = script_agent(tmp.path(), "ignorer", "echo '{\"ok\":true}'\nexit 0");
+    ket(
+        &ket_dir,
+        &["agent", "register", "ignorer", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, &vec![b'c'; 4 * 1024 * 1024]);
+    let tid = new_task(&ket_dir, "ignore the context", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "ignorer"]);
+    let (ok, out) = ket_run_within(&ket_dir, &tid, 60).unwrap();
+    assert!(ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "done",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+}
+
+#[test]
+fn an_agent_that_writes_megabytes_before_reading_stdin_does_not_deadlock() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-chatty-agent");
+    // ~5 MB to each of stdout and stderr before touching stdin: if ket fed
+    // stdin before collecting output, both sides would block on a full pipe
+    let cmd = script_agent(
+        tmp.path(),
+        "chatty",
+        "head -c 5000000 /dev/zero | tr '\\0' o\nhead -c 5000000 /dev/zero | tr '\\0' e >&2\ncat > /dev/null\nexit 0",
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "chatty", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, &vec![b'c'; 4 * 1024 * 1024]);
+    let tid = new_task(&ket_dir, "talk first", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "chatty"]);
+    let (ok, out) = ket_run_within(&ket_dir, &tid, 60).unwrap();
+    assert!(ok, "{out}");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+}
+
+#[test]
+fn a_binary_context_reaches_the_agent_byte_for_byte() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-binary-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    // not UTF-8: a lossy decode would turn ff, fe and 80 into U+FFFD
+    let bytes: &[u8] = b"\xff\xfe\x00\x01binary\x80";
+    let ctx = put_blob(&ket_dir, bytes);
+    let tid = new_task(&ket_dir, "read bytes", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(
+        std::fs::read(capture.with_extension("stdin")).unwrap(),
+        bytes,
+        "the context must arrive unmodified"
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+}
+
+/// A run whose context cannot be read must fail the task, say so in its
+/// meta (phase `context`, naming the CID), and say on stderr that it was
+/// the task's context, not some other content, that was missing.
+fn assert_context_failure(ket_dir: &Path, tid: &str, cid: &str, err: &str) {
+    assert!(err.contains("context") && err.contains(cid), "{err}");
+    assert_eq!(
+        task_status(ket_dir, tid),
+        "failed",
+        "{}",
+        task_row(ket_dir, tid)
+    );
+    let meta = task_meta(ket_dir, tid);
+    assert_eq!(meta["failed"]["phase"], "context", "{meta}");
+    let reason = meta["failed"]["reason"].as_str().unwrap();
+    assert!(reason.contains(cid), "{meta}");
+}
+
+#[test]
+fn a_dangling_context_cid_fails_the_task_with_a_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-dangling-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let missing = "0".repeat(64);
+    let tid = new_task(&ket_dir, "read nothing", &["--context", &missing]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{out}");
+    assert_context_failure(&ket_dir, &tid, &missing, &err);
+    assert!(
+        !capture.exists(),
+        "the agent must not run without its context"
+    );
+}
+
+#[test]
+fn a_context_node_whose_content_is_gone_fails_the_task_with_a_reason() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-dangling-node-content");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let created = ket_json(
+        &ket_dir,
+        &[
+            "dag",
+            "create",
+            "material that will vanish",
+            "--kind",
+            "context",
+        ],
+    );
+    let node = created["node_cid"].as_str().unwrap().to_string();
+    let content = created["content_cid"].as_str().unwrap().to_string();
+    std::fs::remove_file(ket_dir.join("cas").join(&content)).unwrap();
+    let tid = new_task(&ket_dir, "read a node", &["--context", &node]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok, "{out}");
+    assert_context_failure(&ket_dir, &tid, &node, &err);
+    // the reason also names the content that is missing
+    let meta = task_meta(&ket_dir, &tid);
+    assert!(
+        meta["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&content),
+        "{meta}"
+    );
+    assert!(
+        !capture.exists(),
+        "the agent must not run without its context"
+    );
+}
+
+#[test]
+fn a_refused_run_leaves_an_assigned_task_with_a_dangling_context_assigned() {
+    if !has_dolt() {
+        return;
+    }
+    // An unknown agent is refused before anything runs; the task's context
+    // is not even looked at, so a dangling context must not fail the task.
+    let (ket_dir, tmp) = fresh_ket("run-refused-dangling-context");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let missing = "0".repeat(64);
+    let tid = new_task(&ket_dir, "read nothing", &["--context", &missing]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid, "--agent", "rdd"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "assigned",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(err.contains("agent rdd"), "{err}");
+    assert!(!capture.exists(), "nothing must run");
+}
+
+#[test]
+fn a_refused_run_leaves_a_done_task_done_even_if_its_context_is_gone() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-refused-done-task");
+    let (cmd, _capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let ctx = put_blob(&ket_dir, b"material that will vanish");
+    let tid = new_task(&ket_dir, "read once", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+    let result = sql_value(
+        &ket_dir,
+        &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+    );
+    assert!(!result.is_empty());
+
+    std::fs::remove_file(ket_dir.join("cas").join(&ctx)).unwrap();
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid, "--agent", "nosuch"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "done",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(err.contains("agent nosuch"), "{err}");
+    assert_eq!(
+        sql_value(
+            &ket_dir,
+            &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+        ),
+        result,
+        "the finished result must survive a refused re-run"
+    );
+}
+
+// --- #23: every run ends in a recorded state; runs do not race or hang ---
+
+/// Start `ket run <tid> [extra]` without waiting for it. Output goes to
+/// files, never a pipe nobody reads.
+fn spawn_run(
+    ket_dir: &Path,
+    tid: &str,
+    extra: &[&str],
+) -> (std::process::Child, tempfile::TempDir) {
+    let out_dir = tempfile::tempdir().unwrap();
+    let mut args = vec!["--home", ket_dir.to_str().unwrap(), "run", tid];
+    args.extend_from_slice(extra);
+    let child = Command::new(ket_bin())
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(out_dir.path().join("stdout")).unwrap())
+        .stderr(std::fs::File::create(out_dir.path().join("stderr")).unwrap())
+        .spawn()
+        .unwrap();
+    (child, out_dir)
+}
+
+/// Wait for a spawned process, killing it (and failing) after `secs`.
+fn wait_within(child: &mut std::process::Child, secs: u64, what: &str) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{what} did not finish within {secs}s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn wait_for_status(ket_dir: &Path, tid: &str, want: &str, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while task_status(ket_dir, tid) != want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task never became {want}: {}",
+            task_row(ket_dir, tid)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn pid_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn result_cid(ket_dir: &Path, tid: &str) -> String {
+    sql_value(
+        ket_dir,
+        &format!("SELECT result_cid FROM tasks WHERE id='{tid}'"),
+    )
+}
+
+/// An agent that records its pid and then sleeps far longer than any test.
+fn sleeper_agent(ket_dir: &Path, tmp: &Path, name: &str) -> PathBuf {
+    let pidfile = tmp.join(format!("{name}.pid"));
+    let cmd = script_agent(
+        tmp,
+        name,
+        &format!("echo $$ > '{}'\nexec sleep 300", pidfile.display()),
+    );
+    let (ok, _, err) = ket(ket_dir, &["agent", "register", name, "--command", &cmd]);
+    assert!(ok, "{err}");
+    pidfile
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupted_run_kills_the_agent_and_records_why() {
+    if !has_dolt() {
+        return;
+    }
+    for signal in ["INT", "TERM"] {
+        let (ket_dir, tmp) = fresh_ket("run-interrupted");
+        let pidfile = sleeper_agent(&ket_dir, tmp.path(), "sleeper");
+        let tid = new_task(&ket_dir, "sleep", &[]);
+        ket(&ket_dir, &["task", "assign", &tid, "sleeper"]);
+
+        let (mut run, _out) = spawn_run(&ket_dir, &tid, &[]);
+        wait_for_status(&ket_dir, &tid, "running", 30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !pidfile.exists() {
+            assert!(std::time::Instant::now() < deadline, "agent never started");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Only ket gets the signal (as with `timeout -s INT ket run ...`):
+        // the agent dies because ket kills it, not because it shared the signal.
+        let sent = Command::new("kill")
+            .args([&format!("-{signal}"), &run.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let status = wait_within(&mut run, 30, "interrupted ket run");
+        assert!(!status.success(), "an interrupted run is not a success");
+
+        assert_eq!(
+            task_status(&ket_dir, &tid),
+            "failed",
+            "SIG{signal}: {}",
+            task_row(&ket_dir, &tid)
+        );
+        let meta = task_meta(&ket_dir, &tid);
+        assert_eq!(meta["failed"]["phase"], "interrupted", "{meta}");
+        assert!(
+            meta["failed"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("SIG{signal}")),
+            "{meta}"
+        );
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(pid.trim()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the agent outlived the interrupted run"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+fn a_run_past_its_timeout_is_killed_and_recorded() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-timeout");
+    // A wrapper, as most real agent commands are: the script stays alive as
+    // the direct child and the work happens in a process under it. Killing
+    // only the direct child would leave that one running.
+    let pidfile = tmp.path().join("worker.pid");
+    let cmd = script_agent(
+        tmp.path(),
+        "sleeper",
+        &format!("sleep 300 &\necho $! > '{}'\nwait", pidfile.display()),
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "sleeper", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "sleep", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "sleeper"]);
+
+    let (mut run, _out) = spawn_run(&ket_dir, &tid, &["--timeout", "1.5"]);
+    let status = wait_within(&mut run, 30, "ket run --timeout");
+    assert!(!status.success());
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "failed",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert_eq!(task_meta(&ket_dir, &tid)["failed"]["phase"], "timeout");
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    assert!(
+        !pid_alive(pid.trim()),
+        "a process under the agent outlived its timeout"
+    );
+
+    // a timeout too large to be a deadline is no limit, not a panic
+    let (quick, _capture) = capture_agent(tmp.path(), "quick");
+    ket(
+        &ket_dir,
+        &["agent", "register", "quick", "--command", &quick],
+    );
+    let tid3 = new_task(&ket_dir, "huge timeout", &[]);
+    ket(&ket_dir, &["task", "assign", &tid3, "quick"]);
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid3, "--timeout", "1e19"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(task_status(&ket_dir, &tid3), "done");
+
+    // not a number of seconds: refused before anything runs
+    let tid2 = new_task(&ket_dir, "bad timeout", &[]);
+    ket(&ket_dir, &["task", "assign", &tid2, "sleeper"]);
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid2, "--timeout", "0"]);
+    assert!(!ok);
+    assert!(err.contains("--timeout"), "{err}");
+    assert_eq!(task_status(&ket_dir, &tid2), "assigned");
+}
+
+/// The agent exits, but a process it left behind still holds its stdin
+/// (never reading it) and its stdout. `ket run` used to wait on that stdin
+/// write for as long as the leftover lived.
+#[test]
+fn a_leftover_background_process_does_not_hang_the_run() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-leftover");
+    let cmd = script_agent(
+        tmp.path(),
+        "leaver",
+        "( sleep 60 ) &\necho 'the agent answer'\nexit 0",
+    );
+    ket(
+        &ket_dir,
+        &["agent", "register", "leaver", "--command", &cmd],
+    );
+    // far more than a pipe buffer, so the write cannot complete unread
+    let ctx = put_blob(&ket_dir, &vec![b'c'; 4 * 1024 * 1024]);
+    let tid = new_task(&ket_dir, "leave something behind", &["--context", &ctx]);
+    ket(&ket_dir, &["task", "assign", &tid, "leaver"]);
+
+    let (ok, out) = ket_run_within(&ket_dir, &tid, 30).unwrap();
+    assert!(ok, "{out}");
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "done",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    let result = result_cid(&ket_dir, &tid);
+    let (_, shown, _) = ket(&ket_dir, &["get", &result]);
+    let node: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let (_, answer, _) = ket(&ket_dir, &["get", node["output_cid"].as_str().unwrap()]);
+    assert!(answer.contains("the agent answer"), "{answer}");
+}
+
+#[test]
+fn running_and_done_tasks_are_not_run_again_without_force() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-guard");
+    // succeeds while `ok` exists, fails once it is removed
+    let marker = tmp.path().join("ok");
+    std::fs::write(&marker, "").unwrap();
+    let runs = tmp.path().join("runs");
+    let cmd = script_agent(
+        tmp.path(),
+        "flaky",
+        &format!(
+            "echo run >> '{}'\n[ -e '{}' ] || {{ echo 'second attempt broke' >&2; exit 3; }}\necho '{{\"ok\":true}}'",
+            runs.display(),
+            marker.display()
+        ),
+    );
+    ket(&ket_dir, &["agent", "register", "flaky", "--command", &cmd]);
+    let tid = new_task(&ket_dir, "once", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "flaky"]);
+    let count = || {
+        std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(ok, "{out}{err}");
+    let first = result_cid(&ket_dir, &tid);
+    assert!(!first.is_empty());
+
+    // done: refused, untouched
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(err.contains("is done") && err.contains("--force"), "{err}");
+    assert_eq!(count(), 1, "a refused run must not start the agent");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+    assert_eq!(result_cid(&ket_dir, &tid), first);
+
+    // forced, and this attempt fails: it must not end `failed` next to the
+    // earlier attempt's result
+    std::fs::remove_file(&marker).unwrap();
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid, "--force"]);
+    assert!(!ok);
+    assert!(err.contains("second attempt broke"), "{err}");
+    assert_eq!(count(), 2);
+    assert_eq!(task_status(&ket_dir, &tid), "failed");
+    assert_eq!(
+        result_cid(&ket_dir, &tid),
+        "",
+        "a failed rerun must not keep the previous attempt's result: {}",
+        task_row(&ket_dir, &tid)
+    );
+
+    // running (a run that died without recording an outcome): refused,
+    // then reclaimed with --force
+    std::fs::write(&marker, "").unwrap();
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &[
+            "sql",
+            &format!("UPDATE tasks SET status='running' WHERE id='{tid}'"),
+        ],
+    );
+    assert!(ok, "{err}");
+    let (ok, _, err) = ket(&ket_dir, &["run", &tid]);
+    assert!(!ok);
+    assert!(err.contains("is running"), "{err}");
+    assert_eq!(count(), 2);
+    assert_eq!(task_status(&ket_dir, &tid), "running");
+    let (ok, out, err) = ket(&ket_dir, &["run", &tid, "--force"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+    assert_eq!(count(), 3);
+}
+
+#[test]
+fn concurrent_runs_of_one_task_start_the_agent_once() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-race");
+    let runs = tmp.path().join("runs");
+    let cmd = script_agent(
+        tmp.path(),
+        "slow",
+        &format!(
+            "echo run >> '{}'\nsleep 2\necho '{{\"ok\":true}}'",
+            runs.display()
+        ),
+    );
+    ket(&ket_dir, &["agent", "register", "slow", "--command", &cmd]);
+    let tid = new_task(&ket_dir, "contended", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "slow"]);
+
+    let mut children: Vec<_> = (0..4).map(|_| spawn_run(&ket_dir, &tid, &[])).collect();
+    let succeeded = children
+        .iter_mut()
+        .map(|(child, _)| wait_within(child, 60, "concurrent ket run"))
+        .filter(|s| s.success())
+        .count();
+    assert_eq!(succeeded, 1, "exactly one run may hold the task");
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap().lines().count(),
+        1,
+        "the agent must have been started once"
+    );
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+    assert!(!result_cid(&ket_dir, &tid).is_empty());
+}
+
+/// The built-in claude and codex invocations, exercised end to end with a
+/// stand-in on PATH: the argv each preset is given and the context on stdin.
+#[test]
+fn preset_agents_get_their_argv_and_the_context_on_stdin() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-presets");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for name in ["claude", "codex"] {
+        let exe = bin.join(name);
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{0}/{name}.argv'\ncat > '{0}/{name}.stdin'\necho '{{\"ok\":true}}'\n",
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ctx = put_blob(&ket_dir, b"--looks-like-a-flag\nthe material");
+    for (name, leading) in [
+        ("claude", vec!["-p", "--output-format", "json"]),
+        ("codex", vec!["exec"]),
+    ] {
+        let tid = new_task(&ket_dir, &format!("ask {name}"), &["--context", &ctx]);
+        let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, name]);
+        assert!(ok, "{err}");
+        let out = Command::new(ket_bin())
+            .args(["--home", ket_dir.to_str().unwrap(), "--json", "run", &tid])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(ran["agent"], name);
+        assert_eq!(ran["agent_source"], "assigned");
+
+        let argv = std::fs::read_to_string(tmp.path().join(format!("{name}.argv"))).unwrap();
+        let args: Vec<&str> = argv.lines().collect();
+        assert_eq!(&args[..leading.len()], &leading[..], "{argv}");
+        // then exactly one more argument: the prompt (task line, blank,
+        // instructions), never the context
+        assert_eq!(
+            args[leading.len()],
+            format!("Task {tid}: ask {name}"),
+            "{argv}"
+        );
+        assert!(!argv.contains("the material"), "{argv}");
+        let stdin = std::fs::read_to_string(tmp.path().join(format!("{name}.stdin"))).unwrap();
+        assert_eq!(stdin, "--looks-like-a-flag\nthe material");
+        assert_eq!(task_status(&ket_dir, &tid), "done");
+    }
+}
+
+#[test]
+fn run_names_what_is_missing_and_how_the_agent_was_chosen() {
+    if !has_dolt() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-nits");
+    // an id that names no task is "not found", with or without --agent
+    let (ok, _, err) = ket(&ket_dir, &["run", "no-such-task"]);
+    assert!(!ok);
+    assert!(err.contains("not found"), "{err}");
+    assert!(!err.contains("not assigned"), "{err}");
+
+    // an agent name with a quote in it survives registration, assignment
+    // and the status updates of a run
+    let (cmd, _capture) = capture_agent(tmp.path(), "obrien");
+    let (ok, _, err) = ket(
+        &ket_dir,
+        &["agent", "register", "o'brien", "--command", &cmd],
+    );
+    assert!(ok, "{err}");
+    let tid = new_task(&ket_dir, "it's quoted", &[]);
+    let (ok, _, err) = ket(&ket_dir, &["task", "assign", &tid, "o'brien"]);
+    assert!(ok, "{err}");
+    // naming the assignee explicitly is not an override
+    let ran = ket_json(&ket_dir, &["run", &tid, "--agent", "o'brien"]);
+    assert_eq!(ran["agent"], "o'brien");
+    assert_eq!(ran["agent_source"], "assigned");
+    assert_eq!(task_status(&ket_dir, &tid), "done");
+}
+
+/// Ctrl-C while `ket run` is still waiting for the store (another ket
+/// process holds the Dolt lock) must not go on to claim the task, start the
+/// agent and kill it: the task is left exactly as it was.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_while_waiting_for_the_store_leaves_the_task_alone() {
+    if !has_dolt() || Command::new("flock").arg("--version").output().is_err() {
+        return;
+    }
+    let (ket_dir, tmp) = fresh_ket("run-interrupt-waiting");
+    let (cmd, capture) = capture_agent(tmp.path(), "reader");
+    ket(
+        &ket_dir,
+        &["agent", "register", "reader", "--command", &cmd],
+    );
+    let tid = new_task(&ket_dir, "wait for the lock", &[]);
+    ket(&ket_dir, &["task", "assign", &tid, "reader"]);
+
+    // Hold the store lock the way another ket process would.
+    let lock = ket_dir.join("ket.db").join(".ket-dolt.lock");
+    assert!(lock.exists(), "lock file moved: {}", lock.display());
+    let mut holder = Command::new("flock")
+        .args([lock.to_str().unwrap(), "sleep", "4"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let (mut run, _out) = spawn_run(&ket_dir, &tid, &[]);
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(run.try_wait().unwrap().is_none(), "run should be waiting");
+    let sent = Command::new("kill")
+        .args(["-INT", &run.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let status = wait_within(&mut run, 60, "interrupted ket run");
+    holder.wait().unwrap();
+
+    assert!(!status.success());
+    assert_eq!(
+        task_status(&ket_dir, &tid),
+        "assigned",
+        "{}",
+        task_row(&ket_dir, &tid)
+    );
+    assert!(!capture.exists(), "the agent must not have been started");
 }

@@ -90,7 +90,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_get".into(),
-            description: "Retrieve stored content by its CID. Returns the raw content bytes. Use after ket_dag_lineage or ket_dag_ls to inspect what a node's output_cid points to.".into(),
+            description: "Retrieve stored content by its CID. The bytes are re-hashed before they are returned: a successful result always carries `verified: true`, and a blob that no longer matches its CID is an error, never content. `encoding` is `utf8` for text, or `base64` when the blob is not valid UTF-8. Use after ket_dag_lineage or ket_dag_ls to inspect what a node's output_cid points to.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -132,11 +132,12 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_dag_lineage".into(),
-            description: "Trace a node's full ancestry by walking parent links up the DAG. Use this to understand how a piece of knowledge was derived — what reasoning, code, or memory it builds on.".into(),
+            description: "Trace a node's ancestry by walking parent links up the DAG. Use this to understand how a piece of knowledge was derived — what reasoning, code, or memory it builds on. Each node carries `parents` and an index-aligned `parent_kinds` (grounds, derives, proposes, confirms, refutes, supersedes): read them — a node that only `proposes` its parent is a hypothesis, not a derivation, and `refutes` is evidence against. `saturation` (0.0 open question … 1.0 settled) is returned when the node declared it. Check `complete`: when false, `missing` lists ancestor CIDs that are not in this store (the chain is shorter than it should be) and `truncated` says a depth bound cut the walk. `non_node_parents` are parents that are raw content, not nodes.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "cid": { "type": "string", "description": "Node CID to trace from" }
+                    "cid": { "type": "string", "description": "Node CID to trace from" },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "Optional bound on how many parent hops to follow. Omit for the full ancestry." }
                 },
                 "required": ["cid"]
             }),
@@ -158,7 +159,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_check_drift".into(),
-            description: "Compare a file's current BLAKE3 hash to a previously stored CID. Returns true if the file has changed since the CID was recorded. Use this to detect when source material has changed and reasoning may be stale.".into(),
+            description: "Compare a file's current BLAKE3 hash to a previously stored CID. Returns `drifted: true` if the file has changed since the CID was recorded, along with `expected_cid` and the file's `actual_cid`. Use this to detect when source material has changed and reasoning may be stale.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -214,7 +215,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_get_reasoning".into(),
-            description: "Retrieve a reasoning node's content by CID. Automatically unwraps the DAG node to return the reasoning text, agent, timestamp, and schema. Use this to inject prior reasoning into prompts.".into(),
+            description: "Retrieve a reasoning node's content by CID. Automatically unwraps the DAG node to return the reasoning text with its agent, timestamp, schema, `parents` and index-aligned `parent_kinds` (how this node relates to each parent: grounds, derives, proposes, confirms, refutes, supersedes), and `saturation` when declared (0.0 open question … 1.0 settled). Node and content are re-hashed before return (`verified: true`); a corrupted blob is an error. Use this to inject prior reasoning into prompts — and weigh it by its edge kinds and saturation.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -266,7 +267,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "ket_dag_ls".into(),
-            description: "List DAG nodes to discover what's in the substrate. Use this to find nodes by kind (memory, code, reasoning, task) or to see recent activity. Returns summary metadata — use ket_get to retrieve full content.".into(),
+            description: "List DAG nodes to discover what's in the substrate. Use this to find nodes by kind (memory, code, reasoning, task) or to see recent activity. Returns summary metadata including each node's `parents`, index-aligned `parent_kinds`, and `saturation` when declared — use ket_get to retrieve full content.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -465,6 +466,65 @@ fn parse_edge_kind(params: &Value) -> Result<ket_dag::EdgeKind, McpError> {
     })
 }
 
+/// What a read tool returns about a node beyond its identity: everything the
+/// write tools seal into it. A status recorded at write time and not returned
+/// at read time does nothing for the reader, so every node-returning tool
+/// goes through here.
+///
+/// `parents` stays a list of CIDs; `parent_kinds` is index-aligned with it
+/// and always present (an untyped edge reads as `derives`, per the node's
+/// canonicalisation rule). `saturation` and the decay fields appear only
+/// when the node declares them.
+fn node_read_fields(node: &ket_dag::DagNode) -> serde_json::Map<String, Value> {
+    let mut obj = serde_json::Map::new();
+    obj.insert("kind".into(), node.kind.to_string().into());
+    obj.insert("agent".into(), node.agent.clone().into());
+    obj.insert("timestamp".into(), node.timestamp.clone().into());
+    obj.insert("output_cid".into(), node.output_cid.as_str().into());
+    let (parents, kinds): (Vec<&str>, Vec<&str>) = node
+        .parent_links()
+        .map(|(cid, kind)| (cid.as_str(), kind.as_str()))
+        .unzip();
+    obj.insert("parents".into(), serde_json::json!(parents));
+    obj.insert("parent_kinds".into(), serde_json::json!(kinds));
+    if let Some(s) = &node.schema_cid {
+        obj.insert("schema_cid".into(), s.as_str().into());
+    }
+    if let Some(sat) = node.saturation() {
+        obj.insert("saturation".into(), serde_json::json!(sat));
+    }
+    if let Some(activation) = node.activation {
+        obj.insert("activation".into(), serde_json::json!(activation));
+    }
+    if let Some(cfg) = &node.decay_config {
+        obj.insert(
+            "half_life_secs".into(),
+            serde_json::json!(cfg.half_life_secs),
+        );
+        obj.insert(
+            "activation_floor".into(),
+            serde_json::json!(cfg.activation_floor),
+        );
+    }
+    obj
+}
+
+/// Blob bytes as a JSON string plus the encoding used. UTF-8 content is
+/// returned as-is; anything else is base64, never a lossy decode that would
+/// hand the reader bytes that do not hash to the CID it asked for.
+fn encode_content(data: Vec<u8>) -> (String, &'static str) {
+    match String::from_utf8(data) {
+        Ok(text) => (text, "utf8"),
+        Err(e) => {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD.encode(e.as_bytes()),
+                "base64",
+            )
+        }
+    }
+}
+
 /// Record an event that has already happened. The write is sealed by now;
 /// a log failure is reported on stderr, not returned as a failed call that
 /// would make the client retry into a duplicate node.
@@ -495,9 +555,15 @@ pub fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
             let cid = ket_cas::Cid::from(cid_str);
-            let data = cas.get(&cid)?;
-            let content = String::from_utf8_lossy(&data).into_owned();
-            Ok(serde_json::json!({ "content": content }))
+            // The reader cannot hash: hash the bytes actually returned, and
+            // refuse rather than return content that is not what the CID names.
+            let data = cas.get_verified(&cid)?;
+            let (content, encoding) = encode_content(data);
+            Ok(serde_json::json!({
+                "content": content,
+                "encoding": encoding,
+                "verified": true,
+            }))
         }
         "ket_verify" => {
             let cid_str = params["cid"]
@@ -579,21 +645,39 @@ pub fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
             let dag = ket_dag::Dag::new(cas);
-            let lineage = dag.lineage(&ket_cas::Cid::from(cid_str))?;
-            let nodes: Vec<Value> = lineage
+            let max_depth = match params.get("max_depth") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().and_then(|d| u32::try_from(d).ok()).ok_or_else(
+                    || McpError::InvalidParams("max_depth must be a non-negative integer".into()),
+                )?),
+            };
+            let start = ket_cas::Cid::from(cid_str);
+            let report = dag.lineage_report(&start, max_depth)?;
+            // A start CID that is raw content has no lineage; answering with
+            // an empty, "complete" chain would read as a node without
+            // ancestry rather than as the wrong kind of CID.
+            if report.non_node.contains(&start) {
+                return Err(McpError::InvalidParams(format!(
+                    "{cid_str} is raw content, not a DAG node: it has no lineage (pass a node CID; use ket_get to read content)"
+                )));
+            }
+            let nodes: Vec<Value> = report
+                .entries
                 .iter()
-                .map(|(cid, node)| {
-                    serde_json::json!({
-                        "cid": cid.as_str(),
-                        "kind": node.kind.to_string(),
-                        "agent": node.agent,
-                        "timestamp": node.timestamp,
-                        "output_cid": node.output_cid.as_str(),
-                        "parents": node.parents.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-                    })
+                .map(|e| {
+                    let mut obj = node_read_fields(&e.node);
+                    obj.insert("cid".into(), e.cid.as_str().into());
+                    obj.insert("depth".into(), e.depth.into());
+                    Value::Object(obj)
                 })
                 .collect();
-            Ok(serde_json::json!({ "lineage": nodes }))
+            Ok(serde_json::json!({
+                "lineage": nodes,
+                "complete": report.is_complete(),
+                "missing": report.missing,
+                "non_node_parents": report.non_node,
+                "truncated": report.truncated,
+            }))
         }
         "ket_invalidated" => {
             use ket_dag::propagate::{invalidated, CasChildIndex, PropagateOptions, SeedScope};
@@ -662,10 +746,12 @@ pub fn handle_tool_call(
             let expected = params["expected_cid"]
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("expected_cid required".into()))?;
-            let dag = ket_dag::Dag::new(cas);
-            let drifted =
-                dag.check_drift(std::path::Path::new(path), &ket_cas::Cid::from(expected))?;
-            Ok(serde_json::json!({ "drifted": drifted }))
+            let actual = ket_cas::hash_file(std::path::Path::new(path))?;
+            Ok(serde_json::json!({
+                "drifted": actual.as_str() != expected,
+                "expected_cid": expected,
+                "actual_cid": actual.as_str(),
+            }))
         }
         "ket_query_cdom" => {
             let query = params["query"]
@@ -773,23 +859,28 @@ pub fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| McpError::InvalidParams("cid required".into()))?;
             let cid = ket_cas::Cid::from(cid_str);
-            let data = cas.get(&cid)?;
+            // Both reads are verified: the node bytes and the content they
+            // point to are hashed here, because the caller cannot.
+            let data = cas.get_verified(&cid)?;
             // Try to parse as a DAG node, otherwise return raw content
             match ket_dag::DagNode::from_bytes(&data) {
                 Ok(node) => {
-                    let content_data = cas.get(&node.output_cid)?;
-                    let content = String::from_utf8_lossy(&content_data).into_owned();
-                    Ok(serde_json::json!({
-                        "agent": node.agent,
-                        "kind": node.kind.to_string(),
-                        "timestamp": node.timestamp,
-                        "content": content,
-                        "schema_cid": node.schema_cid.as_ref().map(|c| c.as_str()).unwrap_or(""),
-                    }))
+                    let (content, encoding) = encode_content(cas.get_verified(&node.output_cid)?);
+                    let mut obj = node_read_fields(&node);
+                    obj.insert("content".into(), content.into());
+                    obj.insert("encoding".into(), encoding.into());
+                    obj.insert("verified".into(), true.into());
+                    // Always a string: existing callers read "" as "no schema".
+                    obj.entry("schema_cid").or_insert_with(|| "".into());
+                    Ok(Value::Object(obj))
                 }
                 Err(_) => {
-                    let content = String::from_utf8_lossy(&data).into_owned();
-                    Ok(serde_json::json!({ "content": content }))
+                    let (content, encoding) = encode_content(data);
+                    Ok(serde_json::json!({
+                        "content": content,
+                        "encoding": encoding,
+                        "verified": true,
+                    }))
                 }
             }
         }
@@ -902,17 +993,9 @@ pub fn handle_tool_call(
                             continue;
                         }
                     }
-                    let mut obj = serde_json::json!({
-                        "cid": cid.as_str(),
-                        "kind": node.kind.to_string(),
-                        "agent": node.agent,
-                        "timestamp": node.timestamp,
-                        "output_cid": node.output_cid.as_str(),
-                    });
-                    if let Some(ref s) = node.schema_cid {
-                        obj["schema_cid"] = serde_json::json!(s.as_str());
-                    }
-                    nodes.push(obj);
+                    let mut obj = node_read_fields(&node);
+                    obj.insert("cid".into(), cid.as_str().into());
+                    nodes.push(Value::Object(obj));
                 }
             }
 
@@ -1213,6 +1296,230 @@ pub fn run_stdio_server(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn scratch_cas(tag: &str) -> (ket_cas::Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ket-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cas = ket_cas::Store::init(&dir.join(".ket").join("cas")).unwrap();
+        (cas, dir)
+    }
+
+    fn call(cas: &ket_cas::Store, tool: &str, params: Value) -> Result<Value, McpError> {
+        handle_tool_call(tool, &params, cas, None)
+    }
+
+    /// What the write tools seal must come back from the read tools: an
+    /// agent that records "this only *proposes* its parent, at 0.3" has told
+    /// the next reader nothing if lineage returns a bare parent list.
+    #[test]
+    fn edge_kind_and_saturation_round_trip_through_every_read_tool() {
+        let (cas, dir) = scratch_cas("roundtrip");
+        let root = call(
+            &cas,
+            "ket_dag_link",
+            json!({ "content": "measurement", "kind": "memory", "agent": "a" }),
+        )
+        .unwrap()["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let child = call(
+            &cas,
+            "ket_store_reasoning",
+            json!({
+                "content": "maybe X", "agent": "b", "parents": [root],
+                "edge_kind": "proposes", "saturation": 0.3,
+            }),
+        )
+        .unwrap()["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let lineage = call(&cas, "ket_dag_lineage", json!({ "cid": child })).unwrap();
+        assert_eq!(lineage["complete"], json!(true), "{lineage}");
+        assert_eq!(lineage["missing"], json!([]));
+        let nodes = lineage["lineage"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["cid"], json!(child));
+        assert_eq!(nodes[0]["parents"], json!([root]));
+        assert_eq!(nodes[0]["parent_kinds"], json!(["proposes"]));
+        assert!((nodes[0]["saturation"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert_eq!(nodes[0]["depth"], json!(0));
+        // The untyped root: no parents, no declared saturation.
+        assert_eq!(nodes[1]["parent_kinds"], json!([]));
+        assert!(nodes[1].get("saturation").is_none());
+        assert_eq!(nodes[1]["depth"], json!(1));
+
+        let got = call(&cas, "ket_get_reasoning", json!({ "cid": child })).unwrap();
+        assert_eq!(got["content"], json!("maybe X"));
+        assert_eq!(got["parents"], json!([root]));
+        assert_eq!(got["parent_kinds"], json!(["proposes"]));
+        assert!((got["saturation"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert_eq!(got["verified"], json!(true));
+        assert_eq!(got["schema_cid"], json!(""));
+
+        let ls = call(&cas, "ket_dag_ls", json!({ "kind": "reasoning" })).unwrap();
+        let listed = &ls["nodes"].as_array().unwrap()[0];
+        assert_eq!(listed["cid"], json!(child));
+        assert_eq!(listed["parent_kinds"], json!(["proposes"]));
+        assert!((listed["saturation"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+
+        // An untyped edge reads back as the default kind, not as nothing.
+        let plain = call(
+            &cas,
+            "ket_store_reasoning",
+            json!({ "content": "so Y", "agent": "b", "parents": [root] }),
+        )
+        .unwrap()["node_cid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let got = call(&cas, "ket_get_reasoning", json!({ "cid": plain })).unwrap();
+        assert_eq!(got["parent_kinds"], json!(["derives"]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The model cannot hash. Bytes that no longer match their CID must be
+    /// refused at the read, not left to a separate verify call.
+    #[test]
+    fn corrupted_blobs_are_refused_on_read() {
+        let (cas, dir) = scratch_cas("corrupt");
+        let link = call(
+            &cas,
+            "ket_store_reasoning",
+            json!({ "content": "the conclusion", "agent": "a" }),
+        )
+        .unwrap();
+        let node_cid = link["node_cid"].as_str().unwrap().to_string();
+        let node = ket_dag::Dag::new(&cas)
+            .get_node(&ket_cas::Cid::from(node_cid.as_str()))
+            .unwrap();
+        let content_cid = node.output_cid.as_str().to_string();
+
+        let ok = call(&cas, "ket_get", json!({ "cid": content_cid })).unwrap();
+        assert_eq!(ok["content"], json!("the conclusion"));
+        assert_eq!(ok["verified"], json!(true));
+        assert_eq!(ok["encoding"], json!("utf8"));
+
+        std::fs::write(cas.root().join(&content_cid), b"the opposite conclusion").unwrap();
+
+        let err = call(&cas, "ket_get", json!({ "cid": content_cid })).unwrap_err();
+        assert!(err.to_string().contains("Integrity"), "{err}");
+        // The node itself is intact, but the content it points to is not:
+        // unwrapping it must refuse too.
+        let err = call(&cas, "ket_get_reasoning", json!({ "cid": node_cid })).unwrap_err();
+        assert!(err.to_string().contains("Integrity"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deleted ancestor used to produce a shorter chain that looked whole.
+    #[test]
+    fn lineage_lists_missing_ancestors_instead_of_omitting_them() {
+        let (cas, dir) = scratch_cas("missing");
+        let mk = |content: &str, parents: Value| {
+            call(
+                &cas,
+                "ket_dag_link",
+                json!({ "content": content, "kind": "memory", "agent": "a", "parents": parents }),
+            )
+            .unwrap()["node_cid"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let grandparent = mk("g", json!([]));
+        let parent = mk("p", json!([grandparent]));
+        // A raw content blob as a second parent is a legitimate leaf.
+        let raw = call(&cas, "ket_put", json!({ "content": "raw source" })).unwrap()["cid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let child = mk("c", json!([parent, raw]));
+
+        std::fs::remove_file(cas.root().join(&parent)).unwrap();
+
+        let lineage = call(&cas, "ket_dag_lineage", json!({ "cid": child })).unwrap();
+        assert_eq!(lineage["complete"], json!(false), "{lineage}");
+        assert_eq!(lineage["missing"], json!([parent]));
+        assert_eq!(lineage["non_node_parents"], json!([raw]));
+        // Only the child is reachable; the grandparent is behind the gap.
+        assert_eq!(lineage["lineage"].as_array().unwrap().len(), 1);
+
+        // A start CID that is itself absent is reported, not an empty success.
+        let gone = call(&cas, "ket_dag_lineage", json!({ "cid": parent })).unwrap();
+        assert_eq!(gone["lineage"], json!([]));
+        assert_eq!(gone["missing"], json!([parent]));
+        assert_eq!(gone["complete"], json!(false));
+
+        // A start CID that is raw content is the wrong kind of CID, not a
+        // node with an empty, complete ancestry.
+        let err = call(&cas, "ket_dag_lineage", json!({ "cid": raw })).unwrap_err();
+        assert!(err.to_string().contains("not a DAG node"), "{err}");
+
+        // A depth bound that hides a node is not a complete answer either.
+        let tip = mk("tip", json!([grandparent]));
+        let bounded = call(
+            &cas,
+            "ket_dag_lineage",
+            json!({ "cid": tip, "max_depth": 0 }),
+        )
+        .unwrap();
+        assert_eq!(bounded["truncated"], json!(true));
+        assert_eq!(bounded["complete"], json!(false));
+        // Bounded at the child, the parents just past the bound are still
+        // accounted for: one absent, one raw content, nothing hidden.
+        let bounded = call(
+            &cas,
+            "ket_dag_lineage",
+            json!({ "cid": child, "max_depth": 0 }),
+        )
+        .unwrap();
+        assert_eq!(bounded["truncated"], json!(false));
+        assert_eq!(bounded["missing"], json!([parent]));
+        assert_eq!(bounded["non_node_parents"], json!([raw]));
+        assert_eq!(bounded["complete"], json!(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_returns_binary_as_base64_and_drift_reports_both_cids() {
+        let (cas, dir) = scratch_cas("binary");
+        let bytes = [0xffu8, 0xfe, 0x00, 0x80];
+        let cid = cas.put(&bytes).unwrap();
+        let got = call(&cas, "ket_get", json!({ "cid": cid.as_str() })).unwrap();
+        assert_eq!(got["encoding"], json!("base64"));
+        assert_eq!(got["content"], json!("//4AgA=="));
+
+        let file = dir.join("tracked.txt");
+        std::fs::write(&file, "v1").unwrap();
+        let v1 = ket_cas::hash_bytes(b"v1");
+        let same = call(
+            &cas,
+            "ket_check_drift",
+            json!({ "path": file.to_str().unwrap(), "expected_cid": v1.as_str() }),
+        )
+        .unwrap();
+        assert_eq!(same["drifted"], json!(false));
+        std::fs::write(&file, "v2").unwrap();
+        let moved = call(
+            &cas,
+            "ket_check_drift",
+            json!({ "path": file.to_str().unwrap(), "expected_cid": v1.as_str() }),
+        )
+        .unwrap();
+        assert_eq!(moved["drifted"], json!(true));
+        assert_eq!(moved["expected_cid"], json!(v1.as_str()));
+        assert_eq!(
+            moved["actual_cid"],
+            json!(ket_cas::hash_bytes(b"v2").as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// MCP writes are events: they must land in the same `.ket/log` the CLI
     /// appends to, or an agent's memory has history the log doesn't show.

@@ -22,5 +22,5 @@ ket-dag.workspace = true
 # so the interpreter already exists and libpython must not be linked in.
 # auto-initialize is for embedding Python *in* Rust — the opposite direction —
 # and made `cargo test` fail with `unable to find library -lpython3.12`.
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.30", features = ["extension-module"] }
 serde_json.workspace = true

@@ -12,6 +12,9 @@ content-addressed. Or run it: `./docs/demo.sh`. Two more domains live in
 [`docs/demos/`](docs/demos/): research claims with typed edges and
 supersession, and a parallel multi-agent review that fans out and back in
 with nothing to lock. Each ends with a graph (`ket graph --format mermaid`).
+[`docs/demos/obsoleted.sh`](docs/demos/obsoleted/README.md) scores ket
+against naive chunk-RAG on 13 HTTP RFCs, with a planted rumour, a late
+supersession and an edit to a shared copy.
 The same pages are published at <https://nickjoven.github.io/ket/>.
 
 ## Architecture
@@ -145,6 +148,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 
 ### DAG & Lineage
 - `ket dag create <content>` — Create node (`--kind`, `--parent <cid>[:<kind>]`, `--agent`, `--edge-kind grounds|derives|proposes|confirms|refutes|supersedes`, `--content-file <path|->` for large or dash-shaped content). Parents must exist in the store.
+- `ket dag recover <cid>` — Complete logging/projection for a retained node without creating another identity. Partial create failures exit nonzero and retain the CID; reconcile by that CID rather than retrying `create`. See [recovery semantics](docs/dag-recovery.md).
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag invalidated <cid>` — Treat a node as refuted and report downstream support loss as versioned JSON (`--with-recorded-refutations`, `--include-intact`, `--max-nodes N`). Works with CAS alone.
@@ -157,7 +161,7 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 ### Tasks & Agents
 - `ket task create <title>` (`--by`, `--context <cid>`, `--parent <id>`) / `ket task ls` / `ket task show <id>` / `ket task assign <id> <agent>`
 - `ket agent register <name>` / `ket agent ls` — presets claude/codex/copilot, or any name with `--command "<cli> ..."` (`--model` optional)
-- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task
+- `ket run <task-id>` — Execute an existing task via its assigned agent's command; records the result CID on the task. `--timeout <seconds>` bounds it; an interrupted, timed-out or failed run leaves the task `failed` with the reason. A `running` or `done` task is refused unless `--force`
 
 ### Code Intelligence
 - `ket scan <path>` — Index symbols (Rust/Python)
@@ -201,17 +205,17 @@ Ket exposes 20 tools over MCP (Model Context Protocol) for agent integration.
 | Tool | What it does | Needs Dolt? |
 |------|-------------|-------------|
 | `ket_put` | Store content, get CID | No |
-| `ket_get` | Retrieve content by CID | No |
+| `ket_get` | Retrieve content by CID, re-hashed on read (`verified`) | No |
 | `ket_verify` | Check CID integrity | No |
 | `ket_dag_link` | Create DAG node with provenance | No |
-| `ket_dag_lineage` | Trace ancestry chain | No |
+| `ket_dag_lineage` | Trace ancestry with edge kinds, saturation and any `missing` ancestors | No |
 | `ket_invalidated` | Downstream support loss, CID witnesses and completeness | No |
 | `ket_dag_ls` | List/filter DAG nodes | No |
-| `ket_check_drift` | Detect file changes | No |
+| `ket_check_drift` | Detect file changes (expected vs actual CID) | No |
 | `ket_search` | Full-text content search | No |
 | `ket_status` | Substrate health dashboard | No (enhanced with Dolt) |
 | `ket_store_reasoning` | Persist reasoning as DAG node | No |
-| `ket_get_reasoning` | Retrieve reasoning with context | No |
+| `ket_get_reasoning` | Retrieve verified reasoning with its parents, edge kinds and saturation | No |
 | `ket_query_cdom` | Search code symbols | No |
 | `ket_schema_stats` | Check schema dedup effectiveness | No |
 | `decay_status` | Decay-adjusted activation for a node | No |

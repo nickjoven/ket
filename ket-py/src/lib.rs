@@ -147,13 +147,13 @@ impl Dag {
     }
 
     /// Get a DAG node as a Python dict.
-    fn get_node(&self, cid: &str) -> PyResult<PyObject> {
+    fn get_node(&self, cid: &str) -> PyResult<Py<PyAny>> {
         let dag = ket_dag::Dag::new(&self.cas);
         let node = dag
             .get_node(&ket_cas::Cid::from(cid))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("kind", node.kind.to_string())?;
             dict.set_item("agent", &node.agent)?;
@@ -172,13 +172,13 @@ impl Dag {
     }
 
     /// Trace lineage — returns list of (cid, node_dict) tuples.
-    fn lineage(&self, cid: &str) -> PyResult<Vec<(String, PyObject)>> {
+    fn lineage(&self, cid: &str) -> PyResult<Vec<(String, Py<PyAny>)>> {
         let dag = ket_dag::Dag::new(&self.cas);
         let lineage = dag
             .lineage(&ket_cas::Cid::from(cid))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut result = Vec::new();
             for (node_cid, node) in lineage {
                 let dict = pyo3::types::PyDict::new(py);
