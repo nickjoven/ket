@@ -173,8 +173,95 @@ fn bad_arguments_and_absent_roots_fail() {
             absent.as_str(),
         ],
         vec!["dag", "consistent", "--a", "../x", "--b", cid.as_str()],
+        vec!["dag", "label", cid.as_str(), "--support", "some"],
+        vec!["dag", "label", cid.as_str(), "--ignore-attacks-by"],
     ] {
         let output = ket(&home, &args);
         assert!(!output.status.success(), "{args:?} should fail");
     }
+}
+
+#[test]
+fn the_policy_flags_change_the_reading_and_the_report_records_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".ket");
+    let cas = Store::init(&home.join("cas")).unwrap();
+    let cited = node(&cas, "cited", vec![]);
+    let also_cited = node(&cas, "also cited", vec![]);
+    let paper = node(
+        &cas,
+        "paper",
+        vec![
+            (cited.clone(), EdgeKind::Grounds),
+            (also_cited, EdgeKind::Grounds),
+        ],
+    );
+    let notice = node(&cas, "retraction", vec![(cited.clone(), EdgeKind::Refutes)]);
+    let content = cas.put(b"build failed").unwrap();
+    let auto = Dag::new(&cas)
+        .put_node(&DagNode::new_typed(
+            NodeKind::Score,
+            vec![(paper.clone(), EdgeKind::Refutes)],
+            content,
+            "auto:compile",
+        ))
+        .unwrap();
+    let roots = [paper.as_str(), notice.as_str(), auto.as_str()];
+
+    let default = json(ket(&home, &[&["dag", "label"][..], &roots].concat()));
+    assert_eq!(default["policy"]["support"], "all");
+    assert_eq!(label_of(&default, &paper), Some("out"));
+
+    // One retracted citation among two no longer takes the paper down, but
+    // the auto-scorer's refutation still does.
+    let any = json(ket(
+        &home,
+        &[&["dag", "label", "--support", "any"][..], &roots].concat(),
+    ));
+    assert_eq!(any["policy"]["support"], "any");
+    assert_eq!(label_of(&any, &cited), Some("out"));
+    assert_eq!(label_of(&any, &paper), Some("out"));
+
+    let both = json(ket(
+        &home,
+        &[
+            &[
+                "dag",
+                "label",
+                "--support",
+                "any",
+                "--ignore-attacks-by",
+                "auto:compile",
+            ][..],
+            &roots,
+        ]
+        .concat(),
+    ));
+    assert_eq!(label_of(&both, &paper), Some("in"));
+    assert_eq!(both["policy"]["ignore_attacks_by"][0], "auto:compile");
+    assert_ne!(both["policy"]["cid"], any["policy"]["cid"]);
+    let paper_row = both["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["cid"] == paper.as_str())
+        .unwrap();
+    assert_eq!(paper_row["attackers_ignored"][0], auto.as_str());
+
+    // The same policy flags apply to consistent.
+    let c = json(ket(
+        &home,
+        &[
+            "dag",
+            "consistent",
+            "--a",
+            paper.as_str(),
+            "--b",
+            notice.as_str(),
+            "--support",
+            "any",
+        ],
+    ));
+    assert_eq!(c["policy"]["support"], "any");
+    assert_eq!(c["consistent"], false);
 }

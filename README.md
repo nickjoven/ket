@@ -152,8 +152,8 @@ The `/data` volume persists your ket store across runs. Add the Dolt sidecar wit
 - `ket dag ls` / `ket dag show <cid>` — List/inspect nodes
 - `ket dag lineage <cid>` — Trace ancestor chain
 - `ket dag invalidated <cid>` — Treat a node as refuted and report downstream support loss as versioned JSON (`--with-recorded-refutations`, `--include-intact`, `--max-nodes N`). Works with CAS alone.
-- `ket dag label <cid>... | --all` — Label every node in a view `in`, `out`, `contested` or `unknown` from its support and the refutations in that view (`ket.labelling/v1`). A refuted refutation no longer counts, and a node needs all of its support parents, so use it where those edges are real premises, not citations. Works with CAS alone.
-- `ket dag consistent --a <cid>... --b <cid>...` — Whether two views agree: every node whose status changes when they are combined, with a CID path to where the other view enters (`ket.consistency/v1`).
+- `ket dag label <cid>... | --all` — Label every node in a view `in`, `out`, `contested` or `unknown` from its support and the refutations in that view (`ket.labelling/v1`). A refuted refutation no longer counts. `--support all` (default) treats support parents as linked premises; `--support any` needs only one standing parent, the reading for citation graphs. `--ignore-attacks-by <agent>` drops one agent's refutations. The report records the policy and its CID. Works with CAS alone.
+- `ket dag consistent --a <cid>... --b <cid>...` — Whether two views agree: every node whose status changes when they are combined, with a CID path to where the other view enters (`ket.consistency/v1`). Takes the same policy flags.
 - `ket dag drift <path> <cid>` — Detect file drift
 - `ket link create <from> <to> <rel>` / `ket link ls <cid>` — Soft links (supersedes, contradicts, etc.)
 - `ket merge <content> --parents <cid>[:<kind>]...` — Multi-parent merge node (`--edge-kind`, `--content-file`)

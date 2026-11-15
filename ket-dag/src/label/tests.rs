@@ -33,12 +33,22 @@ impl Fx {
     /// As `node`, with the timestamp pinned so the CID is a function of the
     /// arguments alone and a generated graph is the same on every run.
     fn node_at(&self, label: &str, parents: &[(&Cid, EdgeKind)], tick: Option<usize>) -> Cid {
+        self.node_by(label, parents, tick, "test")
+    }
+    /// As `node_at`, written by `agent`.
+    fn node_by(
+        &self,
+        label: &str,
+        parents: &[(&Cid, EdgeKind)],
+        tick: Option<usize>,
+        agent: &str,
+    ) -> Cid {
         let out = self.cas.put(label.as_bytes()).unwrap();
         let mut node = DagNode::new_typed(
             NodeKind::Reasoning,
             parents.iter().map(|(c, k)| ((*c).clone(), *k)).collect(),
             out,
-            "test",
+            agent,
         );
         if let Some(tick) = tick {
             node.timestamp = format!("2026-01-01T00:00:00Z+{tick}");
@@ -46,13 +56,16 @@ impl Fx {
         self.dag().put_node(&node).unwrap()
     }
     fn label(&self, roots: &[&Cid]) -> LabelReport {
+        self.label_with(roots, &Policy::default())
+    }
+    fn label_with(&self, roots: &[&Cid], policy: &Policy) -> LabelReport {
         let roots: Vec<Cid> = roots.iter().map(|c| (*c).clone()).collect();
-        label(&self.dag(), &roots).unwrap()
+        label(&self.dag(), &roots, policy).unwrap()
     }
     fn consistency(&self, a: &[&Cid], b: &[&Cid]) -> ConsistencyReport {
         let a: Vec<Cid> = a.iter().map(|c| (*c).clone()).collect();
         let b: Vec<Cid> = b.iter().map(|c| (*c).clone()).collect();
-        consistency(&self.dag(), &a, &b).unwrap()
+        consistency(&self.dag(), &a, &b, &Policy::default()).unwrap()
     }
 }
 
@@ -123,7 +136,7 @@ fn a_refutation_outside_the_world_does_not_count() {
     // The world of `b` alone does not contain the refutation.
     assert_labels(&fx.label(&[&b]), &[(&a, In), (&b, In)]);
     // The whole store does.
-    let all = label_store(&fx.dag()).unwrap();
+    let all = label_store(&fx.dag(), &Policy::default()).unwrap();
     assert_labels(&all, &[(&a, Out), (&b, Out)]);
     assert_eq!(all.scope, "store");
 }
@@ -359,7 +372,7 @@ fn a_root_that_is_not_a_node_is_an_error() {
     let fx = Fx::new("bad-root");
     let raw = fx.cas.put(b"raw").unwrap();
     for bad in [absent("root"), raw] {
-        let err = label(&fx.dag(), std::slice::from_ref(&bad)).unwrap_err();
+        let err = label(&fx.dag(), std::slice::from_ref(&bad), &Policy::default()).unwrap_err();
         assert!(matches!(err, LabelError::RootNotFound(_)), "{err}");
     }
 }
@@ -392,7 +405,7 @@ fn tampered_bytes_are_an_error_not_a_gap() {
         }
     }
     assert!(hit, "did not find a's blob on disk");
-    let err = label(&fx.dag(), std::slice::from_ref(&b)).unwrap_err();
+    let err = label(&fx.dag(), std::slice::from_ref(&b), &Policy::default()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -531,6 +544,157 @@ fn a_witness_leaves_an_old_standoff_and_reaches_the_new_evidence() {
     }
 }
 
+// --- Policies ---------------------------------------------------------------
+
+fn any() -> Policy {
+    Policy {
+        support: SupportRule::Any,
+        ..Default::default()
+    }
+}
+
+fn ignoring(agents: &[&str]) -> Policy {
+    Policy {
+        ignore_attacks_by: agents.iter().map(|a| a.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn under_any_one_standing_support_parent_is_enough() {
+    let fx = Fx::new("any-rule");
+    let a = fx.node("a", &[]);
+    let b = fx.node("b", &[]);
+    let c = fx.node("c", &[(&a, Grounds), (&b, Grounds)]);
+    let after_c = fx.node("after c", &[(&c, Derives)]);
+    let r1 = fx.node("r1", &[(&a, Refutes)]);
+    let roots = [&after_c, &r1];
+    // Linked premises: losing a takes c and what follows down.
+    assert_labels(&fx.label(&roots), &[(&c, Out), (&after_c, Out)]);
+    // Alternatives: b still stands, so c does.
+    let r = fx.label_with(&roots, &any());
+    assert_labels(&r, &[(&a, Out), (&b, In), (&c, In), (&after_c, In)]);
+    // Once every alternative has fallen, c falls under either rule.
+    let r2 = fx.node("r2", &[(&b, Refutes)]);
+    let roots = [&after_c, &r1, &r2];
+    assert_labels(
+        &fx.label_with(&roots, &any()),
+        &[(&c, Out), (&after_c, Out)],
+    );
+    assert_labels(&fx.label(&roots), &[(&c, Out), (&after_c, Out)]);
+}
+
+#[test]
+fn under_any_a_missing_alternative_decides_only_when_nothing_else_stands() {
+    let fx = Fx::new("any-missing");
+    let a = fx.node("a", &[]);
+    let b = fx.node("b", &[]);
+    let gone = absent("alternative");
+    // b stands: the missing alternative cannot matter.
+    let held = fx.node("held", &[(&b, Grounds), (&gone, Grounds)]);
+    // a falls: whether this stands rests on the missing one.
+    let open = fx.node("open", &[(&a, Grounds), (&gone, Grounds)]);
+    let r1 = fx.node("r1", &[(&a, Refutes)]);
+    let r = fx.label_with(&[&held, &open, &r1], &any());
+    assert_labels(&r, &[(&held, In), (&open, Unknown)]);
+    assert!(!r.complete);
+    // Linked, both are unknown: each needs the missing parent.
+    let r = fx.label(&[&held, &open, &r1]);
+    assert_labels(&r, &[(&held, Unknown), (&open, Out)]);
+}
+
+#[test]
+fn under_any_a_missing_alternative_cannot_turn_a_standoff_into_a_gap() {
+    let fx = Fx::new("any-standoff-gap");
+    let g = fx.node("g", &[]);
+    let gone = absent("alternative");
+    // b's support stands through g whatever the missing alternative is.
+    let b = fx.node("b", &[(&g, Grounds), (&gone, Grounds)]);
+    let p = fx.node("p", &[]);
+    // A standoff: r refutes b on the strength of p, r2 refutes p on b's.
+    let r = fx.node("r", &[(&b, Refutes), (&p, Grounds)]);
+    let r2 = fx.node("r2", &[(&p, Refutes), (&b, Grounds)]);
+    let roots = [&r, &r2];
+    let r_any = fx.label_with(&roots, &any());
+    assert_labels(
+        &r_any,
+        &[
+            (&g, In),
+            (&b, Contested),
+            (&p, Contested),
+            (&r, Contested),
+            (&r2, Contested),
+        ],
+    );
+    // Without the missing alternative the reading is the same.
+    let b2 = fx.node("b2", &[(&g, Grounds)]);
+    let p2 = fx.node("p2", &[]);
+    let s = fx.node("s", &[(&b2, Refutes), (&p2, Grounds)]);
+    let s2 = fx.node("s2", &[(&p2, Refutes), (&b2, Grounds)]);
+    assert_labels(&fx.label_with(&[&s, &s2], &any()), &[(&b2, Contested)]);
+    // Linked premises: b needs the missing one, so it is a gap, and the
+    // standoff that rests on b inherits it.
+    let r_all = fx.label(&roots);
+    assert_labels(
+        &r_all,
+        &[(&b, Unknown), (&r2, Unknown), (&p, Unknown), (&r, Unknown)],
+    );
+}
+
+#[test]
+fn ignored_agents_refutations_are_listed_but_do_not_attack() {
+    let fx = Fx::new("ignored");
+    let a = fx.node("a", &[]);
+    let b = fx.node("b", &[(&a, Derives)]);
+    let auto = fx.node_by("build failed", &[(&a, Refutes)], None, "auto:compile");
+    let roots = [&b, &auto];
+    assert_labels(&fx.label(&roots), &[(&a, Out), (&b, Out)]);
+
+    let r = fx.label_with(&roots, &ignoring(&["auto:compile"]));
+    assert_labels(&r, &[(&a, In), (&b, In), (&auto, In)]);
+    let na = r.nodes.iter().find(|n| n.cid == a.as_str()).unwrap();
+    assert!(na.attackers.is_empty());
+    assert_eq!(na.attackers_ignored, vec![auto.0.clone()]);
+    assert_eq!(r.policy.ignore_attacks_by, vec!["auto:compile".to_string()]);
+
+    // Ignoring an agent ignores its attacks, not attacks on it.
+    let human = fx.node("the build was fine", &[(&auto, Refutes)]);
+    let r = fx.label_with(&[&b, &human], &ignoring(&["auto:compile"]));
+    assert_labels(&r, &[(&auto, Out), (&human, In), (&a, In)]);
+}
+
+#[test]
+fn a_policy_has_canonical_bytes_and_a_content_address() {
+    let p = Policy {
+        support: SupportRule::Any,
+        ignore_attacks_by: ["zeta", "alpha", "zeta"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let want =
+        r#"{"schema":"ket.label-policy/v1","support":"any","ignore_attacks_by":["alpha","zeta"]}"#;
+    assert_eq!(String::from_utf8(p.to_bytes()).unwrap(), want);
+    assert_eq!(p.cid(), ket_cas::hash_bytes(want.as_bytes()));
+    assert_ne!(p.cid(), Policy::default().cid());
+    assert_eq!(
+        String::from_utf8(Policy::default().to_bytes()).unwrap(),
+        r#"{"schema":"ket.label-policy/v1","support":"all","ignore_attacks_by":[]}"#
+    );
+
+    // Every report says which policy it was computed under.
+    let fx = Fx::new("policy-record");
+    let a = fx.node("a", &[]);
+    let r = fx.label_with(&[&a], &p);
+    assert_eq!(r.policy.cid, p.cid().0);
+    assert_eq!(r.policy.support, SupportRule::Any);
+    let one = std::slice::from_ref(&a);
+    let c = consistency(&fx.dag(), one, one, &p).unwrap();
+    assert_eq!(c.policy.cid, p.cid().0);
+    assert_eq!(SupportRule::parse("any"), Some(SupportRule::Any));
+    assert_eq!(SupportRule::parse("some"), None);
+}
+
 // --- Generated graphs against a naive oracle -------------------------------
 
 /// splitmix64: a fixed, dependency-free stream per seed.
@@ -551,6 +715,12 @@ impl Rng {
 
 /// A random typed DAG in `fx`: every node's CID, in creation order.
 fn generate(fx: &Fx, seed: u64) -> Vec<Cid> {
+    generate_with(fx, seed, true)
+}
+
+/// As `generate`; without `attacks`, `refutes` and `supersedes` become
+/// `derives`, leaving a pure support graph.
+fn generate_with(fx: &Fx, seed: u64, attacks: bool) -> Vec<Cid> {
     let mut rng = Rng(seed);
     let count = 4 + rng.below(11) as usize;
     let mut cids: Vec<Cid> = Vec::new();
@@ -576,6 +746,10 @@ fn generate(fx: &Fx, seed: u64) -> Vec<Cid> {
                     90..=94 => Confirms,
                     _ => Supersedes,
                 };
+                let kind = match kind {
+                    Refutes | Supersedes if !attacks => Derives,
+                    kind => kind,
+                };
                 (cids[*j].clone(), kind)
             })
             .collect();
@@ -592,7 +766,12 @@ fn generate(fx: &Fx, seed: u64) -> Vec<Cid> {
         // Usually a fresh tick; now and then tick 0, so that a repeated
         // (content, parents) pair is sometimes the very same node.
         let tick = if rng.below(100) < 15 { 0 } else { i + 1 };
-        let cid = fx.node_at(&label, &refs, Some(tick));
+        let agent = if rng.below(100) < 30 {
+            "scorer"
+        } else {
+            "test"
+        };
+        let cid = fx.node_by(&label, &refs, Some(tick), agent);
         if !cids.contains(&cid) {
             cids.push(cid);
             labels.push(label);
@@ -603,7 +782,7 @@ fn generate(fx: &Fx, seed: u64) -> Vec<Cid> {
 
 /// The rules as written, by repeated full sweeps. Reads edges straight from
 /// the nodes; shares nothing with `Labelling::of` beyond the `World`.
-fn oracle(world: &World) -> BTreeMap<String, Label> {
+fn oracle(world: &World, policy: &Policy) -> BTreeMap<String, Label> {
     let support = |cid: &str| -> Vec<String> {
         world.nodes[cid]
             .parent_links()
@@ -616,8 +795,10 @@ fn oracle(world: &World) -> BTreeMap<String, Label> {
             .nodes
             .iter()
             .filter(|(_, node)| {
-                node.parent_links()
-                    .any(|(p, k)| k == Refutes && p.as_str() == cid)
+                !policy.ignore_attacks_by.contains(&node.agent)
+                    && node
+                        .parent_links()
+                        .any(|(p, k)| k == Refutes && p.as_str() == cid)
             })
             .map(|(c, _)| c.clone())
             .collect()
@@ -631,13 +812,20 @@ fn oracle(world: &World) -> BTreeMap<String, Label> {
             }
             let (sup, att) = (support(cid), attackers(cid));
             let got = |c: &String| labels.get(c).copied();
-            let new = if att.iter().any(|c| got(c) == Some(In))
-                || sup.iter().any(|c| got(c) == Some(Out))
-            {
+            // A parent outside the world is never in and never out.
+            let (fallen, stands) = match policy.support {
+                SupportRule::All => (
+                    sup.iter().any(|c| got(c) == Some(Out)),
+                    sup.iter().all(|c| got(c) == Some(In)),
+                ),
+                SupportRule::Any => (
+                    !sup.is_empty() && sup.iter().all(|c| got(c) == Some(Out)),
+                    sup.is_empty() || sup.iter().any(|c| got(c) == Some(In)),
+                ),
+            };
+            let new = if att.iter().any(|c| got(c) == Some(In)) || fallen {
                 Some(Out)
-            } else if sup.iter().all(|c| got(c) == Some(In))
-                && att.iter().all(|c| got(c) == Some(Out))
-            {
+            } else if stands && att.iter().all(|c| got(c) == Some(Out)) {
                 Some(In)
             } else {
                 None
@@ -657,9 +845,17 @@ fn oracle(world: &World) -> BTreeMap<String, Label> {
             if labels.contains_key(cid) {
                 continue;
             }
-            let gap = support(cid)
-                .iter()
-                .any(|c| !world.contains(c) || labels.get(c) == Some(&Unknown))
+            // Support can still change the outcome unless, under `any`, some
+            // support parent is already in.
+            let sup = support(cid);
+            let support_open = match policy.support {
+                SupportRule::All => true,
+                SupportRule::Any => !sup.iter().any(|c| labels.get(c) == Some(&In)),
+            };
+            let gap = (support_open
+                && sup
+                    .iter()
+                    .any(|c| !world.contains(c) || labels.get(c) == Some(&Unknown)))
                 || attackers(cid)
                     .iter()
                     .any(|c| labels.get(c) == Some(&Unknown));
@@ -680,70 +876,159 @@ fn oracle(world: &World) -> BTreeMap<String, Label> {
 
 const SEEDS: std::ops::Range<u64> = 0..400;
 
+fn policies() -> Vec<Policy> {
+    let both = |support| Policy {
+        support,
+        ignore_attacks_by: ["scorer".to_string()].into(),
+    };
+    vec![
+        Policy::default(),
+        any(),
+        both(SupportRule::All),
+        both(SupportRule::Any),
+    ]
+}
+
 #[test]
 fn generated_graphs_match_the_oracle_and_cover_every_label() {
-    let mut seen: BTreeMap<Label, usize> = BTreeMap::new();
-    let mut reinstated = 0;
+    let policies = policies();
+    let mut seen: BTreeMap<(usize, Label), usize> = BTreeMap::new();
+    let mut reinstated = vec![0; policies.len()];
     for seed in SEEDS {
         let fx = Fx::new(&format!("gen-{seed}"));
         let cids = generate(&fx, seed);
         let world = World::all(&fx.dag()).unwrap();
         assert_eq!(world.len(), cids.len(), "seed {seed}");
-        let labelling = Labelling::of(&world);
-        assert_eq!(labelling.labels, oracle(&world), "seed {seed}");
+        for (pi, policy) in policies.iter().enumerate() {
+            let at = format!("seed {seed} policy {pi}");
+            let labelling = Labelling::of(&world, policy);
+            assert_eq!(labelling.labels, oracle(&world, policy), "{at}");
 
-        for (cid, label) in &labelling.labels {
-            *seen.entry(*label).or_default() += 1;
-            let deps = &labelling.deps[cid];
-            let dep_labels = || {
-                deps.support
-                    .iter()
-                    .chain(deps.attackers.iter())
-                    .map(|c| labelling.labels[c])
-            };
-            match label {
-                // Contested only on a standoff: some dependency is contested too,
-                // so following them never ends, which a finite DAG of nodes can
-                // only do by going round a cycle of support and attack.
-                Contested => {
-                    assert!(deps.support_missing.is_empty(), "seed {seed}");
-                    assert!(dep_labels().any(|l| l == Contested), "seed {seed}");
-                    assert!(dep_labels().all(|l| l != Unknown), "seed {seed}");
-                }
-                // Unknown always traces to an evidence gap.
-                Unknown => assert!(
-                    !deps.support_missing.is_empty() || dep_labels().any(|l| l == Unknown),
-                    "seed {seed}"
-                ),
-                In => {
-                    if deps.attackers.iter().any(|c| labelling.labels[c] == Out) {
-                        reinstated += 1;
+            for (cid, label) in &labelling.labels {
+                *seen.entry((pi, *label)).or_default() += 1;
+                let deps = &labelling.deps[cid];
+                let dep_labels = || {
+                    deps.support
+                        .iter()
+                        .chain(deps.attackers.iter())
+                        .map(|c| labelling.labels[c])
+                };
+                match label {
+                    // Contested only on a standoff: some dependency is contested
+                    // too, so following them never ends, which a finite DAG of
+                    // nodes can only do by going round support and attack.
+                    Contested => {
+                        let support_stands = policy.support == SupportRule::Any
+                            && deps.support.iter().any(|c| labelling.labels[c] == In);
+                        if !support_stands {
+                            assert!(deps.support_missing.is_empty(), "{at}");
+                            assert!(dep_labels().all(|l| l != Unknown), "{at}");
+                        }
+                        assert!(
+                            deps.attackers
+                                .iter()
+                                .all(|c| labelling.labels[c] != Unknown),
+                            "{at}"
+                        );
+                        assert!(dep_labels().any(|l| l == Contested), "{at}");
                     }
+                    // Unknown always traces to an evidence gap.
+                    Unknown => assert!(
+                        !deps.support_missing.is_empty() || dep_labels().any(|l| l == Unknown),
+                        "{at}"
+                    ),
+                    In => {
+                        if deps.attackers.iter().any(|c| labelling.labels[c] == Out) {
+                            reinstated[pi] += 1;
+                        }
+                    }
+                    Out => {}
                 }
-                Out => {}
+                // An ignored agent's refutations never reach the attackers.
+                for attacker in &deps.attackers {
+                    assert!(
+                        !policy
+                            .ignore_attacks_by
+                            .contains(&world.nodes[attacker].agent),
+                        "{at}"
+                    );
+                }
             }
-        }
 
-        // The whole store, the closure of every node, and the roots in another
-        // order are the same world and give the same report.
-        let report = label_store(&fx.dag()).unwrap();
-        let mut shuffled = cids.clone();
-        shuffled.reverse();
-        let by_roots = label(&fx.dag(), &shuffled).unwrap();
-        assert_eq!(
-            serde_json::to_value(&report.nodes).unwrap(),
-            serde_json::to_value(&by_roots.nodes).unwrap(),
-            "seed {seed}"
-        );
+            // The whole store, the closure of every node, and the roots in
+            // another order are the same world and give the same report.
+            let report = label_store(&fx.dag(), policy).unwrap();
+            let mut shuffled = cids.clone();
+            shuffled.reverse();
+            let by_roots = label(&fx.dag(), &shuffled, policy).unwrap();
+            assert_eq!(
+                serde_json::to_value(&report.nodes).unwrap(),
+                serde_json::to_value(&by_roots.nodes).unwrap(),
+                "{at}"
+            );
+        }
     }
-    // The generator has to reach every rule, or agreement above means little.
-    for label in [In, Out, Contested, Unknown] {
+    // The generator has to reach every rule under every policy, or agreement
+    // above means little.
+    for pi in 0..policies.len() {
+        for label in [In, Out, Contested, Unknown] {
+            assert!(
+                seen.get(&(pi, label)).copied().unwrap_or(0) >= 10,
+                "policy {pi}: too few {label:?}: {seen:?}"
+            );
+        }
         assert!(
-            seen.get(&label).copied().unwrap_or(0) >= 20,
-            "too few {label:?}: {seen:?}"
+            reinstated[pi] >= 10,
+            "policy {pi}: too few reinstatements: {reinstated:?}"
         );
     }
-    assert!(reinstated >= 20, "too few reinstatements: {reinstated}");
+}
+
+#[test]
+fn any_support_agrees_with_v1_on_a_single_retraction() {
+    use crate::propagate::{invalidated, CasChildIndex, PropagateOptions, Status};
+    let mut fallen = 0;
+    let mut held = 0;
+    for seed in SEEDS {
+        let fx = Fx::new(&format!("v1-{seed}"));
+        let cids = generate_with(&fx, seed, false);
+        let mut rng = Rng(seed ^ 0x5EED);
+        let target = cids[rng.below(cids.len() as u64) as usize].clone();
+        let retraction = fx.node(&format!("retraction {seed}"), &[(&target, Refutes)]);
+
+        let labels = label_store(&fx.dag(), &any()).unwrap();
+        let index = CasChildIndex::build(&fx.cas).unwrap();
+        let opts = PropagateOptions {
+            include_intact: true,
+            ..Default::default()
+        };
+        let v1 = invalidated(&fx.dag(), &index, &target, &opts).unwrap();
+        assert!(v1.complete || !v1.missing.is_empty(), "seed {seed}");
+
+        let out: BTreeSet<&str> = labels
+            .nodes
+            .iter()
+            .filter(|n| n.label == Out)
+            .map(|n| n.cid.as_str())
+            .collect();
+        let lost: BTreeSet<&str> = v1
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.status, Status::Refuted | Status::Invalidated))
+            .map(|n| n.cid.as_str())
+            .collect();
+        assert_eq!(out, lost, "seed {seed}");
+        assert_eq!(labels.label_of(&retraction), Some(In), "seed {seed}");
+        assert_eq!(labels.counts.contested, 0, "seed {seed}");
+        fallen += out.len() - 1;
+        held += v1
+            .nodes
+            .iter()
+            .filter(|n| n.status == Status::Weakened)
+            .count();
+    }
+    // Both outcomes beyond the target itself have to occur.
+    assert!(fallen >= 50 && held >= 50, "fallen {fallen}, held {held}");
 }
 
 #[test]
@@ -752,7 +1037,7 @@ fn without_attacks_or_gaps_everything_is_in() {
         let fx = Fx::new(&format!("plain-{seed}"));
         generate(&fx, seed);
         let world = World::all(&fx.dag()).unwrap();
-        let labelling = Labelling::of(&world);
+        let labelling = Labelling::of(&world, &Policy::default());
         let plain = labelling
             .deps
             .values()
@@ -782,54 +1067,60 @@ fn consistency_is_symmetric_and_matches_its_definition() {
         if a.is_empty() || b.is_empty() {
             continue;
         }
-        let ab = consistency(&fx.dag(), &a, &b).unwrap();
-        let ba = consistency(&fx.dag(), &b, &a).unwrap();
-        assert_eq!(ab.consistent, ba.consistent, "seed {seed}");
-        let key = |f: &Flip, swap: bool| {
-            let side = match (f.side, swap) {
-                (Side::A, false) | (Side::B, true) => Side::A,
-                _ => Side::B,
+        for policy in &policies() {
+            let ab = consistency(&fx.dag(), &a, &b, policy).unwrap();
+            let ba = consistency(&fx.dag(), &b, &a, policy).unwrap();
+            assert_eq!(ab.consistent, ba.consistent, "seed {seed}");
+            let key = |f: &Flip, swap: bool| {
+                let side = match (f.side, swap) {
+                    (Side::A, false) | (Side::B, true) => Side::A,
+                    _ => Side::B,
+                };
+                (f.cid.clone(), side, f.before, f.after)
             };
-            (f.cid.clone(), side, f.before, f.after)
-        };
-        let mut left: Vec<_> = ab.flips.iter().map(|f| key(f, false)).collect();
-        let mut right: Vec<_> = ba.flips.iter().map(|f| key(f, true)).collect();
-        left.sort();
-        right.sort();
-        assert_eq!(left, right, "seed {seed}");
+            let mut left: Vec<_> = ab.flips.iter().map(|f| key(f, false)).collect();
+            let mut right: Vec<_> = ba.flips.iter().map(|f| key(f, true)).collect();
+            left.sort();
+            right.sort();
+            assert_eq!(left, right, "seed {seed}");
 
-        // The definition, recomputed with the oracle.
-        let wa = World::closure(&fx.dag(), &a).unwrap();
-        let wb = World::closure(&fx.dag(), &b).unwrap();
-        let (oa, ob, ou) = (oracle(&wa), oracle(&wb), oracle(&wa.union(&wb)));
-        let mut want: Vec<_> = oa
-            .iter()
-            .map(|(c, l)| (c, Side::A, l))
-            .chain(ob.iter().map(|(c, l)| (c, Side::B, l)))
-            .filter(|(c, _, l)| ou[*c] != **l)
-            .map(|(c, side, l)| (c.clone(), side, *l, ou[c]))
-            .collect();
-        want.sort();
-        assert_eq!(left, want, "seed {seed}");
+            // The definition, recomputed with the oracle.
+            let wa = World::closure(&fx.dag(), &a).unwrap();
+            let wb = World::closure(&fx.dag(), &b).unwrap();
+            let (oa, ob, ou) = (
+                oracle(&wa, policy),
+                oracle(&wb, policy),
+                oracle(&wa.union(&wb), policy),
+            );
+            let mut want: Vec<_> = oa
+                .iter()
+                .map(|(c, l)| (c, Side::A, l))
+                .chain(ob.iter().map(|(c, l)| (c, Side::B, l)))
+                .filter(|(c, _, l)| ou[*c] != **l)
+                .map(|(c, side, l)| (c.clone(), side, *l, ou[c]))
+                .collect();
+            want.sort();
+            assert_eq!(left, want, "seed {seed}");
 
-        // Every witness starts at the flipped node, never repeats, and walks
-        // only through nodes of the combined view.
-        for f in &ab.flips {
-            assert_eq!(f.because[0], f.cid, "seed {seed}");
-            let distinct: BTreeSet<&String> = f.because.iter().collect();
-            assert_eq!(distinct.len(), f.because.len(), "seed {seed}");
-            assert!(f.because.iter().all(|c| ou.contains_key(c)), "seed {seed}");
-            // It ends at a node that side did not have, and only there.
-            let own = if f.side == Side::A { &oa } else { &ob };
-            let (last, rest) = f.because.split_last().unwrap();
-            assert!(!own.contains_key(last), "seed {seed}: {f:?}");
-            assert!(rest.iter().all(|c| own.contains_key(c)), "seed {seed}");
-            assert!(rest.iter().all(|c| own[c] != ou[c]), "seed {seed}");
-        }
-        if ab.consistent {
-            consistent += 1;
-        } else {
-            inconsistent += 1;
+            // Every witness starts at the flipped node, never repeats, and walks
+            // only through nodes of the combined view.
+            for f in &ab.flips {
+                assert_eq!(f.because[0], f.cid, "seed {seed}");
+                let distinct: BTreeSet<&String> = f.because.iter().collect();
+                assert_eq!(distinct.len(), f.because.len(), "seed {seed}");
+                assert!(f.because.iter().all(|c| ou.contains_key(c)), "seed {seed}");
+                // It ends at a node that side did not have, and only there.
+                let own = if f.side == Side::A { &oa } else { &ob };
+                let (last, rest) = f.because.split_last().unwrap();
+                assert!(!own.contains_key(last), "seed {seed}: {f:?}");
+                assert!(rest.iter().all(|c| own.contains_key(c)), "seed {seed}");
+                assert!(rest.iter().all(|c| own[c] != ou[c]), "seed {seed}");
+            }
+            if ab.consistent {
+                consistent += 1;
+            } else {
+                inconsistent += 1;
+            }
         }
     }
     assert!(

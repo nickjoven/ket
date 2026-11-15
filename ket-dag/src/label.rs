@@ -4,19 +4,37 @@
 //! answers the whole-graph question: given a set of nodes (a *world*), give
 //! every node a status from the support and attack edges inside that world.
 //!
-//! * **Support** is a `grounds` or `derives` parent. A node's support parents
-//!   are *linked*: it needs all of them.
+//! * **Support** is a `grounds` or `derives` parent.
 //! * **Attack** is a `refutes` link from another node in the world.
 //! * `proposes`, `confirms` and `supersedes` are neither, and are ignored.
+//!
+//! How much support a node needs, and whose attacks count, are not sealed
+//! into nodes: they are a [`Policy`], an input to the labelling that the
+//! report records with its content address. The same graph can be read under
+//! different policies and the reports say which one each used.
+//!
+//! * `support: all` (the default) — support parents are *linked*: the node
+//!   needs every one of them. Right when the edges are real premises.
+//! * `support: any` — support parents are *alternatives*: one standing
+//!   parent is enough, and the node falls only when all have fallen. The
+//!   conservative reading for citation graphs.
+//! * `ignore_attacks_by` — `refutes` links from nodes by these agents are not
+//!   attacks (listed in the report as `attackers_ignored`).
 //!
 //! The rules are the grounded semantics of argumentation theory, extended
 //! with support:
 //!
-//! * `out` — some attacker is `in`, or some support parent is `out`.
-//! * `in` — every support parent is `in` and every attacker is `out`.
+//! * `out` — some attacker is `in`, or the node's support has fallen: under
+//!   `all`, some support parent is `out`; under `any`, it has support and
+//!   every support parent is `out`.
+//! * `in` — every attacker is `out`, and the node's support stands: under
+//!   `all`, every support parent is `in`; under `any`, it has no support or
+//!   some support parent is `in`.
 //! * `unknown` — not settled by the two rules above, and the reason is an
 //!   evidence gap: a support parent absent from CAS (or not a DAG node), or a
-//!   dependency that is itself `unknown`.
+//!   dependency that is itself `unknown`, where that dependency could still
+//!   change the outcome. Under `any`, once some support parent is `in`, a
+//!   missing or `unknown` alternative cannot: the node's support stands.
 //! * `contested` — not settled, with no evidence gap: the node sits on a
 //!   standoff (`r` refutes `n` on the strength of `p`, while `r2` refutes `p`
 //!   on the strength of `n`).
@@ -26,17 +44,14 @@
 //! longer defeats its target (*reinstatement*). A definite defeat outranks an
 //! evidence gap: a node with a missing ground and an `in` attacker is `out`.
 //!
-//! Differences from `ket.invalidated/v1`, which is unchanged: v1 marks a node
-//! invalidated only when *all* its support is lost (here, any), has no
-//! reinstatement, and consults recorded refutations only inside the seed's
-//! downstream closure.
+//! Relation to `ket.invalidated/v1`, which is unchanged: v1 marks a node
+//! invalidated only when all its support is lost, which is `support: any`
+//! here. Where a single refutation is the only attack, the two agree on what
+//! falls (tested on generated graphs). v1 has no reinstatement and consults
+//! recorded refutations only inside the seed's downstream closure.
 //!
-//! The linked rule is only as good as the edges. It is right when a node's
-//! `grounds`/`derives` parents really are premises it needs. On a graph where
-//! those edges are citations it over-claims badly: every paper citing one
-//! retracted paper comes out `out`. Do not apply this report to the
-//! retraction POC's citation graphs; v1's all-support-lost rule is the
-//! conservative reading there.
+//! The `all` rule over-claims on citation graphs: every paper citing one
+//! retracted paper among many comes out `out`. Use `support: any` there.
 //!
 //! A `refutes` link is read as an attack on that node (that derivation). Two
 //! nodes with the same `output_cid` are separate derivations of one claim;
@@ -49,7 +64,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ket_cas::Cid;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::propagate::read_node;
 use crate::{Dag, DagError, DagNode, EdgeKind};
@@ -72,6 +87,82 @@ pub enum Label {
     Out,
     Contested,
     Unknown,
+}
+
+pub const POLICY_SCHEMA: &str = "ket.label-policy/v1";
+
+/// How much support a node needs to stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SupportRule {
+    /// Every support parent: they are linked premises.
+    #[default]
+    All,
+    /// At least one support parent: they are alternatives.
+    Any,
+}
+
+impl SupportRule {
+    pub fn parse(s: &str) -> Option<SupportRule> {
+        match s {
+            "all" => Some(SupportRule::All),
+            "any" => Some(SupportRule::Any),
+            _ => None,
+        }
+    }
+}
+
+/// The reading rules a labelling is computed under. Not part of any node:
+/// recorded in each report with the content address of its canonical bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Policy {
+    pub support: SupportRule,
+    /// Agents whose `refutes` links are not counted as attacks.
+    pub ignore_attacks_by: BTreeSet<String>,
+}
+
+#[derive(Serialize)]
+struct PolicyBytes<'a> {
+    schema: &'static str,
+    support: SupportRule,
+    ignore_attacks_by: &'a BTreeSet<String>,
+}
+
+impl Policy {
+    /// Canonical bytes: fixed field order, sorted agent set, no whitespace.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&PolicyBytes {
+            schema: POLICY_SCHEMA,
+            support: self.support,
+            ignore_attacks_by: &self.ignore_attacks_by,
+        })
+        .expect("a policy always serializes")
+    }
+
+    /// The CID the policy's canonical bytes would have in CAS.
+    pub fn cid(&self) -> Cid {
+        ket_cas::hash_bytes(&self.to_bytes())
+    }
+}
+
+/// A policy as it appears in a report.
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyRecord {
+    pub cid: String,
+    pub schema: &'static str,
+    pub support: SupportRule,
+    pub ignore_attacks_by: Vec<String>,
+}
+
+impl From<&Policy> for PolicyRecord {
+    fn from(p: &Policy) -> Self {
+        PolicyRecord {
+            cid: p.cid().as_str().to_string(),
+            schema: POLICY_SCHEMA,
+            support: p.support,
+            ignore_attacks_by: p.ignore_attacks_by.iter().cloned().collect(),
+        }
+    }
 }
 
 fn is_support(kind: EdgeKind) -> bool {
@@ -163,8 +254,10 @@ struct Deps {
     support: BTreeSet<String>,
     /// Support parents absent from CAS, or present but not DAG nodes.
     support_missing: BTreeSet<String>,
-    /// Nodes in the world with a `refutes` link here.
+    /// Nodes in the world with a `refutes` link here that count as attacks.
     attackers: BTreeSet<String>,
+    /// Nodes with a `refutes` link here whose agent the policy ignores.
+    attackers_ignored: BTreeSet<String>,
 }
 
 /// The status of every node in a world.
@@ -175,7 +268,7 @@ pub struct Labelling {
 }
 
 impl Labelling {
-    pub fn of(world: &World) -> Labelling {
+    pub fn of(world: &World, policy: &Policy) -> Labelling {
         let mut deps: BTreeMap<String, Deps> = world
             .nodes
             .keys()
@@ -185,6 +278,7 @@ impl Labelling {
         let mut supports: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut attacks: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (cid, node) in &world.nodes {
+            let ignored = policy.ignore_attacks_by.contains(&node.agent);
             for (parent, kind) in node.parent_links() {
                 let parent = parent.as_str();
                 if is_support(kind) {
@@ -200,7 +294,10 @@ impl Labelling {
                     }
                 } else if kind == EdgeKind::Refutes {
                     if let Some((key, _)) = world.nodes.get_key_value(parent) {
-                        if deps.get_mut(key).unwrap().attackers.insert(cid.clone()) {
+                        let target = deps.get_mut(key).unwrap();
+                        if ignored {
+                            target.attackers_ignored.insert(cid.clone());
+                        } else if target.attackers.insert(cid.clone()) {
                             attacks.entry(cid.as_str()).or_default().push(key);
                         }
                     }
@@ -208,67 +305,110 @@ impl Labelling {
             }
         }
 
-        // Least fixed point of the in/out rules. `need` counts what still
-        // stands between a node and `in`: support not yet in, attackers not
-        // yet out. A missing support parent is never satisfied.
-        let mut need: BTreeMap<&str, usize> = deps
-            .iter()
-            .map(|(cid, d)| {
-                (
-                    cid.as_str(),
-                    d.support.len() + d.support_missing.len() + d.attackers.len(),
-                )
-            })
+        // Least fixed point of the in/out rules, by counting. A label, once
+        // given, is final: the rules are monotone and their conditions for in
+        // and for out cannot both hold. A missing support parent is never in
+        // and never out.
+        #[derive(Default, Clone, Copy)]
+        struct Tally {
+            support_in: usize,
+            support_out: usize,
+            attackers_out: usize,
+            attacker_in: bool,
+        }
+        let decide = |d: &Deps, t: &Tally| -> Option<Label> {
+            let total = d.support.len() + d.support_missing.len();
+            let fallen = match policy.support {
+                SupportRule::All => t.support_out > 0,
+                SupportRule::Any => total > 0 && t.support_out == total,
+            };
+            let stands = match policy.support {
+                SupportRule::All => t.support_in == total,
+                SupportRule::Any => total == 0 || t.support_in > 0,
+            };
+            if t.attacker_in || fallen {
+                Some(Label::Out)
+            } else if stands && t.attackers_out == d.attackers.len() {
+                Some(Label::In)
+            } else {
+                None
+            }
+        };
+        let mut tally: BTreeMap<&str, Tally> = deps
+            .keys()
+            .map(|c| (c.as_str(), Tally::default()))
             .collect();
         let mut labels: BTreeMap<String, Label> = BTreeMap::new();
         let mut queue: VecDeque<&str> = VecDeque::new();
-        for (cid, n) in &need {
-            if *n == 0 {
-                labels.insert(cid.to_string(), Label::In);
+        for (cid, d) in &deps {
+            if let Some(label) = decide(d, &tally[cid.as_str()]) {
+                labels.insert(cid.clone(), label);
                 queue.push_back(cid);
             }
         }
         while let Some(cid) = queue.pop_front() {
-            let (defeated, satisfied) = match labels[cid] {
-                // An in node defeats what it attacks and satisfies what it supports.
-                Label::In => (attacks.get(cid), supports.get(cid)),
-                // An out node takes down what it supports and frees what it attacks.
-                Label::Out => (supports.get(cid), attacks.get(cid)),
-                Label::Contested | Label::Unknown => unreachable!("only in/out are queued"),
-            };
-            for target in defeated.into_iter().flatten() {
-                if !labels.contains_key(*target) {
-                    labels.insert(target.to_string(), Label::Out);
-                    queue.push_back(target);
+            let label = labels[cid];
+            for target in supports.get(cid).into_iter().flatten() {
+                let t = tally.get_mut(target).unwrap();
+                match label {
+                    Label::In => t.support_in += 1,
+                    Label::Out => t.support_out += 1,
+                    Label::Contested | Label::Unknown => unreachable!("only in/out are queued"),
                 }
             }
-            for target in satisfied.into_iter().flatten() {
-                let n = need.get_mut(target).unwrap();
-                *n -= 1;
-                if *n == 0 && !labels.contains_key(*target) {
-                    labels.insert(target.to_string(), Label::In);
+            for target in attacks.get(cid).into_iter().flatten() {
+                let t = tally.get_mut(target).unwrap();
+                match label {
+                    Label::In => t.attacker_in = true,
+                    Label::Out => t.attackers_out += 1,
+                    Label::Contested | Label::Unknown => unreachable!("only in/out are queued"),
+                }
+            }
+            let touched = supports
+                .get(cid)
+                .into_iter()
+                .flatten()
+                .chain(attacks.get(cid).into_iter().flatten());
+            for target in touched {
+                if labels.contains_key(*target) {
+                    continue;
+                }
+                if let Some(next) = decide(&deps[*target], &tally[target]) {
+                    labels.insert(target.to_string(), next);
                     queue.push_back(target);
                 }
             }
         }
 
-        // Among the unsettled, an evidence gap spreads to whatever depends on it.
+        // Among the unsettled, an evidence gap spreads to whatever depends on
+        // it, through dependencies that could still change the outcome. An
+        // attacker always could. Under `all` every support parent could; under
+        // `any`, none can once some support parent is in, because the node's
+        // support already stands and only its attackers keep it unsettled.
+        let support_open = |cid: &str| match policy.support {
+            SupportRule::All => true,
+            SupportRule::Any => tally[cid].support_in == 0,
+        };
         let mut gap: VecDeque<&str> = deps
             .iter()
-            .filter(|(cid, d)| !labels.contains_key(*cid) && !d.support_missing.is_empty())
+            .filter(|(cid, d)| {
+                !labels.contains_key(*cid) && !d.support_missing.is_empty() && support_open(cid)
+            })
             .map(|(cid, _)| cid.as_str())
             .collect();
         for cid in &gap {
             labels.insert(cid.to_string(), Label::Unknown);
         }
         while let Some(cid) = gap.pop_front() {
-            let dependents = supports
+            let through_support = supports
                 .get(cid)
                 .into_iter()
                 .flatten()
-                .chain(attacks.get(cid).into_iter().flatten());
+                .filter(|target| support_open(target));
+            let through_attack = attacks.get(cid).into_iter().flatten();
+            let dependents: Vec<&str> = through_support.chain(through_attack).copied().collect();
             for target in dependents {
-                if !labels.contains_key(*target) {
+                if !labels.contains_key(target) {
                     labels.insert(target.to_string(), Label::Unknown);
                     gap.push_back(target);
                 }
@@ -305,6 +445,8 @@ pub struct NodeLabel {
     pub attackers: Vec<String>,
     /// The attackers that are `in`: the ones that defeat this node.
     pub attackers_in: Vec<String>,
+    /// Nodes with a `refutes` link here that the policy does not count.
+    pub attackers_ignored: Vec<String>,
     /// Dependencies that are `contested` or `unknown`.
     pub unsettled: Vec<String>,
 }
@@ -333,6 +475,7 @@ pub struct LabelReport {
     /// `closure` (the roots and their ancestors) or `store` (every node).
     pub scope: &'static str,
     pub roots: Vec<String>,
+    pub policy: PolicyRecord,
     /// False when any support parent is missing: some statuses are `unknown`.
     pub complete: bool,
     pub counts: LabelCounts,
@@ -363,8 +506,8 @@ fn claim_label(labels: impl Iterator<Item = Label>) -> Label {
     }
 }
 
-fn build_report(world: &World, scope: &'static str, roots: &[Cid]) -> LabelReport {
-    let labelling = Labelling::of(world);
+fn build_report(world: &World, scope: &'static str, roots: &[Cid], policy: &Policy) -> LabelReport {
+    let labelling = Labelling::of(world, policy);
     let mut counts = LabelCounts::default();
     let mut missing: BTreeSet<String> = BTreeSet::new();
     let mut by_output: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -401,6 +544,7 @@ fn build_report(world: &World, scope: &'static str, roots: &[Cid]) -> LabelRepor
             support_missing: deps.support_missing.iter().cloned().collect(),
             attackers: deps.attackers.iter().cloned().collect(),
             attackers_in: with(&deps.attackers, &[Label::In]),
+            attackers_ignored: deps.attackers_ignored.iter().cloned().collect(),
             unsettled,
         });
     }
@@ -420,6 +564,7 @@ fn build_report(world: &World, scope: &'static str, roots: &[Cid]) -> LabelRepor
         schema: LABEL_SCHEMA,
         scope,
         roots,
+        policy: policy.into(),
         complete: missing.is_empty(),
         counts,
         missing: missing.into_iter().collect(),
@@ -429,13 +574,18 @@ fn build_report(world: &World, scope: &'static str, roots: &[Cid]) -> LabelRepor
 }
 
 /// Label the roots and everything they rest on.
-pub fn label(dag: &Dag, roots: &[Cid]) -> Result<LabelReport, LabelError> {
-    Ok(build_report(&World::closure(dag, roots)?, "closure", roots))
+pub fn label(dag: &Dag, roots: &[Cid], policy: &Policy) -> Result<LabelReport, LabelError> {
+    Ok(build_report(
+        &World::closure(dag, roots)?,
+        "closure",
+        roots,
+        policy,
+    ))
 }
 
 /// Label every DAG node in the store.
-pub fn label_store(dag: &Dag) -> Result<LabelReport, LabelError> {
-    Ok(build_report(&World::all(dag)?, "store", &[]))
+pub fn label_store(dag: &Dag, policy: &Policy) -> Result<LabelReport, LabelError> {
+    Ok(build_report(&World::all(dag)?, "store", &[], policy))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -464,6 +614,7 @@ pub struct ConsistencyReport {
     pub schema: &'static str,
     pub a_roots: Vec<String>,
     pub b_roots: Vec<String>,
+    pub policy: PolicyRecord,
     /// True when neither view changes any status in the other.
     pub consistent: bool,
     /// False when the combined view has a missing support parent.
@@ -534,13 +685,18 @@ fn because(side: &Labelling, union: &Labelling, start: &str) -> Vec<String> {
 
 /// Whether two views agree: label each alone and both together, and report
 /// every node whose status the combination changes.
-pub fn consistency(dag: &Dag, a: &[Cid], b: &[Cid]) -> Result<ConsistencyReport, LabelError> {
+pub fn consistency(
+    dag: &Dag,
+    a: &[Cid],
+    b: &[Cid],
+    policy: &Policy,
+) -> Result<ConsistencyReport, LabelError> {
     let world_a = World::closure(dag, a)?;
     let world_b = World::closure(dag, b)?;
     let world_u = world_a.union(&world_b);
-    let label_a = Labelling::of(&world_a);
-    let label_b = Labelling::of(&world_b);
-    let label_u = Labelling::of(&world_u);
+    let label_a = Labelling::of(&world_a, policy);
+    let label_b = Labelling::of(&world_b, policy);
+    let label_u = Labelling::of(&world_u, policy);
 
     let mut flips = Vec::new();
     for (side, labelling) in [(Side::A, &label_a), (Side::B, &label_b)] {
@@ -569,6 +725,7 @@ pub fn consistency(dag: &Dag, a: &[Cid], b: &[Cid]) -> Result<ConsistencyReport,
         schema: CONSISTENCY_SCHEMA,
         a_roots: roots(a),
         b_roots: roots(b),
+        policy: policy.into(),
         consistent: flips.is_empty(),
         complete: label_u.deps.values().all(|d| d.support_missing.is_empty()),
         a_nodes: world_a.len(),
